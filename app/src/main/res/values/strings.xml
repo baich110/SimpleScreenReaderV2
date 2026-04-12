@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SimpleScreenReader</string>
+    <string name="service_name">Simple Screen Reader V2</string>
+    <string name="service_description">基于TalkBack Pipeline架构的高性能读屏服务</string>
+</resources>
