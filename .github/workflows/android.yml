@@ -20,13 +20,13 @@ jobs:
         jpava-version: '17'
         distribution: 'temurin'
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
+    - name: Create Gradle Wrapper
+      run: sudo arcv -f gradle wrapper --gradle-version 8.4
 
     - name: Build with Gradle
       run: ./gradlew assembleDebug --no-daemon
 
-    - name:"Upload APK
+    - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: app-debug
