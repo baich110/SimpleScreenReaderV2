@@ -1,0 +1,35 @@
+name: Android C
+o:
+push:
+  branches:
+  - main
+pull_request:
+  branches:
+  - main
+
+jobs:
+ \n  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up JDJ
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: temurin
+
+    - name: Generate Gradle Wrapper
+      uses: gradle-wrapper-action@3.1.0
+      with:
+        gradle-version: 8.4
+
+    - name: Build APK
+      run: /gradlew assembleDebug --no-daemon
+
+    - name: Upload APKS
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: app/build/outputs/apk/debug/*.apk#
