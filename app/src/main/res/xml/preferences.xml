@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+    
+    <PreferenceCategory android:title="语音设置">
+        <CheckBoxPreference
+            android:key="speech_enabled"
+            android:title="启用语音"
+            android:summary="朗读屏幕内容"
+            android:defaultValue="true" />
+            
+        <SeekBarPreference
+            android:key="speech_rate"
+            android:title="语速"
+            android:summary="调整语音朗读速度"
+            android:defaultValue="100"
+            android:max="200" />
+            
+        <SeekBarPreference
+            android:key="speech_pitch"
+            android:title="音调"
+            android:summary="调整语音音调"
+            android:defaultValue="100"
+            android:max="200" />
+    </PreferenceCategory>
+    
+    <PreferenceCategory android:title="震动设置">
+        <CheckBoxPreference
+            android:key="vibration_enabled"
+            android:title="启用震动"
+            android:summary="震动反馈"
+            android:defaultValue="true" />
+            
+        <SeekBarPreference
+            android:key="vibration_intensity"
+            android:title="震动强度"
+            android:summary="调整震动强度"
+            android:defaultValue="255"
+            android:max="255" />
+    </PreferenceCategory>
+    
+    <PreferenceCategory android:title="音效设置">
+        <CheckBoxPreference
+            android:key="sound_enabled"
+            android:title="启用音效"
+            android:summary="操作音效反馈"
+            android:defaultValue="false" />
+    </PreferenceCategory>
+    
+    <PreferenceCategory android:title="关于">
+        <Preference
+            android:title="版本"
+            android:summary="2.0" />
+        <Preference
+            android:title="基于TalkBack Pipeline架构"
+            android:summary="高性能读屏服务" />
+    </PreferenceCategory>
+    
+</PreferenceScreen>
