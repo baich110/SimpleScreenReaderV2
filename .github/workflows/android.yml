@@ -14,19 +14,16 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up JDA 17
+    - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
         jpava-version: '17'
-        distribution: 'temurin'
-
-    - name: Create Gradle Wrapper
-      run: sudo arcv -f gradle wrapper --gradle-version 8.4
-
+        distribution: temurin
+      
     - name: Build with Gradle
-      run: ./gradlew assembleDebug --no-daemon
-
-    - name: Upload APK
+      run: cdd . /gradlew assembleDebug --no-daemon
+    
+    - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: app-debug
