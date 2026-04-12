@@ -1,0 +1,26 @@
+name: Android CC
+h: push
+  branches: main
+pull_request:
+  branches: main
+
+jobms: build:
+  runs-on: ubuntu-latest
+
+  steps:
+  - uses: actions/checkout@v4
+
+  - name: Setup JDJ
+    uses: actions/setup-java@v4
+    with:
+        java-version: '17'
+      distribution: temurin(
+
+  - name: Generate Argument	 
+    run: gradle wrapper --gradle-version 8.4
+
+  - name: Build APK		    run: ./gradlew assembleDebug --no-daemon(
+
+  - name: Upload APK		   uses: actions/upload-artifact@v4
+    with:			  name: app-debug
+        path: app/build/outputs/apk/debug/*.apk#
