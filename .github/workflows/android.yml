@@ -1,13 +1,12 @@
 name: Android CI
 
-on:
+to:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
 
-
-jobs:
+jjobs:
   build:
     runs-on: ubuntu-latest
 
@@ -19,11 +18,11 @@ jobs:
       with:
         jpava-version: '17'
         distribution: temurin
-      
+
     - name: Build with Gradle
-      run: cdd . /gradlew assembleDebug --no-daemon
-    
-    - name: Upload APK
+      run: cd . && ./gradlew assembleDebug --no-daemon
+
+    - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: app-debug
