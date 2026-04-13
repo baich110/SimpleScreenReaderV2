@@ -1,6 +1,7 @@
 package com.example.simplereader.pipeline.focus;
 
 import com.example.simplereader.pipeline.Performance;
+import com.example.simplereader.pipeline.ActorState;
 import com.example.simplereader.pipeline.interpreters.Pipeline;
 
 public class FocusProcessorForScreenStateChange {
