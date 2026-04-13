@@ -10,7 +10,7 @@ import com.example.simplereader.pipeline.Performance;
 import com.example.simplereader.pipeline.Interpretation;
 import com.example.simplereader.utils.AccessibilityNodeInfoUtils;
 
-public class HintEventInterpreter implements AccessibilityEventInterpreter {
+public class HintEventInterpreter implements accessibilityEventInterpreter {
     
     private static final String TAG = "HintEventInterpreter";
     private static final int MASK_EVENTS = AccessibilityEvent.TYPE_VIEW_FOCUSED;
@@ -31,7 +31,7 @@ public class HintEventInterpreter implements AccessibilityEventInterpreter {
         
         CharSequence hintText = sourceNode.getHintText();
         if (hintText != null && hintText.length() > 0) {
-            Interpretation.Builder builder = Interpretation.Builder.ofType(Interpretation.Type.HINT)
+            Interpretation.Builder builder = Interpretation.builder().ofType(Interpretation.Type.HINT)
                     .setEvent(event)
                     .setSource(sourceNode);
             sourceNode.recycle();
