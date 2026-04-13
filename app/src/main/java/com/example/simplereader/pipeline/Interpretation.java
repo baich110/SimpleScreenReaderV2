@@ -18,7 +18,7 @@ public class Interpretation {
     private final Object tag;
     private final AccessibilityEvent event;
     private final AccessibilityNodeInfoCompat sourceNode;
-    private final Performance.EventId eventId;
+    private final EventId eventId;
     
     private Interpretation() {
         this.tag = null;
@@ -37,7 +37,7 @@ public class Interpretation {
     public Object tag() { return tag; }
     public AccessibilityEvent event() { return event; }
     public AccessibilityNodeInfoCompat sourceNode() { return sourceNode; }
-    public Performance.EventId eventId() { return eventId; }
+    public EventId eventId() { return eventId; }
     
     public static class AccessibilityFocused extends Interpretation {
         public AccessibilityFocused() { super(); }
@@ -91,14 +91,14 @@ public class Interpretation {
         private Object tag;
         private AccessibilityEvent event;
         private AccessibilityNodeInfoCompat sourceNode;
-        private Performance.EventId eventId;
+        private EventId eventId;
         private Type type;
         
         public Builder ofType(Type type) { this.type = type; this.tag = type.name(); return this; }
         public Builder setTag(Object tag) { this.tag = tag; return this; }
         public Builder setEvent(AccessibilityEvent event) { this.event = event; return this; }
         public Builder setSource(AccessibilityNodeInfoCompat sourceNode) { this.sourceNode = sourceNode; return this; }
-        public Builder setEventId(Performance.EventId eventId) { this.eventId = eventId; return this; }
+        public Builder setEventId(EventId eventId) { this.eventId = eventId; return this; }
         public Builder setAccessibilityFocused(boolean focused) { return this; }
         public Builder setDirection(int direction) { return this; }
         public Builder setGranularitySelection(int granularity) { return this; }
