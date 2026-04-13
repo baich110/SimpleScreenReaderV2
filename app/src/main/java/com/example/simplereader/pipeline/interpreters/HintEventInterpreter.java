@@ -31,7 +31,7 @@ public class HintEventInterpreter implements AccessibilityEventInterpreter {
         
         CharSequence hintText = sourceNode.getHintText();
         if (hintText != null && hintText.length() > 0) {
-            Interpretation.Builder builder = Interpretation.builder().ofType(Interpretation.Type.HINT)
+            Interpretation.Builder builder = Interpretation.Builder.ofType(Interpretation.Type.HINT)
                     .setEvent(event)
                     .setSource(sourceNode);
             sourceNode.recycle();
