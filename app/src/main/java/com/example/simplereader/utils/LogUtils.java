@@ -1,6 +1,3 @@
-/*
- * LogUtils - 日志工具
- */
 package com.example.simplereader.utils;
 
 public class LogUtils {
