@@ -1,7 +1,7 @@
 package com.example.simplereader.pipeline.feedback;
 
 import android.os.Bundle;
-import android.speech.tts.SpeakngOptions;
+import android.speech.tts.SpeakOptions;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import com.example.simplereader.pipeline.Interpretation;
@@ -55,7 +55,7 @@ public class Feedback {
         return new Part.Builder();
     }
     
-    public static Part.Builder speech(CharSequence text, SpeakngOptions options) {
+    public static Part.Builder speech(CharSequence text, SpeakOptions options) {
         return part().setSpeech(text, options);
     }
     
@@ -168,7 +168,7 @@ public class Feedback {
             public Builder setSenderName(String name) { this.senderName = name; return this; }
             
             // 反馈类型设置
-            public Builder setSpeech(CharSequence text, SpeakngOptions options) {
+            public Builder setSpeech(CharSequence text, SpeakOptions options) {
                 this.speech = new SpeechPart(text, options);
                 return this;
             }
@@ -249,12 +249,12 @@ public class Feedback {
     /** 语音反馈 */
     public static class SpeechPart {
         private final CharSequence text;
-        private final SpeakngOptions options;
+        private final SpeakOptions options;
         private final Action action;
         
         public enum Action { SPEAK, PAUSE_OR_RESUME, SILENCE, UNSILENCE, TOGGLE_VOICE_FEEDBACK, SAVE_LAST, COPY_SAVED, REPEAT_SAVED, SPELL_SAVED }
         
-        public SpeechPart(CharSequence text, SpeakngOptions options) {
+        public SpeechPart(CharSequence text, SpeakOptions options) {
             this.text = text;
             this.options = options;
             this.action = Action.SPEAK;
@@ -267,7 +267,7 @@ public class Feedback {
         }
         
         public CharSequence text() { return text; }
-        public SpeakngOptions options() { return options; }
+        public SpeakOptions options() { return options; }
         public Action action() { return action; }
     }
     
