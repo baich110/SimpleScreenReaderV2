@@ -1,14 +1,11 @@
 package com.example.simplereader.pipeline.feedback;
 
 import com.example.simplereader.pipeline.Performance;
-import androidx.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 
 public class Feedback {
     public static final int DEFAULT = 0;
-    public static final int FLAG_NO_QUEUE = 1;
-    
     private final Performance.EventId eventId;
     private final List<Part> parts;
 
@@ -22,23 +19,17 @@ public class Feedback {
     }
 
     public static Feedback create(Performance.EventId eventId, Part... parts) {
-        Builder b = builder(eventId);
+        Builder builder = builder(eventId);
         for (Part part : parts) {
-            b.addPart(part);
+            builder.addPart(part);
         }
-        return b.build();
-    }
-
-    public static Feedback empty() {
-        return builder(null).build();
+        return builder.build();
     }
 
     @Nullable
     public Performance.EventId eventId() { return eventId; }
 
     public List<Part> failovers() { return parts; }
-    
-    public List<Part> getParts() { return parts; }
 
     public static Part.Builder part() { return new Part.Builder(); }
 
@@ -51,17 +42,6 @@ public class Feedback {
     }
 
     public static class Part {
-        public static final int SPEECH = 0;
-        public static final int VIBRATION = 1;
-        public static final int SOUND = 2;
-        public static final int FOCUS = 3;
-        public static final int EDIT = 4;
-        public static final int GRANULARITY = 5;
-        public static final int NODE_ACTION = 6;
-        public static final int SCROLL = 7;
-        public static final int CONTINUOUS_READ = 8;
-        public static final int DIM_SCREEN = 9;
-        
         private final int delayMs;
         private final int interruptGroup;
         private final int interruptLevel;
@@ -70,8 +50,6 @@ public class Feedback {
         private final boolean interruptGentle;
         private final boolean stopTts;
         private final String senderName;
-        private final String utteranceId;
-        private final int flags;
         
         private final SpeechPart speech;
         private final SoundPart sound;
@@ -93,8 +71,6 @@ public class Feedback {
             this.interruptGentle = builder.interruptGentle;
             this.stopTts = builder.stopTts;
             this.senderName = builder.senderName;
-            this.utteranceId = builder.utteranceId;
-            this.flags = builder.flags;
             this.speech = builder.speech;
             this.sound = builder.sound;
             this.vibration = builder.vibration;
@@ -107,26 +83,6 @@ public class Feedback {
             this.dimScreen = builder.dimScreen;
         }
         
-        public int getType() {
-            if (speech != null) return SPEECH;
-            if (vibration != null) return VIBRATION;
-            if (sound != null) return SOUND;
-            if (focus != null) return FOCUS;
-            if (edit != null) return EDIT;
-            if (granularity != null) return GRANULARITY;
-            if (nodeAction != null) return NODE_ACTION;
-            if (scroll != null) return SCROLL;
-            if (continuousRead != null) return CONTINUOUS_READ;
-            if (dimScreen != null) return DIM_SCREEN;
-            return SPEECH;
-        }
-        
-        @Nullable public CharSequence getText() { return speech != null ? speech.text() : null; }
-        public int getDuration() { return vibration != null ? vibration.resourceId() : 0; }
-        public int getSoundId() { return sound != null ? sound.resourceId() : 0; }
-        public String getUtteranceId() { return utteranceId; }
-        public int getFlags() { return flags; }
-        
         public int delayMs() { return delayMs; }
         public int interruptGroup() { return interruptGroup; }
         public int interruptLevel() { return interruptLevel; }
@@ -135,7 +91,7 @@ public class Feedback {
         public boolean interruptGentle() { return interruptGentle; }
         public boolean stopTts() { return stopTts; }
         public String senderName() { return senderName; }
-
+        
         @Nullable public SpeechPart speech() { return speech; }
         @Nullable public SoundPart sound() { return sound; }
         @Nullable public VibrationPart vibration() { return vibration; }
@@ -146,7 +102,7 @@ public class Feedback {
         @Nullable public ScrollPart scroll() { return scroll; }
         @Nullable public ContinuousReadPart continuousRead() { return continuousRead; }
         @Nullable public DimScreenPart dimScreen() { return dimScreen; }
-
+        
         public static class Builder {
             private final Performance.EventId eventId;
             private int delayMs = 0;
@@ -157,8 +113,6 @@ public class Feedback {
             private boolean interruptGentle = false;
             private boolean stopTts = false;
             private String senderName = "";
-            private String utteranceId = null;
-            private int flags = 0;
             
             private SpeechPart speech = null;
             private SoundPart sound = null;
@@ -171,7 +125,6 @@ public class Feedback {
             private ContinuousReadPart continuousRead = null;
             private DimScreenPart dimScreen = null;
             
-            public Builder() { this.eventId = null; }
             public Builder(Performance.EventId eventId) { this.eventId = eventId; }
             public Builder setDelayMs(int delayMs) { this.delayMs = delayMs; return this; }
             public Builder setInterruptGroup(int group) { this.interruptGroup = group; return this; }
@@ -180,8 +133,6 @@ public class Feedback {
             public Builder setInterruptSoundAndVibration(boolean interrupt) { this.interruptSoundAndVibration = interrupt; return this; }
             public Builder setStopTts(boolean stop) { this.stopTts = stop; return this; }
             public Builder setSenderName(String name) { this.senderName = name; return this; }
-            public Builder setUtteranceId(String utteranceId) { this.utteranceId = utteranceId; return this; }
-            public Builder setFlags(int flags) { this.flags = flags; return this; }
             public Builder setSpeech(CharSequence text, Object options) { this.speech = new SpeechPart(text, options); return this; }
             public Builder setSound(int resourceId, float rate, float volume) { this.sound = new SoundPart(resourceId, rate, volume); return this; }
             public Builder setVibration(int resourceId) { this.vibration = new VibrationPart(resourceId); return this; }
@@ -195,7 +146,7 @@ public class Feedback {
             public Part build() { return new Part(this); }
         }
     }
-
+    
     public static class Builder {
         private final Performance.EventId eventId;
         private final List<Part> parts = new ArrayList<>();
@@ -203,7 +154,7 @@ public class Feedback {
         public Builder addPart(Part part) { parts.add(part); return this; }
         public Feedback build() { return new Feedback(this); }
     }
-
+    
     public static class SpeechPart {
         private final CharSequence text;
         private final Object options;
@@ -217,7 +168,7 @@ public class Feedback {
         public Object options() { return options; }
         public Action action() { return action; }
     }
-
+    
     public static class SoundPart {
         private final int resourceId;
         private final float rate;
@@ -227,13 +178,13 @@ public class Feedback {
         public float rate() { return rate; }
         public float volume() { return volume; }
     }
-
+    
     public static class VibrationPart {
         private final int resourceId;
         public VibrationPart(int resourceId) { this.resourceId = resourceId; }
         public int resourceId() { return resourceId; }
     }
-
+    
     public static class FocusPart {
         public enum Action { CLICK_NODE, CLEAR_FOCUS, SET_FOCUS, LONG_CLICK }
         private final Action action;
@@ -242,7 +193,7 @@ public class Feedback {
         public Action action() { return action; }
         public Object node() { return node; }
     }
-
+    
     public static class EditPart {
         public enum Action { SELECT_ALL, COPY, CUT, PASTE, START_SELECT, END_SELECT }
         private final Action action;
@@ -251,13 +202,13 @@ public class Feedback {
         public Action action() { return action; }
         public Object node() { return node; }
     }
-
+    
     public static class GranularityPart {
         private final Object granularity;
         public GranularityPart(Object granularity) { this.granularity = granularity; }
         public Object granularity() { return granularity; }
     }
-
+    
     public static class NodeActionPart {
         private final Object node;
         private final int actionId;
@@ -265,7 +216,7 @@ public class Feedback {
         public Object node() { return node; }
         public int actionId() { return actionId; }
     }
-
+    
     public static class ScrollPart {
         private final Object node;
         private final int action;
@@ -273,14 +224,14 @@ public class Feedback {
         public Object node() { return node; }
         public int action() { return action; }
     }
-
+    
     public static class ContinuousReadPart {
         public enum Action { START_AT_TOP, START_AT_CURSOR, READ_FOCUSED_CONTENT, INTERRUPT, IGNORE, PAUSE_OR_RESUME }
         private final Action action;
         public ContinuousReadPart(Action action) { this.action = action; }
         public Action action() { return action; }
     }
-
+    
     public static class DimScreenPart {
         public enum Action { DIM, BRIGHTEN }
         private final Action action;
