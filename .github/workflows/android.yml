@@ -22,13 +22,11 @@ jobs:
           cache: gradle
 
       - name: Build with Gradle
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --info 2>&1 | tail -100
+        run: ./gradlew assembleDebug --no-daemon
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
-        if: success()
         with:
           name: debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 5
