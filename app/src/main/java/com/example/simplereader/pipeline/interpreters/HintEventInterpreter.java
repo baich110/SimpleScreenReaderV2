@@ -10,7 +10,7 @@ import com.example.simplereader.pipeline.Performance;
 import com.example.simplereader.pipeline.Interpretation;
 import com.example.simplereader.utils.AccessibilityNodeInfoUtils;
 
-public class HintEventInterpreter implements accessibilityEventInterpreter {
+public class HintEventInterpreter implements AccessibilityEventInterpreter {
     
     private static final String TAG = "HintEventInterpreter";
     private static final int MASK_EVENTS = AccessibilityEvent.TYPE_VIEW_FOCUSED;
