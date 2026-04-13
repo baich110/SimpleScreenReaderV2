@@ -2,14 +2,17 @@ package com.example.simplereader.pipeline;
 
 import android.os.SystemClock;
 
-/**
- * 性能监控 - 抄自TalkBack Performance
- * 
- * EventId用于追踪事件性能，便于优化
- */
 public class Performance {
     
-    /** 事件ID，用于追踪性能 */
+    private static Performance instance;
+    
+    public static Performance getInstance() {
+        if (instance == null) {
+            instance = new Performance();
+        }
+        return instance;
+    }
+    
     public static class EventId {
         private final long uptimeMs;
         private final int eventType;
@@ -41,21 +44,20 @@ public class Performance {
         }
         
         @Override
-        public int hashCode() {
-            return count;
-        }
+        public int hashCode() { return count; }
     }
     
-    /** 生成未跟踪的事件ID */
     public static final EventId EVENT_ID_UNTRACKED = null;
     
-    /** 获取当前时间戳 */
     public static long currentTimeMs() {
         return SystemClock.uptimeMillis();
     }
     
-    /** 创建事件ID */
     public static EventId getEventId(int eventType) {
         return new EventId(eventType);
+    }
+    
+    public EventId onEventReceived(android.view.accessibility.AccessibilityEvent event) {
+        return new EventId(event.getEventType());
     }
 }
