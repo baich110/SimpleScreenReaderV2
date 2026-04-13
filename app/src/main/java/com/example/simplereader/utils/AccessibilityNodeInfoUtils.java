@@ -1,6 +1,3 @@
-/*
- * AccessibilityNodeInfoUtils - 无障碍节点工具类
- */
 package com.example.simplereader.utils;
 
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -8,7 +5,6 @@ import androidx.annotation.Nullable;
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 
 public class AccessibilityNodeInfoUtils {
-    
     public static AccessibilityNodeInfoCompat toCompat(@Nullable AccessibilityNodeInfo node) {
         if (node == null) return null;
         return AccessibilityNodeInfoCompat.wrap(node);
@@ -25,13 +21,10 @@ public class AccessibilityNodeInfoUtils {
     }
     
     public static AccessibilityNodeInfoCompat findFocusFromHover(AccessibilityNodeInfoCompat node) {
-        if (node == null) return null;
         return node;
     }
     
     public static void recycle(AccessibilityNodeInfoCompat node) {
-        if (node != null) {
-            node.recycle();
-        }
+        if (node != null) node.recycle();
     }
 }
