@@ -4,8 +4,7 @@ import android.view.accessibility.AccessibilityEvent;
 import com.example.simplereader.pipeline.ActorState;
 import com.example.simplereader.pipeline.Performance;
 import com.example.simplereader.pipeline.Interpretation;
-import com.example.simplereader.utils.FocusFinder;
-import com.example.simplereader.utils.GlobalVariables;
+import com.example.simplereader.pipeline.GlobalVariables;
 import com.example.simplereader.utils.input.InputModeTracker;
 import com.example.simplereader.utils.input.TouchMonitor;
 
@@ -23,12 +22,12 @@ public class Interpreters {
     private Pipeline.InterpretationReceiver pipelineReceiver;
     
     public Interpreters(android.content.Context context) {
-        FocusFinder focusFinder = new FocusFinder();
         GlobalVariables globalVariables = new GlobalVariables();
         com.example.simplereader.pipeline.InterpreterDependencies dependencies = new com.example.simplereader.pipeline.InterpreterDependencies();
         
         TouchMonitor touchMonitor = new TouchMonitor();
         InputModeTracker inputModeTracker = new InputModeTracker();
+        com.example.simplereader.utils.FocusFinder focusFinder = new com.example.simplereader.utils.FocusFinder();
         
         inputFocusInterpreter = new InputFocusInterpreter(focusFinder, globalVariables, dependencies);
         accessibilityFocusInterpreter = new AccessibilityFocusInterpreter(context, null, null, null);
