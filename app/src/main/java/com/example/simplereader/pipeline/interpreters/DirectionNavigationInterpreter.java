@@ -37,7 +37,7 @@ public class DirectionNavigationInterpreter implements AccessibilityEventInterpr
         if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED) {
             AccessibilityNodeInfoCompat node = AccessibilityNodeInfoCompat.wrap(event.getSource());
             if (node != null) {
-                Interpretation.Builder builder = Interpretation.Builder.ofType(Interpretation.Type.DIRECTION_NAVIGATION)
+                Interpretation.Builder builder = Interpretation.builder().ofType(Interpretation.Type.DIRECTION_NAVIGATION)
                         .setEvent(event)
                         .setSource(node)
                         .setDirection(lastDirection);
