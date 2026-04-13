@@ -37,6 +37,8 @@ public class Feedback {
     public Performance.EventId eventId() { return eventId; }
 
     public List<Part> failovers() { return parts; }
+    
+    public List<Part> getParts() { return parts; }
 
     public static Part.Builder part() { return new Part.Builder(); }
 
@@ -49,6 +51,18 @@ public class Feedback {
     }
 
     public static class Part {
+        // Backward compatible constants
+        public static final int SPEECH = 0;
+        public static final int VIBRATION = 1;
+        public static final int SOUND = 2;
+        public static final int FOCUS = 3;
+        public static final int EDIT = 4;
+        public static final int GRANULARITY = 5;
+        public static final int NODE_ACTION = 6;
+        public static final int SCROLL = 7;
+        public static final int CONTINUOUS_READ = 8;
+        public static final int DIM_SCREEN = 9;
+        
         public enum Type { SPEECH, VIBRATION, SOUND, FOCUS, EDIT, GRANULARITY, NODE_ACTION, SCROLL, CONTINUOUS_READ, DIM_SCREEN }
         
         private final int delayMs;
@@ -96,18 +110,18 @@ public class Feedback {
             this.dimScreen = builder.dimScreen;
         }
         
-        public Type getType() {
-            if (speech != null) return Type.SPEECH;
-            if (vibration != null) return Type.VIBRATION;
-            if (sound != null) return Type.SOUND;
-            if (focus != null) return Type.FOCUS;
-            if (edit != null) return Type.EDIT;
-            if (granularity != null) return Type.GRANULARITY;
-            if (nodeAction != null) return Type.NODE_ACTION;
-            if (scroll != null) return Type.SCROLL;
-            if (continuousRead != null) return Type.CONTINUOUS_READ;
-            if (dimScreen != null) return Type.DIM_SCREEN;
-            return Type.SPEECH;
+        public int getType() {
+            if (speech != null) return SPEECH;
+            if (vibration != null) return VIBRATION;
+            if (sound != null) return SOUND;
+            if (focus != null) return FOCUS;
+            if (edit != null) return EDIT;
+            if (granularity != null) return GRANULARITY;
+            if (nodeAction != null) return NODE_ACTION;
+            if (scroll != null) return SCROLL;
+            if (continuousRead != null) return CONTINUOUS_READ;
+            if (dimScreen != null) return DIM_SCREEN;
+            return SPEECH;
         }
         
         @Nullable public CharSequence getText() { return speech != null ? speech.text() : null; }
