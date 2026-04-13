@@ -11,29 +11,46 @@ public class FeedbackBuilder {
     }
 
     public FeedbackBuilder buildFeedback(int type, String text) {
-        currentBuilder = new Feedback.Part.Builder(type);
-        currentBuilder.setText(text);
+        currentBuilder = new Feedback.Part.Builder();
+        switch (type) {
+            case Feedback.Part.SPEECH:
+                currentBuilder.setSpeech(text, null);
+                break;
+            default:
+                break;
+        }
         return this;
     }
 
     public FeedbackBuilder buildFeedback(int type, int duration) {
-        currentBuilder = new Feedback.Part.Builder(type);
-        currentBuilder.setDuration(duration);
+        currentBuilder = new Feedback.Part.Builder();
+        switch (type) {
+            case Feedback.Part.VIBRATION:
+                currentBuilder.setVibration(duration);
+                break;
+            default:
+                break;
+        }
         return this;
     }
 
     public FeedbackBuilder buildFeedback(int type, int soundId, String text) {
-        currentBuilder = new Feedback.Part.Builder(type);
-        currentBuilder.setSoundId(soundId);
-        currentBuilder.setText(text);
+        currentBuilder = new Feedback.Part.Builder();
+        switch (type) {
+            case Feedback.Part.SOUND:
+                currentBuilder.setSound(soundId, 1.0f, 1.0f);
+                break;
+            default:
+                break;
+        }
         return this;
     }
 
     public Feedback build() {
         if (currentBuilder == null) {
-            return Feedback.empty();
+            return Feedback.create(null);
         }
         Feedback.Part part = currentBuilder.build();
-        return new Feedback(part);
+        return Feedback.create(null, part);
     }
 }
