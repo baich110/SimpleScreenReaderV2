@@ -29,6 +29,10 @@ public class Feedback {
         return b.build();
     }
 
+    public static Feedback empty() {
+        return builder(null).build();
+    }
+
     @Nullable
     public Performance.EventId eventId() { return eventId; }
 
