@@ -24,7 +24,7 @@ public class Mappers {
             @Nullable AccessibilityEvent event,
             @Nullable Interpretation interpretation,
             @Nullable AccessibilityNodeInfoCompat sourceNode) {
-        if (interpretation == null || interpretation == Interpretation.NO_CHANGE) return null;
+        if (interpretation == null || interpretation == Interpretation.EMPTY) return null;
         Object tag = interpretation.tag();
         if (tag == null) return null;
         String tagStr = tag.toString();
