@@ -48,7 +48,7 @@ public class FeedbackBuilder {
 
     public Feedback build() {
         if (currentBuilder == null) {
-            return Feedback.empty();
+            return Feedback.create(null);
         }
         Feedback.Part part = currentBuilder.build();
         return Feedback.create(null, part);
