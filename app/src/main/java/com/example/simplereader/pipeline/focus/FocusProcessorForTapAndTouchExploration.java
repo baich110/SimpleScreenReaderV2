@@ -3,6 +3,7 @@ package com.example.simplereader.pipeline.focus;
 import android.content.Context;
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 import com.example.simplereader.pipeline.Performance;
+import com.example.simplereader.pipeline.ActorState;
 import com.example.simplereader.pipeline.interpreters.Pipeline;
 import com.example.simplereader.pipeline.interpreters.TouchExplorationInterpreter;
 
