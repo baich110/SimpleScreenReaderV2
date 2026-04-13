@@ -13,23 +13,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Java
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-      - name: Setup Gradle
+          cache: gradle
+      - name: Build with Gradle
         run: |
-          wget -q https://services.gradle.org/distributions/gradle-8.7-bin.zip -O /tmp/gradle.zip
-          unzip -q /tmp/gradle.zip -d /opt
-          export PATH=/opt/gradle-8.7/bin:$PATH
-          gradle --version
-      - name: Build
-        run: |
-          export PATH=/opt/gradle-8.7/bin:$PATH
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
-      - name: Upload APK
+      - name: Upload Debug APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
