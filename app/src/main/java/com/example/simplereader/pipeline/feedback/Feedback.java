@@ -22,15 +22,11 @@ public class Feedback {
     }
 
     public static Feedback create(Performance.EventId eventId, Part... parts) {
-        Builder builder = builder(eventId);
+        Builder b = builder(eventId);
         for (Part part : parts) {
-            builder.addPart(part);
+            b.addPart(part);
         }
-        return builder.build();
-    }
-
-    public static Feedback empty() {
-        return new Feedback(new Builder(null));
+        return b.build();
     }
 
     @Nullable
@@ -51,7 +47,6 @@ public class Feedback {
     }
 
     public static class Part {
-        // Backward compatible constants
         public static final int SPEECH = 0;
         public static final int VIBRATION = 1;
         public static final int SOUND = 2;
@@ -62,8 +57,6 @@ public class Feedback {
         public static final int SCROLL = 7;
         public static final int CONTINUOUS_READ = 8;
         public static final int DIM_SCREEN = 9;
-        
-        public enum Type { SPEECH, VIBRATION, SOUND, FOCUS, EDIT, GRANULARITY, NODE_ACTION, SCROLL, CONTINUOUS_READ, DIM_SCREEN }
         
         private final int delayMs;
         private final int interruptGroup;
