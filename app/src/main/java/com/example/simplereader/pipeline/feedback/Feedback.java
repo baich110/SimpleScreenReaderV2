@@ -1,6 +1,7 @@
 package com.example.simplereader.pipeline.feedback;
 
 import com.example.simplereader.pipeline.Performance;
+import androidx.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -91,7 +92,7 @@ public class Feedback {
         public boolean interruptGentle() { return interruptGentle; }
         public boolean stopTts() { return stopTts; }
         public String senderName() { return senderName; }
-        
+
         @Nullable public SpeechPart speech() { return speech; }
         @Nullable public SoundPart sound() { return sound; }
         @Nullable public VibrationPart vibration() { return vibration; }
@@ -102,7 +103,7 @@ public class Feedback {
         @Nullable public ScrollPart scroll() { return scroll; }
         @Nullable public ContinuousReadPart continuousRead() { return continuousRead; }
         @Nullable public DimScreenPart dimScreen() { return dimScreen; }
-        
+
         public static class Builder {
             private final Performance.EventId eventId;
             private int delayMs = 0;
@@ -146,7 +147,7 @@ public class Feedback {
             public Part build() { return new Part(this); }
         }
     }
-    
+
     public static class Builder {
         private final Performance.EventId eventId;
         private final List<Part> parts = new ArrayList<>();
@@ -154,7 +155,7 @@ public class Feedback {
         public Builder addPart(Part part) { parts.add(part); return this; }
         public Feedback build() { return new Feedback(this); }
     }
-    
+
     public static class SpeechPart {
         private final CharSequence text;
         private final Object options;
@@ -168,7 +169,7 @@ public class Feedback {
         public Object options() { return options; }
         public Action action() { return action; }
     }
-    
+
     public static class SoundPart {
         private final int resourceId;
         private final float rate;
@@ -178,13 +179,13 @@ public class Feedback {
         public float rate() { return rate; }
         public float volume() { return volume; }
     }
-    
+
     public static class VibrationPart {
         private final int resourceId;
         public VibrationPart(int resourceId) { this.resourceId = resourceId; }
         public int resourceId() { return resourceId; }
     }
-    
+
     public static class FocusPart {
         public enum Action { CLICK_NODE, CLEAR_FOCUS, SET_FOCUS, LONG_CLICK }
         private final Action action;
@@ -193,7 +194,7 @@ public class Feedback {
         public Action action() { return action; }
         public Object node() { return node; }
     }
-    
+
     public static class EditPart {
         public enum Action { SELECT_ALL, COPY, CUT, PASTE, START_SELECT, END_SELECT }
         private final Action action;
@@ -202,13 +203,13 @@ public class Feedback {
         public Action action() { return action; }
         public Object node() { return node; }
     }
-    
+
     public static class GranularityPart {
         private final Object granularity;
         public GranularityPart(Object granularity) { this.granularity = granularity; }
         public Object granularity() { return granularity; }
     }
-    
+
     public static class NodeActionPart {
         private final Object node;
         private final int actionId;
@@ -216,7 +217,7 @@ public class Feedback {
         public Object node() { return node; }
         public int actionId() { return actionId; }
     }
-    
+
     public static class ScrollPart {
         private final Object node;
         private final int action;
@@ -224,14 +225,14 @@ public class Feedback {
         public Object node() { return node; }
         public int action() { return action; }
     }
-    
+
     public static class ContinuousReadPart {
         public enum Action { START_AT_TOP, START_AT_CURSOR, READ_FOCUSED_CONTENT, INTERRUPT, IGNORE, PAUSE_OR_RESUME }
         private final Action action;
         public ContinuousReadPart(Action action) { this.action = action; }
         public Action action() { return action; }
     }
-    
+
     public static class DimScreenPart {
         public enum Action { DIM, BRIGHTEN }
         private final Action action;
