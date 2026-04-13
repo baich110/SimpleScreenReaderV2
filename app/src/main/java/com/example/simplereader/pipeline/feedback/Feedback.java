@@ -42,6 +42,10 @@ public class Feedback {
     }
 
     public static class Part {
+        public static final int SPEECH = 0;
+        public static final int VIBRATION = 1;
+        public static final int SOUND = 2;
+        
         private final int delayMs;
         private final int interruptGroup;
         private final int interruptLevel;
