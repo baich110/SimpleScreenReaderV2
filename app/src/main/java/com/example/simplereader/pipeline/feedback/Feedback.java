@@ -7,6 +7,8 @@ import java.util.List;
 
 public class Feedback {
     public static final int DEFAULT = 0;
+    public static final int FLAG_NO_QUEUE = 1;
+    
     private final Performance.EventId eventId;
     private final List<Part> parts;
 
@@ -27,6 +29,10 @@ public class Feedback {
         return builder.build();
     }
 
+    public static Feedback empty() {
+        return new Feedback(new Builder(null));
+    }
+
     @Nullable
     public Performance.EventId eventId() { return eventId; }
 
@@ -43,6 +49,8 @@ public class Feedback {
     }
 
     public static class Part {
+        public enum Type { SPEECH, VIBRATION, SOUND, FOCUS, EDIT, GRANULARITY, NODE_ACTION, SCROLL, CONTINUOUS_READ, DIM_SCREEN }
+        
         private final int delayMs;
         private final int interruptGroup;
         private final int interruptLevel;
@@ -51,6 +59,8 @@ public class Feedback {
         private final boolean interruptGentle;
         private final boolean stopTts;
         private final String senderName;
+        private final String utteranceId;
+        private final int flags;
         
         private final SpeechPart speech;
         private final SoundPart sound;
@@ -72,6 +82,8 @@ public class Feedback {
             this.interruptGentle = builder.interruptGentle;
             this.stopTts = builder.stopTts;
             this.senderName = builder.senderName;
+            this.utteranceId = builder.utteranceId;
+            this.flags = builder.flags;
             this.speech = builder.speech;
             this.sound = builder.sound;
             this.vibration = builder.vibration;
@@ -83,6 +95,26 @@ public class Feedback {
             this.continuousRead = builder.continuousRead;
             this.dimScreen = builder.dimScreen;
         }
+        
+        public Type getType() {
+            if (speech != null) return Type.SPEECH;
+            if (vibration != null) return Type.VIBRATION;
+            if (sound != null) return Type.SOUND;
+            if (focus != null) return Type.FOCUS;
+            if (edit != null) return Type.EDIT;
+            if (granularity != null) return Type.GRANULARITY;
+            if (nodeAction != null) return Type.NODE_ACTION;
+            if (scroll != null) return Type.SCROLL;
+            if (continuousRead != null) return Type.CONTINUOUS_READ;
+            if (dimScreen != null) return Type.DIM_SCREEN;
+            return Type.SPEECH;
+        }
+        
+        @Nullable public CharSequence getText() { return speech != null ? speech.text() : null; }
+        public int getDuration() { return vibration != null ? vibration.resourceId() : 0; }
+        public int getSoundId() { return sound != null ? sound.resourceId() : 0; }
+        public String getUtteranceId() { return utteranceId; }
+        public int getFlags() { return flags; }
         
         public int delayMs() { return delayMs; }
         public int interruptGroup() { return interruptGroup; }
@@ -114,6 +146,8 @@ public class Feedback {
             private boolean interruptGentle = false;
             private boolean stopTts = false;
             private String senderName = "";
+            private String utteranceId = null;
+            private int flags = 0;
             
             private SpeechPart speech = null;
             private SoundPart sound = null;
@@ -126,6 +160,7 @@ public class Feedback {
             private ContinuousReadPart continuousRead = null;
             private DimScreenPart dimScreen = null;
             
+            public Builder() { this.eventId = null; }
             public Builder(Performance.EventId eventId) { this.eventId = eventId; }
             public Builder setDelayMs(int delayMs) { this.delayMs = delayMs; return this; }
             public Builder setInterruptGroup(int group) { this.interruptGroup = group; return this; }
@@ -134,6 +169,8 @@ public class Feedback {
             public Builder setInterruptSoundAndVibration(boolean interrupt) { this.interruptSoundAndVibration = interrupt; return this; }
             public Builder setStopTts(boolean stop) { this.stopTts = stop; return this; }
             public Builder setSenderName(String name) { this.senderName = name; return this; }
+            public Builder setUtteranceId(String utteranceId) { this.utteranceId = utteranceId; return this; }
+            public Builder setFlags(int flags) { this.flags = flags; return this; }
             public Builder setSpeech(CharSequence text, Object options) { this.speech = new SpeechPart(text, options); return this; }
             public Builder setSound(int resourceId, float rate, float volume) { this.sound = new SoundPart(resourceId, rate, volume); return this; }
             public Builder setVibration(int resourceId) { this.vibration = new VibrationPart(resourceId); return this; }
