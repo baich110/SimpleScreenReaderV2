@@ -1,6 +1,3 @@
-/*
- * GlobalVariables - 全局变量
- */
 package com.example.simplereader.pipeline;
 
 public class GlobalVariables {
