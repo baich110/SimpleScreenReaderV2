@@ -1,6 +1,3 @@
-/*
- * InputModeTracker - 输入模式追踪器
- */
 package com.example.simplereader.utils.input;
 
 public class InputModeTracker {
@@ -9,19 +6,8 @@ public class InputModeTracker {
     
     private int currentMode = INPUT_MODE_TOUCH;
     
-    public int getInputMode() {
-        return currentMode;
-    }
-    
-    public void setInputMode(int mode) {
-        this.currentMode = mode;
-    }
-    
-    public boolean isTouchMode() {
-        return currentMode == INPUT_MODE_TOUCH;
-    }
-    
-    public boolean isKeyboardMode() {
-        return currentMode == INPUT_MODE_KEYBOARD;
-    }
+    public int getInputMode() { return currentMode; }
+    public void setInputMode(int mode) { this.currentMode = mode; }
+    public boolean isTouchMode() { return currentMode == INPUT_MODE_TOUCH; }
+    public boolean isKeyboardMode() { return currentMode == INPUT_MODE_KEYBOARD; }
 }
