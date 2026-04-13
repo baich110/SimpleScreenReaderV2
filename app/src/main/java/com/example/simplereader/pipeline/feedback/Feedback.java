@@ -125,6 +125,7 @@ public class Feedback {
             private ContinuousReadPart continuousRead = null;
             private DimScreenPart dimScreen = null;
             
+            public Builder() { this.eventId = null; }
             public Builder(Performance.EventId eventId) { this.eventId = eventId; }
             public Builder setDelayMs(int delayMs) { this.delayMs = delayMs; return this; }
             public Builder setInterruptGroup(int group) { this.interruptGroup = group; return this; }
