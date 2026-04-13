@@ -7,7 +7,7 @@ public class ScreenStateMonitor {
         ScreenState getStableScreenState();
     }
     
-    public static class State implements ScreenStateMonitor.State {
+    public static class ScreenStateImpl implements ScreenStateMonitor.State {
         @Override
         public boolean areMainWindowsStable() { return true; }
         
