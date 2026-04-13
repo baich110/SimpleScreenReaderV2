@@ -41,7 +41,7 @@ public class ContinuousReadInterpreter implements AccessibilityEventInterpreter 
         if (isReading) {
             AccessibilityNodeInfoCompat node = AccessibilityNodeInfoCompat.wrap(event.getSource());
             if (node != null) {
-                Interpretation.Builder builder = Interpretation.builder().ofType(Interpretation.Type.CONTINUOUS_READ)
+                Interpretation.Builder builder = Interpretation.Builder.ofType(Interpretation.Type.CONTINUOUS_READ)
                         .setEvent(event)
                         .setSource(node)
                         .setGranularitySelection(currentGranularity);
