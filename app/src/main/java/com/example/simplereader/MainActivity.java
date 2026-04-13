@@ -1,6 +1,3 @@
-/*
- * MainActivity - 设置界面
- */
 package com.example.simplereader;
 
 import android.content.SharedPreferences;
@@ -22,7 +19,6 @@ public class MainActivity extends PreferenceActivity {
         super.onCreate(savedInstanceState);
         addPreferencesFromResource(R.xml.preferences);
         
-        // 检查无障碍服务是否启用
         if (!isAccessibilityServiceEnabled()) {
             Toast.makeText(this, "请先启用无障碍服务", Toast.LENGTH_LONG).show();
             openAccessibilitySettings();
