@@ -27,10 +27,10 @@ public class Mappers {
         String tagStr = tag.toString();
         switch (tagStr) {
             case "AccessibilityFocused": return mapAccessibilityFocused(interpretation, sourceNode);
-            case "Touch": return mapTouch(interpretation);
-            case "Scroll": return Feedback.create(eventId, Feedback.part().build());
+            case "Touch": return Feedback.create(eventId);
+            case "Scroll": return Feedback.create(eventId);
             case "Hint": return mapHint(interpretation);
-            case "StateChanged": return mapStateChanged(interpretation);
+            case "StateChanged": return Feedback.create(eventId);
             case "ContentChanged": return mapContentChanged(sourceNode);
             default: return null;
         }
@@ -41,26 +41,12 @@ public class Mappers {
         CharSequence text = node.getText();
         if (text == null || text.length() == 0) text = node.getContentDescription();
         if (text == null || text.length() == 0) return null;
-        return Feedback.create(null, Feedback.part().build());
-    }
-    
-    private Feedback mapTouch(Interpretation interpretation) {
-        return Feedback.create(null, Feedback.part().build());
+        return Feedback.create(null);
     }
     
     private Feedback mapHint(Interpretation interpretation) {
         if (interpretation instanceof Interpretation.Hint) {
-            CharSequence hintText = ((Interpretation.Hint) interpretation).hintText();
-            if (hintText != null && hintText.length() > 0) {
-                return Feedback.create(null, Feedback.part().build());
-            }
-        }
-        return null;
-    }
-    
-    private Feedback mapStateChanged(Interpretation interpretation) {
-        if (interpretation instanceof Interpretation.StateChanged) {
-            return Feedback.create(null, Feedback.part().build());
+            return Feedback.create(null);
         }
         return null;
     }
@@ -69,7 +55,7 @@ public class Mappers {
         if (node == null) return null;
         CharSequence text = node.getText();
         if (text != null && text.length() > 0) {
-            return Feedback.create(null, Feedback.part().build());
+            return Feedback.create(null);
         }
         return null;
     }
