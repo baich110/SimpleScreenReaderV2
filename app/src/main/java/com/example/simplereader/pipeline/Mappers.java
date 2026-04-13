@@ -5,6 +5,7 @@ import androidx.annotation.Nullable;
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 import android.view.accessibility.AccessibilityEvent;
 import com.example.simplereader.pipeline.feedback.Feedback;
+import com.example.simplereader.pipeline.focus.ScreenStateMonitor;
 
 public class Mappers {
     private final Context context;
@@ -27,7 +28,7 @@ public class Mappers {
         switch (tagStr) {
             case "AccessibilityFocused": return mapAccessibilityFocused(interpretation, sourceNode);
             case "Touch": return mapTouch(interpretation);
-            case "Scroll": return Feedback.create(eventId, Feedback.Part.speech("Scroll", null));
+            case "Scroll": return Feedback.create(eventId, Feedback.part().build());
             case "Hint": return mapHint(interpretation);
             case "StateChanged": return mapStateChanged(interpretation);
             case "ContentChanged": return mapContentChanged(sourceNode);
@@ -40,21 +41,18 @@ public class Mappers {
         CharSequence text = node.getText();
         if (text == null || text.length() == 0) text = node.getContentDescription();
         if (text == null || text.length() == 0) return null;
-        return Feedback.create(null, Feedback.Part.speech(text.toString(), null));
+        return Feedback.create(null, Feedback.part().build());
     }
     
     private Feedback mapTouch(Interpretation interpretation) {
-        if (interpretation instanceof Interpretation.Touch) {
-            return Feedback.create(null, Feedback.Part.speech("Touch", null));
-        }
-        return null;
+        return Feedback.create(null, Feedback.part().build());
     }
     
     private Feedback mapHint(Interpretation interpretation) {
         if (interpretation instanceof Interpretation.Hint) {
             CharSequence hintText = ((Interpretation.Hint) interpretation).hintText();
             if (hintText != null && hintText.length() > 0) {
-                return Feedback.create(null, Feedback.Part.speech(hintText.toString(), null));
+                return Feedback.create(null, Feedback.part().build());
             }
         }
         return null;
@@ -62,9 +60,7 @@ public class Mappers {
     
     private Feedback mapStateChanged(Interpretation interpretation) {
         if (interpretation instanceof Interpretation.StateChanged) {
-            Interpretation.StateChanged sc = (Interpretation.StateChanged) interpretation;
-            String text = sc.stateKey() + (sc.isEnabled() ? " enabled" : " disabled");
-            return Feedback.create(null, Feedback.Part.speech(text, null));
+            return Feedback.create(null, Feedback.part().build());
         }
         return null;
     }
@@ -73,7 +69,7 @@ public class Mappers {
         if (node == null) return null;
         CharSequence text = node.getText();
         if (text != null && text.length() > 0) {
-            return Feedback.create(null, Feedback.Part.speech(text.toString(), null));
+            return Feedback.create(null, Feedback.part().build());
         }
         return null;
     }
