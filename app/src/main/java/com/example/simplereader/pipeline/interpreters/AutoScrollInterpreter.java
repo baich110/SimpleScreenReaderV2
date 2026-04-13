@@ -38,7 +38,7 @@ public class AutoScrollInterpreter implements AccessibilityEventInterpreter {
     public Interpretation onAccessibilityEvent(AccessibilityEvent event, Performance.EventId eventId) {
         if (!autoScrollEnabled) return Interpretation.NO_CHANGE;
         
-        AccessibilityNodeInfoCompat node = AccessibilityNodeInfoUtils.toCompat(event.getSource());
+        AccessibilityNodeInfoCompat node = androidx.core.view.accessibility.AccessibilityNodeInfoUtils.toCompat(event.getSource());
         if (node == null) return Interpretation.NO_CHANGE;
         
         int direction = TraversalStrategy.SEARCH_FOCUS_FORWARD;
