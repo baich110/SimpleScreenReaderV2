@@ -1,6 +1,3 @@
-/*
- * Label - 标签
- */
 package com.example.simplereader.pipeline;
 
 public class Label {
