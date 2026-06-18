@@ -1,6 +1,17 @@
 # SimpleScreenReaderV2
 
-基于TalkBack Pipeline架构的高性能读屏服务
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge)](LICENSE)
+[![Language](https://img.shields.io/badge/Java-Android%2014-orange.svg?style=for-the-badge)](#)
+[![Platform](https://img.shields.io/badge/Min%20SDK-Android%205.0-green.svg?style=for-the-badge)](#)
+
+> 一份**完整开源、可独立运行、按 Google TalkBack 架构思路重写**的 Android 读屏服务参考实现。中文社区少见的非 TalkBack 系列开源读屏方案，13 个 Interpreter 全部开源，可作为研究 Android 无障碍 / a11y 服务架构的范例。
+
+## 项目定位
+
+- 🎯 **学习 / 研究**：完整复刻 Google TalkBack 的 Pipeline 架构（Monitors → Interpreters → Mappers → Actors → Feedback），便于阅读、调试、二次开发
+- 🔧 **可定制**：模块解耦，可单独替换 TTS、震动、声音等任一 Actor，或新增自定义 Interpreter
+- 🚀 **高性能**：事件去重、延迟处理、缓存机制、快速分发，针对实际场景做了多处性能优化
+- 📖 **文档完整**：每个 Interpreter / Actor 职责清晰，README 列出全部 13 类事件解释器与 4 类反馈执行器
 
 ## 核心特性
 
