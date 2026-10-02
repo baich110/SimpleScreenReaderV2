@@ -286,10 +286,73 @@ object ShouldFocusNode {
     private fun r(node: AccessibilityNodeInfo, z9: Boolean, depth: Int): Boolean {
         if (depth > MAX_DEPTH) return false
 
-        // ② WebView 检查
+        // ══════════════════════════════════════════════════════════════
+        // ② 滚动容器判定 —— 对应天坦 `NodeNavigator.isInScrollView(nodeInfo)`
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【天坦原文】`w7/AccessibilityNodeInfoUtils.java:931~945`
+        // ```java
+        // public static boolean shouldFocusNodeInternal(NodeInfo nodeInfo, Map map, boolean z9) {
+        //     boolean z10 = false;
+        //     if (nodeInfo == null) { return false; }
+        //     if (NodeNavigator.isInScrollView(nodeInfo)) {         // ← 本分支
+        //         NodeInfo nextSibling = NodeNavigator.getNextSibling(nodeInfo);
+        //         if (nextSibling != null) {
+        //             try {
+        //                 if (nextSibling.isVisibleToUser()) { z10 = true; }
+        //             } catch (Throwable th) { g0(nextSibling); throw th; }
+        //         }
+        //         g0(nextSibling);
+        //         return z10;                                        // ← 返回「下一个兄弟是否可见」
+        //     }
+        //     if (!isVisible(nodeInfo)) { ... }
+        //     ...
+        // ```
+        // 旧函数 `FocusFinder.shouldFocus:337~360` 开头**完全相同**。
+        //
+        // ══════════════════════════════════════════════════════════════
+        // 【★ 我原来抄错的地方（语义整体跑偏）】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 原实现：
+        // ```kotlin
+        //   // ② WebView 检查
+        //   if (isType15(node)) {
+        //       val webView = findWebViewRoot(node)
+        //       return webView?.isVisibleToUser == true
+        //   }
+        // ```
+        // 两处错：
+        //   ① 分支体写成了「找 WebView 根节点、返回它是否可见」——
+        //      **天坦这里是「看下一个兄弟是否可见」**，与 WebView 无关。
+        //      （本文件开头的注释甚至自己写着
+        //        「② isType15(node) → A0.b(node) 是否可见（可读版命名，**勿叫 isWebView**）」
+        //        —— 作者知道不是 WebView，但分支体没跟着改。）
+        //   ② `isType15` 这个名字容易被理解成「类型 15」，
+        //      实际它是 `hasAction(node, 1024, 2048)`，
+        //      对应天坦 `NodeNavigator.isInScrollView` 里的
+        //      `hasActionMask2(node, f23604z=1024, 2048)`
+        //      （`com/vivo/speechsdk/module/vad/c.java:52` 已核实 f23604z=1024）。
+        //      ⇒ 判定条件本身是对的，错的是**分支体**。
+        //
+        // 【真机影响】真机 dump 里的 `android.widget.ScrollView`
+        //   （`scrollable=true`、带 4096/8192 滚动 action）会命中本分支。
+        //   旧代码去找「WebView 根」→ 找不到 → 返回 false。而白茶对
+        //   这类节点的最终判定却是 true（走了后面的分支），
+        //   与天坦（本分支直接 return）**不一致** —— 实测差 1 个节点。
+        //   更要命的是：**滚动容器内的每个节点都会提前 return**，
+        //   这个分支一旦写错，整棵滚动子树的可聚焦性全错。
+        // 【完整实现（逐行对应天坦）】
+        //   `isInScrollView(node)` = `hasActionMask2(node, 1024, 2048)`
+        //     ⇒ 等于本项目的 `isType15(node)`（同为 1024/2048 双路判定）
+        //   `getNextSibling(node)`  —— **名字骗人**，实现是
+        //     `getSelfOrMatchingDescendant(node, f38927a)`，
+        //     而 `f38927a.accept(n)` = 「类型是 15 **且** 父节点类型不是 15」
+        //       ⇒ 即「**最外层的网页节点**」。
+        //   ⇒ 整支语义：**在滚动容器内时，看向下最近的网页容器是否可见**。
         if (isType15(node)) {
-            val webView = findWebViewRoot(node)
-            return webView?.isVisibleToUser == true
+            val webContent = outermostWebContent(node)
+            return webContent?.isVisibleToUser == true
         }
 
         // ③ 可见性 —— **必须用天坦的 isVisible()，不是裸 isVisibleToUser**
@@ -738,7 +801,24 @@ object ShouldFocusNode {
         return try {
             val window = node.window ?: return false
             window.getBoundsInScreen(out)
-            true
+            // ★ 有效性校验：取到**空矩形**等同于取不到窗口。
+            //
+            // 【为什么必须查这一步】`getBoundsInScreen` 可能**不抛异常但填不出值**
+            //   （跨进程窗口失效、窗口已销毁、部分 ROM 的兼容问题）。
+            //   此时 `out` 保持为 `Rect()` 即 `[0,0][0,0]`。
+            //
+            // 【不查会怎样】`isSameBounds(node, baselineBounds)` 用
+            //   `node.getBoundsInScreen` 的结果与基准比较。若基准是空矩形，
+            //   那么**任何**同样取不到边界的节点都会被判为「与窗口同边界」⇒
+            //   误入天坦的 ⑤ 分支（同边界 + 有子）⇒ 被 `!k(node) || !i(node)`
+            //   拒绝，或被我新加的 TalkBack ⑤-b 拒绝。
+            //   真机表现就是「一批节点莫名不可聚焦」。
+            //
+            // 【与天坦的一致性】天坦 `isSameBoundsAsCached`（`:178~185`）在
+            //   `f39017b == null`（取不到窗口）时**直接返回 false**，
+            //   即整个 ⑤ 分支被跳过。这里用「空矩形 ⇒ 视为取不到」
+            //   达到同样的效果，覆盖 `getBoundsInScreen` 静默填空的路径。
+            out.width() > 0 && out.height() > 0
         } catch (e: Throwable) {
             false
         }
@@ -833,59 +913,106 @@ object ShouldFocusNode {
      * 用类名反而会漏掉 `androidx.recyclerview` 之外的实现。
      */
     private fun isVisible(node: AccessibilityNodeInfo): Boolean {
-        if (node.isVisibleToUser) return true
-        // ② TalkBack 的 WebView 兜底
+        // ══════════════════════════════════════════════════════════════
+        // 三方对照（**主干一致，差异只在兜底**）
+        // ══════════════════════════════════════════════════════════════
         //
-        // 【TalkBack 原文】`AccessibilityNodeInfoUtils.java:2364~2371`：
-        // ```java
-        // public static boolean isVisible(AccessibilityNodeInfoCompat node) {
-        //   // We need to move focus to invisible node in WebView to scroll it but we don't want to
-        //   // move focus if WebView itself is invisible.
-        //   return node != null
-        //       && (node.isVisibleToUser()
-        //           || (WebInterfaceUtils.isWebContainer(node)
-        //               && Role.getRole(node) != Role.ROLE_WEB_VIEW));
-        // }
-        // ```
-        // 【语义】WebView **内部**的节点即使 `isVisibleToUser=false` 也视为可见
-        //   （否则无法聚焦到需要滚动才显现的网页元素）；
-        //   但 WebView **容器本身**不享受这个豁免（容器不可见就是真不可见）。
+        // 【① 主干 —— 三方完全相同，就是这一句】
+        //   `node.isVisibleToUser()`
         //
-        // 【天坦的对应实现】`AccessibilityNodeInfoUtils.java:570~578` 兜底的是
-        //   **RecyclerView** 而非 WebView：
-        // ```java
-        //   return NodeNavigator.isInRecyclerView(nodeInfo)
-        //       && EventUtils.getNodeType(nodeInfo) != 15;
-        // ```
-        //   注意天坦的 `!= 15` 与 TalkBack 的 `Role != ROLE_WEB_VIEW`
-        //   是**同一个数字 15**（白茶 `NodeRoleHelper.ROLE_WEB_VIEW = 15`
-        //   正是从这个常量来的）—— 两者在此处语义殊途同归：
-        //   都排除「WebView 容器自身」。
+        //   TalkBack `AccessibilityNodeInfoUtils.java:2364~2371`：
+        //   ```java
+        //   public static boolean isVisible(AccessibilityNodeInfoCompat node) {
+        //     // We need to move focus to invisible node in WebView to scroll it but we don't
+        //     // want to move focus if WebView itself is invisible.
+        //     return node != null
+        //         && (node.isVisibleToUser()                         // ← ★ 主干
+        //             || (WebInterfaceUtils.isWebContainer(node)
+        //                 && Role.getRole(node) != Role.ROLE_WEB_VIEW));
+        //   }
+        //   ```
+        //   天坦 `:570~578`：
+        //   ```java
+        //   public static boolean isVisible(NodeInfo nodeInfo) {
+        //       if (nodeInfo == null) return false;
+        //       if (nodeInfo.isVisibleToUser()) return true;          // ← ★ 主干
+        //       return NodeNavigator.isInRecyclerView(nodeInfo)
+        //           && EventUtils.getNodeType(nodeInfo) != 15;
+        //   }
+        //   ```
+        //   ⇒ 主干 `isVisibleToUser()` 是**三方共有**的，见下方 ①。
         //
-        // 【两方对照的结论】两者的**豁免对象不同**
-        //   （TalkBack 豁免 WebView 内部节点；天坦豁免 RecyclerView 内节点），
-        //   但**排除条件一致**。此处两条都保留：
-        //   真机的 RecyclerView 列表和网页都需要各自的兜底。
-        return (isInRecyclerView(node) && !isType15(node)) || isVisibleWebContent(node)
+        // 【② 兜底 —— 两方**其实是同一件事**】
+        //   我上一轮误记成「TalkBack 兜底 WebView、天坦兜底 RecyclerView，
+        //   豁免对象不同」—— **错的**。重新读全 `NodeNavigator` 后：
+        //   ```java
+        //   // w7/NodeNavigator.java:118~123
+        //   public static boolean isInRecyclerView(NodeInfo nodeInfo) {
+        //       if (nodeInfo == null) return false;
+        //       return isInWebView(nodeInfo) || isInListView(nodeInfo);
+        //   }
+        //   // :105~107
+        //   public static boolean isInWebView(NodeInfo nodeInfo) {
+        //       return isInScrollView(nodeInfo);      // = 有 1024/2048 动作掩码
+        //   }
+        //   // :110~115
+        //   public static boolean isInListView(NodeInfo nodeInfo) {
+        //       return pkg.startsWith("org.mozilla.");   // Firefox
+        //   }
+        //   ```
+        //   ⇒ 天坦的「RecyclerView 兜底」名字起错了，实质是
+        //     **WebView/滚动容器兜底**（有 `ACTION_NEXT_HTML_ELEMENT` 动作）
+        //     `+ Firefox 特判`。**与 TalkBack 的 WebView 兜底是同一件事**
+        //     （只是天坦多一条 Firefox 包名）。
+        //
+        // 【③ 排除条件 —— 两方也是同一件事】
+        //   天坦 `EventUtils.getNodeType(nodeInfo) != 15`，
+        //   而 `EventUtils.java:94`：
+        //   ```java
+        //   map2.put(WebView.class.getName(), 15);        // ← 15 就是 WebView
+        //   ```
+        //   ⇒ 天坦的 `!= 15` 就是「非 WebView 类」，与 TalkBack 的
+        //     `Role != ROLE_WEB_VIEW` **语义相同**。
+        //   ⚠️ 注意不要把这两个 15 当成「同一个常量」—— 一个是**节点类型**
+        //     （`getNodeType` 的映射表），一个是**角色**（`Role`），
+        //     只是数值巧合相同。白茶 `NodeRoleHelper.ROLE_WEB_VIEW = 15`
+        //     是本项目自己的角色表，与天坦的 `getNodeType` 表无关。
+        //
+        // 【结论】TalkBack 与天坦在此处的**判定条件等价**，
+        //   白茶只需一条实现即可，无需并列两条（上轮并列属于重复）。
+        //   完整表述 = 主干 `isVisibleToUser()` + 兜底 `(Web 容器 || Firefox) && 非 WebView`
+        if (node.isVisibleToUser) return true                       // ★ 主干（三方一致）
+        return isInRecyclerView(node) && !isType15(node)             // ★ 兜底（两方等价）
     }
 
     /**
-     * TalkBack `WebInterfaceUtils.isWebContainer(node) && Role != ROLE_WEB_VIEW`
-     * —— `AccessibilityNodeInfoUtils.java:2369~2370`
+     * 天坦 `NodeNavigator.isInRecyclerView(nodeInfo)` —— **完整定义**
      *
-     * `isWebContainer` 即「该节点是网页内容容器」（具备 Web 动作能力）。
-     * 白茶已有 `WebNavigator.supportsWebActions`（对齐 TalkBack
-     * `WebInterfaceUtils.supportsWebActions()`），此处复用它。
+     * `w7/NodeNavigator.java:118~123`：
+     * ```java
+     *   public static boolean isInRecyclerView(NodeInfo nodeInfo) {
+     *       if (nodeInfo == null) return false;
+     *       return isInWebView(nodeInfo) || isInListView(nodeInfo);
+     *   }
+     * ```
+     * 展开后（`:105~115`）：
+     *   · `isInWebView`  = `isInScrollView` = 有 `1024/2048` 动作掩码
+     *     （即 `ACTION_NEXT_HTML_ELEMENT`/`ACTION_PREVIOUS_HTML_ELEMENT`
+     *      —— 这是 WebView 自己声明的能力，比猜包名可靠）
+     *   · `isInListView` = 包名以 `org.mozilla.` 开头（Firefox 特判）
+     *
+     * ⚠️ 函数名叫 `isInRecyclerView`，但实现里**没有任何 RecyclerView 判定** ——
+     *   它兜的是 **WebView / 滚动容器**。名字是历史遗留，行为以 `isInWebView`
+     *   为准。对照 TalkBack 的 `WebInterfaceUtils.isWebContainer` 可知
+     *   两者是同一类判定。
+     *
+     * `matchActionMask2`（`NodeUtils.java:285~289`）是**双路**：
+     * ```java
+     *   int actions = nodeInfo.getActions();
+     *   return (actions & i9) == i9 || (actions & i10) == i10
+     *       || hasAction(nodeInfo, i9) || hasAction(nodeInfo, i10);
+     * ```
      */
-    private fun isVisibleWebContent(node: AccessibilityNodeInfo): Boolean = try {
-        if (NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_WEB_VIEW) {
-            false  // WebView 容器自身不豁免
-        } else {
-            WebElementNavigation.isSupported(node)
-        }
-    } catch (e: Throwable) {
-        false
-    }
 
     /**
      * 天坦 `NodeNavigator.isInRecyclerView(nodeInfo)`
@@ -1189,7 +1316,11 @@ object ShouldFocusNode {
             // 重复节点 → 天坦直接 return false（f39022g 是**静态**集合）
             if (seenChildren.put(child, true) != null) return false
 
-            if (!child.isVisibleToUser) continue
+            // ★★ 修复：天坦此处是 `if (!isVisible(child))`（带兜底），
+            //   不是裸 `isVisibleToUser`。见 `isVisible()` 处对
+            //   MIUI 假阴性的说明 —— 用裸判定会漏掉 RecyclerView/WebView
+            //   内部的可见节点，导致容器被误判为「无子内容」。
+            if (!isVisible(child)) continue
 
             // ① 排除：子节点自身可操作
             if (n(child, true)) continue
@@ -1471,7 +1602,25 @@ object ShouldFocusNode {
         //
         // 【为什么这处影响大】`W()` 用在 `m()` 的第二层条件里；
         //   漏判会让「父节点是可滚动容器」的子节点大量走不到返回 true 的分支。
-        if (!node.isVisibleToUser) return false
+        // ★★ 修复：这里原来写的是**裸** `node.isVisibleToUser`，
+        //   而天坦原文（`:534~538`）是：
+        //   ```java
+        //   public static boolean isTopLevelScrollItem(NodeInfo nodeInfo) {
+        //       if (nodeInfo == null || !isVisible(nodeInfo)) { return false; }
+        //                                       ^^^^^^^^^^^^^^^^^
+        //   ```
+        //   **用的是带兜底的 `isVisible()`**，不是裸的 `isVisibleToUser()`。
+        //
+        // 【后果】`isVisibleToUser` 在 MIUI/Android 16 上有大量假阴性
+        //   （见 `isVisible()` 处的详述）。这里用裸判定 ⇒ `W()` 判 false ⇒
+        //   `z11 = n(node,true) || (W(node) && p(node))` 判 false ⇒
+        //   落到兜底分支。对「有可朗读子孙但自身无文本」的容器
+        //   （真机实测 5 个：Compose 的 View 包裹 TextView 组）
+        //   兜底分支的条件 `hasTextOrContent` 为 false ⇒ **被错误拒绝**。
+        //
+        // 【与真机表现的关系】这类容器是天坦会接受、白茶拒绝的
+        //   —— 焦点少了一批，用户感觉「很多焦点获取不到」。
+        if (!isVisible(node)) return false
         val parent = node.parent ?: return false
         return try {
             // ① 父节点有滚动 action —— 最高优先级
@@ -1546,7 +1695,13 @@ object ShouldFocusNode {
      * 正常现象（RecyclerView 回收屏外 item），不该据此判容器可聚焦。
      */
     private fun isScrollableContainerNode(node: AccessibilityNodeInfo): Boolean {
-        if (!hasScrollAction(node) || !node.isVisibleToUser) return false
+        // ★★ 修复：天坦原文（`w7/AccessibilityNodeInfoUtils.java:176`）：
+        //   ```java
+        //   if (!AccessibilityNodeInfoUtils.hasScrollAction(nodeInfo)
+        //       || !AccessibilityNodeInfoUtils.isVisible(nodeInfo)) { return false; }
+        //   ```
+        //   用的是带兜底的 `isVisible()`，不是裸 `isVisibleToUser`。
+        if (!hasScrollAction(node) || !isVisible(node)) return false
         val role = NodeRoleHelper.roleOf(node)
         if (role == NodeRoleHelper.ROLE_DROP_DOWN_LIST ||   // nodeType 3
             role == NodeRoleHelper.ROLE_LIST ||              // nodeType 8
@@ -1639,12 +1794,184 @@ object ShouldFocusNode {
      * 天坦对「容器 + 有文本」的情形由**另一支**（`!z11` 的
      * `hasTextOrContent` 兜底）处理。两者不能混。
      */
-    private fun hasSomethingToSpeak(node: AccessibilityNodeInfo): Boolean =
-        try {
-            hasSpeakableContent(node)
-        } catch (e: Throwable) {
-            false
+    private fun hasSomethingToSpeak(node: AccessibilityNodeInfo): Boolean = try {
+        hasSomethingToSpeak(
+            node,
+            java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(),
+            java.util.Collections.newSetFromMap(
+                java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>()
+            )
+        )
+    } catch (e: Throwable) {
+        false
+    }
+
+    /**
+     * ★★★ 完整版 `hasSomethingToSpeak` —— 补上「递归子节点」这一大块
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【为什么必须补】我原先只写了 `hasSpeakableContent(node)` 一句 ——
+     *   那只是**自身**有没有内容，**完全没有递归子节点**。
+     *   而 TalkBack 与天坦**都有**这一块，且两方**逐条同构**。
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 【TalkBack 原文】`AccessibilityNodeInfoUtils.java:1001~1031`
+     * ```java
+     * private static boolean isSpeakingNode(node, speakingNodesCache, visitedNodes) {
+     *   if (speakingNodesCache != null && speakingNodesCache.containsKey(node)) {
+     *     return speakingNodesCache.get(node);
+     *   }
+     *   boolean result = false;
+     *   if (hasText(node)) {
+     *     result = true;
+     *   } else if (hasStateDescription(node)) {
+     *     result = true;
+     *   } else if (node.isCheckable()) {          // Special case for check boxes.
+     *     result = true;
+     *   } else if (hasNonActionableSpeakingChildren(node, speakingNodesCache, visitedNodes)) {
+     *     // Special case for containers with non-focusable content.
+     *     result = true;
+     *   }
+     *   if (speakingNodesCache != null) speakingNodesCache.put(node, result);
+     *   return result;
+     * }
+     * ```
+     *
+     * 【天坦原文】`AccessibilityNodeInfoUtils.java:502~524` —— **完全同构**
+     * ```java
+     * public static boolean hasSomethingToSpeakInternal(nodeInfo, map, set) {
+     *     if (map != null && map.containsKey(nodeInfo)) return map.get(nodeInfo);
+     *     boolean z9 = true;
+     *     if (hasText(nodeInfo)) { ... }
+     *     else if (hasStateDescription(nodeInfo)) { ... }
+     *     else if (nodeInfo.isCheckable()) { ... }
+     *     else if (hasNonActionableSpeakingChildren(nodeInfo, map, set)) { ... }
+     *     else { z9 = false; }
+     *     if (map != null) map.put(nodeInfo, Boolean.valueOf(z9));
+     *     return z9;
+     * }
+     * ```
+     *
+     * 【⚠️ 注意两方的 `hasText` / `hasStateDescription` 有包含关系】
+     *   `hasText`     = text || contentDescription || hintText
+     *   `hasStateDescription` = stateDescription || isCheckable || hasRangeInfo
+     *   天坦的 `hasSomethingToSpeakInternal` 里**先判 hasText、
+     *   再判 hasStateDescription、再单独判 isCheckable** ——
+     *   由于 `hasStateDescription` 已含 `isCheckable`，第三个分支
+     *   在逻辑上是冗余的（但与 TalkBack 逐行对应，故保留原样）。
+     *
+     * @param cache   判定缓存（天坦 `map`）：命中的节点直接复用结果。
+     *                **必须传 identity 语义的 map**，否则内容相同的兄弟
+     *                节点会互相污染。
+     * @param visited 本次递归已访问集合（天坦 `set`）：
+     *                **重入即返回 false** —— 这是**防环**机制，
+     *                对应真机上偶发的环形节点树。
+     */
+    private fun hasSomethingToSpeak(
+        node: AccessibilityNodeInfo,
+        cache: MutableMap<AccessibilityNodeInfo, Boolean>,
+        visited: MutableSet<AccessibilityNodeInfo>
+    ): Boolean {
+        // ① 缓存命中（两方一致）
+        cache[node]?.let { return it }
+
+        val result = when {
+            hasText(node) -> true               // ② 有文本
+            hasStateDescription(node) -> true   // ③ 有状态描述 / 可勾选 / 进度
+            node.isCheckable -> true            // ④ 单独的可勾选（见上方冗余说明）
+            hasNonActionableSpeakingChildren(node, cache, visited) -> true  // ⑤ 递归
+            else -> false
         }
+
+        cache[node] = result
+        return result
+    }
+
+    /**
+     * ★★★ TalkBack `hasNonActionableSpeakingChildren` / 天坦同名函数
+     * —— **两方逐条同构**，本函数是补齐实现
+     *
+     * 【TalkBack 原文】`AccessibilityNodeInfoUtils.java:1045~1103`
+     * 【天坦原文】  `AccessibilityNodeInfoUtils.java` 同名函数
+     *
+     * 七步逐条对应：
+     * | 步骤 | TalkBack | 天坦 | 白茶 |
+     * |---|---|---|---|
+     * | ① child==null        | `continue` | `continue` | `continue` |
+     * | ② 已访问过           | `!visitedNodes.add(child) → return false` | `!set.add(child) → return false` | 同 |
+     * | ③ 不可见             | `!isVisible(child) → continue` | 同 | 同 |
+     * | ④ 可聚焦             | `isFocusableOrClickable(child) → continue` | `isAccessibilityFocusable(child) → continue` | 同 |
+     * | ⑤ 顶层滚动项         | `isTopLevelScrollItem && isSpeaking && !(clickable\|\|longClickable) → continue` | 同构 | 同 |
+     * | ⑥ 递归有内容         | `isSpeakingNode(child,...) → return true` | `hasSomethingToSpeakInternal(child,...) → return true` | 同 |
+     * | ⑦ 末尾不可见子兜底   | `hasInvisibleNonActionableSpeakingChildren` | **无此条** | 按天坦省略 |
+     *
+     * 【④ 的微妙差异】TalkBack 用 `isFocusableOrClickable`
+     *   （= `isVisible && (isScreenReaderFocusable || isActionable)`），
+     *   天坦用 `isAccessibilityFocusable`（= `isVisible && (isScreenReaderFocusable
+     *   || isClickable)`）。二者只差 `isActionable` 里多含 `isFocusable`/
+     *   `isLongClickable`/Web 内容。此处按**天坦**实现（用户既定原则）。
+     *
+     * 【⑤ 的语义】「可点击的滚动容器应当先于其子节点获得焦点」——
+     *   故当父节点可点击/可长按时，不跳过顶层滚动项子节点。
+     *
+     * 【⑦ 为什么按天坦省略】TalkBack 的 `hasInvisibleNonActionableSpeakingChildren`
+     *   是为 `ACTION_SHOW_ON_SCREEN` 失败问题加的（见其注释），
+     *   天坦没有。用户定过「A/B 选天坦」，故此处省略；
+     *   若真机浏览器场景出现「容器对屏外文本不聚焦」再补。
+     */
+    private fun hasNonActionableSpeakingChildren(
+        node: AccessibilityNodeInfo,
+        cache: MutableMap<AccessibilityNodeInfo, Boolean>,
+        visited: MutableSet<AccessibilityNodeInfo>
+    ): Boolean {
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            val child = try {
+                node.getChild(i)
+            } catch (e: Throwable) {
+                null
+            } ?: continue                                    // ① null → 跳过
+
+            // ② 防环：重入即返回 false（**不是 continue**）
+            if (!visited.add(child)) return false
+
+            // ③ 不可见 → 跳过
+            if (!isVisible(child)) continue
+
+            // ④ 可聚焦 → 跳过（子节点自己会拿到焦点，容器不必替他朗读）
+            if (isAccessibilityFocusable(child)) continue
+
+            // ⑤ 顶层滚动项（且父节点不可点击/不可长按）→ 跳过
+            if (W(child) &&
+                hasSomethingToSpeak(child, cache, visited) &&
+                !isActionableForAccessibility(node) &&
+                !node.isLongClickable
+            ) {
+                continue
+            }
+
+            // ⑥ 递归：子节点有可朗读内容 → 容器也有
+            if (hasSomethingToSpeak(child, cache, visited)) return true
+        }
+        return false
+    }
+
+    /**
+     * 天坦 `AccessibilityNodeInfoUtils.isAccessibilityFocusable(node)`
+     * —— `:434~439`
+     * ```java
+     *   return isVisible(nodeInfo)
+     *       && (isScreenReaderFocusable(nodeInfo) || isClickable(nodeInfo));
+     * ```
+     * ⚠️ 注意只含 `isClickable`，**不含** isFocusable/isLongClickable
+     *   （那是 `isActionableForAccessibility` 才有的）。
+     */
+    private fun isAccessibilityFocusable(node: AccessibilityNodeInfo): Boolean = try {
+        isVisible(node) && (isScreenReaderFocusable(node) || node.isClickable)
+    } catch (e: Throwable) {
+        false
+    }
+
 
     /**
      * 有子节点内容 —— 天坦 C3678d.k()
@@ -1801,6 +2128,75 @@ object ShouldFocusNode {
     /**
      * 边界是否和指定基准一致 —— 天坦 C3678d.c()
      */
+    /**
+     * 天坦 `NodeNavigator.getNextSibling(nodeInfo)` —— **实现与名字完全不符**
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【原文】`w7/NodeNavigator.java:87~92`
+     * ```java
+     * public static NodeInfo getNextSibling(NodeInfo nodeInfo) {
+     *     if (isInScrollView(nodeInfo)) {
+     *         return AccessibilityNodeInfoUtils.getSelfOrMatchingDescendant(nodeInfo, f38927a);
+     *     }
+     *     return null;
+     * }
+     * ```
+     * ⚠️ 函数名叫 `getNextSibling`（下一个**兄弟**），实际是
+     *   `getSelfOrMatchingDescendant`（**自己或后代**里第一个匹配的）。
+     *   混淆代码里这类「名字骗人」的坑必须靠读实现才能发现。
+     *
+     * 【f38927a 的定义】`w7/NodeNavigator.java:18~35`（匿名 NodeFilter）：
+     * ```java
+     * public boolean accept(NodeInfo nodeInfo) {
+     *     if (nodeInfo == null) { return false; }
+     *     NodeInfo parent = nodeInfo.getParent();
+     *     try {
+     *         if (EventUtils.getNodeType(nodeInfo) == 15) {     // 自己是 WebView 类
+     *             if (EventUtils.getNodeType(parent) != 15) {   // 父不是
+     *                 z9 = true;
+     *             }
+     *         }
+     *         return z9;
+     *     } finally { g0(parent); }
+     * }
+     * ```
+     * ⇒ 语义 = **「最外层的网页节点」**（自己是 WebView 类型、父不是）。
+     *
+     * ⚠️ 这里的 `getNodeType` 是 **`EventUtils` 的类型表**
+     *   （`EventUtils.java:94`：`map2.put(WebView.class.getName(), 15)`），
+     *   **不是**本项目的 `isType15`（那是 1024/2048 的**动作**判定）。
+     *   两者数值都涉及 15，但来源与语义完全不同 —— **切勿混淆**。
+     *
+     * 【本项目对应】用 className 判定，避免依赖天坦的类型映射表
+     *   （那张表覆盖大量第三方类名，无法完整移植）。
+     *
+     * @return 最外层网页内容节点；找不到返回 null
+     */
+    private fun outermostWebContent(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // 自己是否「是网页内容」
+        if (isWebViewClass(node)) {
+            val parentIsWeb = try { node.parent?.let { isWebViewClass(it) } ?: false } catch (e: Throwable) { false }
+            if (!parentIsWeb) return node                    // 最外层 ⇒ 命中
+        }
+        // 递归后代（前序，取第一个匹配）
+        val count = try { node.childCount } catch (e: Throwable) { return null }
+        for (i in 0 until count) {
+            val child = try { node.getChild(i) } catch (e: Throwable) { null } ?: continue
+            val r = outermostWebContent(child)
+            if (r != null) return r
+        }
+        return null
+    }
+
+    /** 是否网页类节点 —— 天坦 `EventUtils.getNodeType(node) == 15` 的本项目对应 */
+    private fun isWebViewClass(node: AccessibilityNodeInfo): Boolean = try {
+        val cls = node.className?.toString().orEmpty()
+        cls == "android.webkit.WebView" || cls.endsWith(".WebView") ||
+            NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_WEB_VIEW
+    } catch (e: Throwable) {
+        false
+    }
+
     private fun isSameBounds(node: AccessibilityNodeInfo, base: Rect): Boolean {
         node.getBoundsInScreen(tempRect)
         return tempRect == base

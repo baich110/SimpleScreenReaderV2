@@ -494,7 +494,14 @@ class ShouldFocusNodeReadableAuditTest {
         assertTrue("需要 isScrollableContainerNode 实现", code.contains("fun isScrollableContainerNode("))
         val b = body("private fun isScrollableContainerNode(node: AccessibilityNodeInfo): Boolean")
         assertTrue("应检查 hasScrollAction", b.contains("hasScrollAction(node)"))
-        assertTrue("应检查可见性", b.contains("isVisibleToUser"))
+        // ★ 修正：天坦原文（`w7/AccessibilityNodeInfoUtils.java:176`）用的是
+        //   **带兜底的 `isVisible()`**，不是裸 `isVisibleToUser`：
+        //   ```java
+        //   if (!hasScrollAction(nodeInfo) || !isVisible(nodeInfo)) { return false; }
+        //   ```
+        //   原护栏断言含 `isVisibleToUser` —— 把**错误的实现固化了**。
+        assertTrue("应使用带兜底的 isVisible(node) 而非裸 isVisibleToUser",
+            b.contains("isVisible(node)") && !b.contains("!node.isVisibleToUser"))
     }
 
     // ==================== ④ hasSpeakableContent ====================

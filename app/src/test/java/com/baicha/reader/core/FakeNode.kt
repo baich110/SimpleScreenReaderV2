@@ -1,5 +1,6 @@
 package com.baicha.reader.core
 
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
@@ -192,6 +193,12 @@ open class FakeNode(
      */
     var fakeStateDescription: CharSequence? = null
 
+    /** 真实边界（由 UiDumpParser 从 dump 的 bounds 属性写入） */
+    var boundsLeft: Int = 0
+    var boundsTop: Int = 0
+    var boundsRight: Int = 0
+    var boundsBottom: Int = 0
+
     override fun getActions(): Int = fakeActions
 
     override fun getStateDescription(): CharSequence? = fakeStateDescription
@@ -201,6 +208,35 @@ open class FakeNode(
     override fun isEditable(): Boolean = fakeEditable
 
     override fun getWindowId(): Int = fakeWindowId
+
+    /**
+     * ★★ 真实边界 —— **这是把真机 dump 喂进 shouldFocus 的关键**
+     *
+     * 【为什么必须覆盖】基类 `AccessibilityNodeInfo.getBoundsInScreen` 在
+     *   JVM 单测里是空实现（`unmocked` 返回 null / 不写 Rect），于是
+     *   所有节点的边界恒为 `[0,0][0,0]`。而 `ShouldFocusNode` 里：
+     *   · `fillWindowBounds` 取窗口边界 → 恒空
+     *   · `isSameBounds(node, base)` 比较两个空 Rect → **恒为 true**
+     *
+     *   ⇒ 天坦的 ⑤ 分支（「节点边界 == 窗口边界 且 有子」）和
+     *     TalkBack 的 ⑤-b（同条件 + 不可操作不可聚焦）在**测试里
+     *     对所有节点都成立**，与真机行为**完全不符**。
+     *   ⇒ 之前基于单测得出的「哪些节点被拒」结论不可信。
+     *
+     * 【本次修复】`UiDumpParser` 写入真实 `bounds`，这里如实返回，
+     *   使 ⑤ / ⑤-b 分支在单测里与真机一致。
+     */
+    override fun getBoundsInScreen(outBounds: Rect?) {
+        if (outBounds == null) return
+        outBounds.set(boundsLeft, boundsTop, boundsRight, boundsBottom)
+    }
+
+    override fun getBoundsInParent(outBounds: Rect?) {
+        if (outBounds == null) return
+        outBounds.set(boundsLeft, boundsTop, boundsRight, boundsBottom)
+    }
+
+    fun getNodeIdDebug(): Int = nodeId
 
     override fun hashCode(): Int = nodeId
 
