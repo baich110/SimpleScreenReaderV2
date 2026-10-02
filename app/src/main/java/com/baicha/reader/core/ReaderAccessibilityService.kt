@@ -223,6 +223,30 @@ class ReaderAccessibilityService : AccessibilityService() {
         ShouldFocusNode.cache = nodeCache
 
         focus = FocusManager(this)
+        // ★ 焦点监控器（多级回退：无障碍焦点 → 输入焦点 → 历史编辑框）
+        focus.monitor = FocusMonitor(
+            findAccessibilityFocus = {
+                try {
+                    findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                } catch (e: Throwable) {
+                    null
+                }
+            },
+            findInputFocus = {
+                try {
+                    rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                } catch (e: Throwable) {
+                    null
+                }
+            },
+            isImeWindowOnScreen = {
+                try {
+                    ImeWindowDetector.isInputWindowOnScreen(windows)
+                } catch (e: Throwable) {
+                    false
+                }
+            }
+        )
         screenRecovery = ScreenStateRecovery(
             getCurrentFocus = { focus.getFocused() },
             getActiveWindowId = {

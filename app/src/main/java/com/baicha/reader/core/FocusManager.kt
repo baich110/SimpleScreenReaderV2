@@ -170,7 +170,28 @@ class FocusManager(
      *   ③ 我们缓存的焦点
      *   ④ 输入焦点
      */
+    /**
+     * 焦点监控器 —— 对应 TalkBack `AccessibilityFocusMonitor`
+     *
+     * 提供多级回退（无障碍焦点 → 输入焦点 → 历史编辑框）。
+     * 由服务注入，因为需要「输入法窗口是否在屏」这类服务级信息。
+     */
+    @Volatile
+    var monitor: FocusMonitor? = null
+
     fun getFocused(): AccessibilityNodeInfo? {
+        // ★ 优先走监控器的多级回退链（对应 TalkBack）
+        val m = monitor
+        if (m != null) {
+            val node = m.getAccessibilityFocus(useInputFocusIfEmpty = true)
+            if (node != null) {
+                cacheFocus(node)
+                return node
+            }
+        }
+
+        // ---- 监控器不可用时的降级路径（保持原有行为）----
+
         // ① 服务级
         try {
             service.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)?.let {
@@ -489,6 +510,8 @@ class FocusManager(
             focusNode?.let { it.getBoundsInScreen(anchorBounds) }
             focusNode = node
             focusGeneration++
+            // ★ 记录可编辑焦点（供 FocusMonitor 的历史回退）
+            monitor?.recordEditableFocus(node)
         }
         return ok
     }
@@ -628,6 +651,7 @@ class FocusManager(
         focusNode = null
         anchorNode = null
         anchorBounds.setEmpty()
+        monitor?.onWindowChanged()
         lastDirection = 0
         navStreak = 0
         isScrolling = false
