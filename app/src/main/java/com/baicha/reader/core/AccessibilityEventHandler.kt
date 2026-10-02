@@ -400,7 +400,14 @@ class AccessibilityEventHandler(
         // ② 限流：同节点太频繁就丢
         val node = event.source ?: return
         val nodeKey = System.identityHashCode(node)
-        if (!contentChangeFilter.shouldAnnounce(nodeKey)) {
+        // live region 的语义就是「内容变了要主动告知」——
+        // 对它不跳过首次播报（对齐 TalkBack）
+        val isLiveRegion = try {
+            node.liveRegion != android.view.View.ACCESSIBILITY_LIVE_REGION_NONE
+        } catch (e: Throwable) {
+            false
+        }
+        if (!contentChangeFilter.shouldAnnounce(nodeKey, isLiveRegion = isLiveRegion)) {
             return
         }
 

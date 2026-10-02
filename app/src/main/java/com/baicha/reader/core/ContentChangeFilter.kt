@@ -50,9 +50,12 @@ import android.os.SystemClock
  * }
  * ```
  *
- * 两个关键点：
- *   ① **换节点立即放行** —— 用户焦点移走了，新节点的变化立即有意义
- *   ② 同节点按间隔限流 —— 默认 [CONTENT_CHANGE_MINIMUM_CYCLE]
+ * 两个关键点（**已按源码核实**）：
+ *   ① **换节点跳过首次播报** —— 避免「焦点事件」与「内容变化事件」
+ *      连续播两遍；但 live region 不跳过
+ *      （初版我写成「换节点立即放行」，与 TalkBack 相反）
+ *   ② 同节点按间隔限流 —— 默认 [CONTENT_CHANGE_MINIMUM_CYCLE] = 30 秒
+ *      （初版我写 500ms，差了 60 倍）
  *
  * ══════════════════════════════════════════════════════════
  * 【本实现相对 TalkBack 的改进】
@@ -73,7 +76,13 @@ import android.os.SystemClock
  */
 class ContentChangeFilter(
     /** 同一节点两次播报的最小间隔（毫秒） */
-    private val minIntervalMs: Long = CONTENT_CHANGE_MINIMUM_CYCLE
+    private val minIntervalMs: Long = CONTENT_CHANGE_MINIMUM_CYCLE,
+    /**
+     * 是否启用「换节点跳过首次播报」—— 对齐 TalkBack。
+     *
+     * 默认开启。
+     */
+    private val skipFirstOnNodeChange: Boolean = true
 ) {
 
     /** 上次播报的节点身份 */
@@ -93,15 +102,46 @@ class ContentChangeFilter(
      * @param now     当前时间（uptimeMillis）
      * @return true = 播报
      */
-    fun shouldAnnounce(nodeKey: Int, now: Long = SystemClock.uptimeMillis()): Boolean {
+    fun shouldAnnounce(
+        nodeKey: Int,
+        now: Long = SystemClock.uptimeMillis(),
+        /** 该节点是否是 live region（内容变了要主动告知，不跳过首次） */
+        isLiveRegion: Boolean = false
+    ): Boolean {
         // 无节点身份 → 无法限流，宁可放行（不静默丢失）
         if (nodeKey == NO_NODE) return true
 
-        // ① 换节点 → 立即放行（对齐 TalkBack）
+        // ① 换节点
+        //
+        // 【核实修正】初版写「换节点立即放行」——**与 TalkBack 相反**。
+        //
+        // TalkBack `WindowContentChangeAnnouncementFilter:68~78`：
+        //   ```java
+        //   } else {
+        //       lastUpdatedNode = node;
+        //       timeStamp = now;
+        //       if (enableShortAndLongDurationsForSpecificApps) {
+        //           if (node.getLiveRegion() == ACCESSIBILITY_LIVE_REGION_NONE) {
+        //               // Skip the first announcement, to avoid two announcements
+        //               // in quick succession: one from accessibility focus and
+        //               // the other from this window content change.
+        //               // Live regions should not be skipped.
+        //               return false;
+        //           }
+        //       }
+        //       return true;
+        //   }
+        //   ```
+        //
+        // 即：换节点时**跳过第一次播报**，避免「焦点事件」与
+        // 「内容变化事件」连续播两遍（同一个节点刚被聚焦时，
+        // 焦点事件已经念过一次内容了）。
+        // 但 **live region 不跳过** —— live region 的语义就是
+        // 「内容变了要主动告知」，跳过它就失去意义。
         if (nodeKey != lastNodeKey) {
             lastNodeKey = nodeKey
             lastTime = now
-            return true
+            return if (skipFirstOnNodeChange && !isLiveRegion) false else true
         }
 
         // ② 同节点 → 按间隔限流
@@ -129,15 +169,33 @@ class ContentChangeFilter(
         /**
          * 同一节点内容变化的最小播报间隔。
          *
-         * 【为什么是 500ms】TalkBack 的 `CONTENT_CHANGE_MINIMUM_CYCLE`
-         * 取值为 500。低于此值会刷屏（如进度条每帧更新），
-         * 高于此值会漏掉较快的变化。
+         * 【核实修正】初版写 500ms，并注释「TalkBack 取值为 500」——
+         * **错了两处**：
+         *   ① 真实值是 **30000**（30 秒），我写的差了 60 倍
+         *   ② 我还编造了「TalkBack 对特定 App 用 SHORT(200)/LONG(1000)」，
+         *      真实是 SHORT_DURATION=5000 / LONG_DURATION=10000
          *
-         * 【为什么不照搬 TalkBack 的 App 特判表】
-         *   TalkBack 对特定 App 用 SHORT(200)/LONG(1000) 两档，
-         *   但那张表随 App 更新会失效，维护成本 > 收益。
+         * 源码（`WindowContentChangeAnnouncementFilter.java:15~19`）：
+         *   ```java
+         *   CONTENT_CHANGE_MINIMUM_CYCLE = 30000;
+         *   SHORT_DURATION = 5000;
+         *   LONG_DURATION = 10000;
+         *   ```
+         *
+         * 【30 秒是不是太长了？】
+         *   不是 —— 这个限流的作用是「防止**同一个节点**反复刷屏」，
+         *   而换节点会重置计时（且跳过首次）。
+         *   真实场景（进度条、计时器）通常是**新节点或
+         *   用户主动聚焦**，不受这个间隔影响。
+         *   30 秒防的是「同一个节点被高频重绘」这种病态情况。
          */
-        const val CONTENT_CHANGE_MINIMUM_CYCLE = 500L
+        const val CONTENT_CHANGE_MINIMUM_CYCLE = 30000L
+
+        /** 特定 App 的短间隔 —— TalkBack `SHORT_DURATION = 5000` */
+        const val SHORT_DURATION = 5000L
+
+        /** 特定 App 的长间隔 —— TalkBack `LONG_DURATION = 10000` */
+        const val LONG_DURATION = 10000L
     }
 }
 
@@ -154,31 +212,71 @@ object ContentChangeKind {
     /** 无信息量的变化（如单纯布局调整） */
     const val NONE = -1
 
-    /** 文本变了 —— 最常需要播报（计数器、进度、状态） */
-    const val TEXT = 1
+    /**
+     * 内容描述变了（权重最高）
+     *
+     * 【核实修正】初版把 TEXT 排在最前 —— **与 TalkBack 相反**。
+     * TalkBack `getContentChangeType():276` 的第一判定就是
+     * CONTENT_DESCRIPTION。
+     */
+    const val CONTENT_DESCRIPTION = 4
 
-    /** 内容描述变了 —— 按钮状态、图标语义 */
-    const val CONTENT_DESCRIPTION = 2
+    /** 文本变了（计数器、进度、状态文字） */
+    const val TEXT = 2
 
-    /** 状态描述变了 —— 开关/复选状态 */
-    const val STATE_DESCRIPTION = 3
+    /** 状态描述变了（开关/复选状态） */
+    const val STATE_DESCRIPTION = 64
 
-    /** 结构变化（增删子节点）—— 通常由别的机制播报 */
-    const val SUBTREE = 4
+    /** 拖拽开始 —— TalkBack `CONTENT_CHANGE_TYPE_DRAG_STARTED` */
+    const val DRAG_STARTED = 128
+
+    /** 拖拽放下 */
+    const val DRAG_DROPPED = 256
+
+    /** 拖拽取消 */
+    const val DRAG_CANCELLED = 512
+
+    /** 未定义 —— TalkBack 的 `CONTENT_CHANGE_TYPE_UNDEFINED`（值为 0） */
+    const val UNDEFINED = 0
+
+    /** 错误状态（表单校验提示） */
+    const val ERROR = 2048
+
+    /** 启用/禁用状态变化 */
+    const val ENABLED = 4096
+
+    /** 结构变化（增删子节点）—— 白茶额外保留 */
+    const val SUBTREE = 1
 
     /**
      * 分类内容变化类型。
      *
-     * 对齐 TalkBack 的位掩码判定顺序 ——
-     * 一项事件可能同时带多个位，取**最有信息量**的那个。
+     * **判定顺序严格对齐 TalkBack**
+     * `EventTypeWindowContentChangedFeedbackRule.getContentChangeType():276~302`：
+     * ```
+     * CONTENT_DESCRIPTION → TEXT → STATE_DESCRIPTION → DRAG_STARTED
+     *   → DRAG_DROPPED → DRAG_CANCELLED → UNDEFINED → ERROR → ENABLED
+     * ```
+     *
+     * 【核实修正】初版顺序为 TEXT → STATE_DESCRIPTION →
+     * CONTENT_DESCRIPTION → SUBTREE，且**漏了 5 类**
+     * （DRAG_STARTED / DRAG_DROPPED / DRAG_CANCELLED / ERROR / ENABLED）。
      *
      * @param changeTypes `event.contentChangeTypes`
+     * @return 分类值；无匹配返回 [NONE]
      */
     fun classify(changeTypes: Int): Int = when {
-        // 文本优先 —— 最有信息量
+        // 顺序严格照 TalkBack，不要「按直觉重排」
+        changeTypes and CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION != 0 -> CONTENT_DESCRIPTION
         changeTypes and CONTENT_CHANGE_TYPE_TEXT != 0 -> TEXT
         changeTypes and CONTENT_CHANGE_TYPE_STATE_DESCRIPTION != 0 -> STATE_DESCRIPTION
-        changeTypes and CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION != 0 -> CONTENT_DESCRIPTION
+        changeTypes and CONTENT_CHANGE_TYPE_DRAG_STARTED != 0 -> DRAG_STARTED
+        changeTypes and CONTENT_CHANGE_TYPE_DRAG_DROPPED != 0 -> DRAG_DROPPED
+        changeTypes and CONTENT_CHANGE_TYPE_DRAG_CANCELLED != 0 -> DRAG_CANCELLED
+        changeTypes == CONTENT_CHANGE_TYPE_UNDEFINED -> UNDEFINED
+        changeTypes and CONTENT_CHANGE_TYPE_ERROR != 0 -> ERROR
+        changeTypes and CONTENT_CHANGE_TYPE_ENABLED != 0 -> ENABLED
+        // 白茶额外：结构变化（TalkBack 不在此函数处理，它另有分支）
         changeTypes and CONTENT_CHANGE_TYPE_SUBTREE != 0 -> SUBTREE
         else -> NONE
     }
@@ -186,20 +284,33 @@ object ContentChangeKind {
     /**
      * 这类变化是否值得播报。
      *
-     * 【为什么不播 SUBTREE】
-     *   子树增删通常伴随焦点事件或窗口事件 ——
-     *   那些已有专门处理，这里再播会重复。
+     * 【核实修正】初版只播 TEXT/STATE_DESCRIPTION/CONTENT_DESCRIPTION。
+     * 现按 TalkBack 补齐 —— 它对这些类型都产出了播报文本
+     * （`computeWindowContentChangedStateText`）。
+     *
+     * 【为什么不播 SUBTREE / UNDEFINED】
+     *   SUBTREE：子树增删通常伴随焦点或窗口事件，那里已有处理，
+     *            这里再播会重复。
+     *   UNDEFINED：没有具体变化类型，不知道播什么。
      */
     fun isWorthAnnouncing(kind: Int): Boolean = when (kind) {
-        TEXT, STATE_DESCRIPTION, CONTENT_DESCRIPTION -> true
+        CONTENT_DESCRIPTION, TEXT, STATE_DESCRIPTION,
+        DRAG_STARTED, DRAG_DROPPED, DRAG_CANCELLED,
+        ERROR, ENABLED -> true
         else -> false
     }
 
     // ==================== 位掩码常量 ====================
-    // 与 AccessibilityEvent.CONTENT_CHANGE_TYPE_* 一致
+    // 全部用 `javap android.jar` 核实过
 
-    const val CONTENT_CHANGE_TYPE_SUBTREE = 0x00000001
-    const val CONTENT_CHANGE_TYPE_TEXT = 0x00000002
-    const val CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION = 0x00000004
-    const val CONTENT_CHANGE_TYPE_STATE_DESCRIPTION = 0x00000040
+    const val CONTENT_CHANGE_TYPE_SUBTREE = 0x00000001          // 1
+    const val CONTENT_CHANGE_TYPE_TEXT = 0x00000002             // 2
+    const val CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION = 0x00000004  // 4
+    const val CONTENT_CHANGE_TYPE_STATE_DESCRIPTION = 0x00000040    // 64
+    const val CONTENT_CHANGE_TYPE_DRAG_STARTED = 0x00000080     // 128
+    const val CONTENT_CHANGE_TYPE_DRAG_DROPPED = 0x00000100     // 256
+    const val CONTENT_CHANGE_TYPE_DRAG_CANCELLED = 0x00000200   // 512
+    const val CONTENT_CHANGE_TYPE_UNDEFINED = 0x00000000        // 0
+    const val CONTENT_CHANGE_TYPE_ERROR = 0x00000800            // 2048
+    const val CONTENT_CHANGE_TYPE_ENABLED = 0x00001000          // 4096
 }
