@@ -120,6 +120,10 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var screenRecovery: ScreenStateRecovery
         private set
 
+    /** 无障碍事件处理器（从本类抽出的事件分发职责） */
+    lateinit var eventHandler: AccessibilityEventHandler
+        private set
+
     /** 朗读替换引擎（两级作用域 + 正则） */
     lateinit var replacement: ReadReplacementEngine
         private set
@@ -147,24 +151,6 @@ class ReaderAccessibilityService : AccessibilityService() {
     // ==================== 内部状态 ====================
 
     private val mainHandler = Handler(Looper.getMainLooper())
-
-    /**
-     * 最近一次焦点动作的时间与来源
-     *
-     * 供 ScreenStateRecovery 做「用户在窗口切换期间是否已操作」的竞态判定。
-     * 对应 TalkBack 的 AccessibilityFocusActionHistory。
-     */
-    @Volatile
-    private var lastFocusActionTime = 0L
-
-    @Volatile
-    private var lastFocusActionSource = 0
-
-    /** 记录一次焦点动作 */
-    private fun recordFocusAction(source: Int) {
-        lastFocusActionTime = SystemClock.uptimeMillis()
-        lastFocusActionSource = source
-    }
 
     /**
      * 去重：上次朗读的节点**身份**
@@ -264,8 +250,8 @@ class ReaderAccessibilityService : AccessibilityService() {
                 }
             },
             onRestoreFocus = { force -> restoreInitialFocus(force) },
-            getLastFocusActionTime = { lastFocusActionTime },
-            getLastFocusActionSource = { lastFocusActionSource }
+            getLastFocusActionTime = { eventHandler.lastFocusActionTime },
+            getLastFocusActionSource = { eventHandler.lastFocusActionSource }
         )
         speech = SpeechEngine(this).apply {
             enginePackage = TtsEngineManager.getSavedEngine(this@ReaderAccessibilityService)
@@ -294,6 +280,11 @@ class ReaderAccessibilityService : AccessibilityService() {
             }
         }
         navigation = NavigationManager().apply {
+            // ★ 未实现导航的反馈（原先静默拒绝，用户以为读屏坏了）
+            onUnimplemented = { mode ->
+                speech.speak("${'$'}{mode.label}尚未实现", interrupt = true)
+                haptic.error()
+            }
             onModeChanged = { mode ->
                 // 切换导航后清缓存（过滤器变了，判定结果不再有效）
                 CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
@@ -309,8 +300,30 @@ class ReaderAccessibilityService : AccessibilityService() {
         sound = SoundManager(this).apply { preloadAll() }
         autoScroll = AutoScrollManager(this, focus)
 
-        // ---- 事件消费：队列 → handleEvent ----
-        eventQueue.consumer = { event -> handleEvent(event) }
+        // ---- 事件处理器（从本类抽出）----
+        eventHandler = AccessibilityEventHandler(
+            speech = speech,
+            sound = sound,
+            haptic = haptic,
+            focus = focus,
+            autoScroll = autoScroll,
+            voiceScroll = voiceScroll,
+            compose = { node -> composeNode(node) },
+            log = { msg -> log(msg) },
+            audioFocus = audioFocus,
+            screenRecovery = screenRecovery
+        ).apply {
+            isScreenOnProvider = { isScreenOn() }
+            onWindowChangedHook = {
+                // 服务侧的窗口变化清理
+                lastSpokenIdentity = -1
+                lastHoverIdentity = -1
+                dispatcher.resetFocusHash()
+            }
+        }
+
+        // ---- 事件消费：队列 → 事件处理器 ----
+        eventQueue.consumer = { event -> eventHandler.handleEvent(event) }
 
         // ---- 音频焦点委托 ----
         speech.onRequestAudioFocus = { audioFocus.requestFocus() }
@@ -325,6 +338,17 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         // ---- 焦点管理委托 ----
         focus.onCancelScroll = { autoScroll.stop() }
+
+        // ---- ★ 粒度移动委托（用系统 API 移动光标，而非找下一个节点）----
+        focus.granularityMover = { node, forward ->
+            val level = navigation.granularityLevel()
+            val supported = GranularityMover.isSupported(node, level)
+            if (supported) {
+                GranularityMover.move(node, level, forward)
+            } else {
+                false   // 系统不支持 → 回退到普通遍历
+            }
+        }
         // ★ 滚动结束时显式结束「滚动中」状态（避免隐式依赖 TTL）
         autoScroll.onScrollSettled = { focus.onScrollEnd() }
         // ★ 提供窗口根给 BFS 兜底（嵌套滚动场景）
@@ -522,346 +546,7 @@ class ReaderAccessibilityService : AccessibilityService() {
      *
      * 19 种事件类型完整覆盖。
      */
-    private fun handleEvent(event: AccessibilityEvent) {
-        when (event.eventType) {
-
-            // ---------- 1: 点击 ----------
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                handleNodeEvent(event, "点击", interrupt = true)
-            }
-
-            // ---------- 2: 长按 ----------
-            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
-                val text = composeNode(event.source)
-                log("长按: ${text ?: "无文本"}")
-                sound.longClicked()
-                haptic.longPress()
-                if (!text.isNullOrBlank()) speech.speak(text, interrupt = true)
-            }
-
-            // ---------- 4: 选中 ----------
-            AccessibilityEvent.TYPE_VIEW_SELECTED -> {
-                handleNodeEvent(event, "选中", interrupt = true)
-            }
-
-            // ---------- 8: 滚动 ----------
-            AccessibilityEvent.TYPE_VIEW_SCROLLED -> handleScroll(event)
-
-            // ---------- 16: 焦点 ----------
-            AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
-                speakNode(event.source, "焦点")
-            }
-
-            // ---------- 32: 窗口状态变化 ----------
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> handleWindowChanged(event)
-
-            // ---------- 32768: 无障碍焦点 ----------
-            // 【修正】原注释写「64 / 32768，值同为 32768」是错的：
-            //   32768 = TYPE_VIEW_ACCESSIBILITY_FOCUSED
-            //   64    = TYPE_VIEW_HOVER_EXIT（另一个分支处理）
-            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED -> {
-                val text = composeNode(event.source)
-                log("无障碍焦点: ${text ?: "(无内容)"}")
-                if (!text.isNullOrBlank()) {
-                    val identity = event.source?.let { System.identityHashCode(it) } ?: -1
-                    val now = SystemClock.uptimeMillis()
-                    if (identity != lastSpokenIdentity || now - lastSpeakTime > 300) {
-                        lastSpokenIdentity = identity
-                        lastSpeakTime = now
-                        speech.speak(text, interrupt = true)
-                        playFocusSound(event.source)
-                    }
-                }
-            }
-
-            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED -> {
-                log("焦点清除")
-            }
-
-            // ---------- 128: 触摸探索 ----------
-            AccessibilityEvent.TYPE_VIEW_HOVER_ENTER -> {
-                // ★ 天坦行为：触摸一碰先打断当前播报
-                speech.interruptChannelA()
-                event.source?.let { speakHover(it) }
-            }
-
-            AccessibilityEvent.TYPE_VIEW_HOVER_EXIT -> {
-                // 离开不播报
-            }
-
-            // ---------- 2048: 文本变化 ----------
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
-                val node = event.source
-                val text = node?.text?.toString()?.trim().orEmpty()
-                if (text.isNotEmpty()) {
-                    log("文本: $text")
-                    speech.speak(text, interrupt = false)
-                }
-            }
-
-            // ---------- 8192: 选择变化 ----------
-            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> {
-                val node = event.source
-                val text = node?.text?.toString()?.trim().orEmpty()
-                if (text.isNotEmpty()) {
-                    log("选择: $text")
-                    speech.speak(text, interrupt = false)
-                }
-            }
-
-            // ---------- 1048576: 触摸探索开始 ----------
-            AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_START -> {
-                log("触摸探索开始")
-                dispatcher.isFullScreenReading = false
-                // ★ 天坦行为：探索开始也先打断
-                speech.interruptChannelA()
-            }
-
-            // ---------- 2097152: 触摸探索结束 ----------
-            AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_END -> {
-                log("触摸探索结束")
-            }
-
-            // ---------- 4194304: 窗口集合变化 ----------
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
-                CacheRegistry.invalidate(CacheRegistry.Level.WINDOW)
-            }
-
-            // ---------- 通知 ----------
-            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
-                val text = event.text?.joinToString("")?.trim().orEmpty()
-                if (text.isNotEmpty()) {
-                    log("通知: $text")
-                    speech.speak(text, interrupt = true)
-                }
-            }
-
-            // ---------- 系统播报 ----------
-            AccessibilityEvent.TYPE_ANNOUNCEMENT -> {
-                val text = event.text?.joinToString("")?.trim().orEmpty()
-                if (text.isNotEmpty()) {
-                    log("播报: $text")
-                    speech.speak(text, interrupt = true)
-                }
-            }
-
-            // ---------- 内容变化 ----------
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                // 不播报（太吵），但缓存要失效
-                CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
-            }
-
-            // ---------- 16384: 文本按粒度遍历（读屏软件的"按字/词/行"回调）----------
-            AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY -> {
-                val text = event.text?.joinToString("")?.trim().orEmpty()
-                if (text.isNotEmpty()) {
-                    log("粒度遍历: $text")
-                    speech.speak(text, interrupt = true)
-                }
-            }
-
-            // ---------- 131072: 拖拽（TYPE_VIEW_DRAGGED 在公开 SDK 中不可见，用数值）----------
-            131072 -> {
-                val node = event.source
-                val text = composeNode(node)
-                if (!text.isNullOrBlank()) {
-                    log("拖拽: $text")
-                    speech.speak(text, interrupt = true)
-                    haptic.focus()
-                }
-            }
-
-            // ---------- 262144: 上下文点击（长按菜单）----------
-            AccessibilityEvent.TYPE_VIEW_CONTEXT_CLICKED -> {
-                val node = event.source
-                val text = composeNode(node)
-                log("上下文点击: ${text ?: "(无内容)"}")
-                sound.longClicked()
-                haptic.longPress()
-                if (!text.isNullOrBlank()) speech.speak(text, interrupt = true)
-            }
-
-            else -> {
-                // 其他事件静默
-            }
-        }
-    }
-
-    /**
-     * 通用节点事件处理（点击/选中）
-     */
-    private fun handleNodeEvent(event: AccessibilityEvent, tag: String, interrupt: Boolean) {
-        val node = event.source
-        val text = composeNode(node)
-        if (!text.isNullOrBlank()) {
-            log("$tag: $text")
-            speech.speak(text, interrupt = interrupt)
-            sound.tick()
-            haptic.click()
-        } else {
-            log("$tag（无内容）")
-            sound.tick()
-        }
-    }
-
-    /**
-     * 窗口变化处理
-     */
-    private fun handleWindowChanged(event: AccessibilityEvent) {
-        val pkg = event.packageName?.toString().orEmpty()
-        val cls = event.className?.toString().orEmpty()
-        log("窗口: $pkg / $cls")
-
-        sound.windowState()
-
-        if (pkg.isNotEmpty()) {
-            audioFocus.foregroundPackage = pkg
-        }
-
-        // 重置全部状态
-        lastSpokenIdentity = -1
-        lastHoverIdentity = -1
-        dispatcher.resetFocusHash()
-        focus.onWindowChanged()
-        autoScroll.resetScrollState()
-        voiceScroll.reset()
-        CacheRegistry.invalidate(CacheRegistry.Level.WINDOW)
-
-        // 播报页面标题
-        val title = event.text?.joinToString("")?.trim().orEmpty()
-        if (title.isNotEmpty()) speech.speak(title, interrupt = true)
-
-        // ★ 屏幕状态变化后的焦点恢复 —— 对应 TalkBack onScreenStateChanged
-        //
-        // TalkBack 的延迟逻辑：窗口切换刚开始（耗时 < 500ms）时先等一等，
-        // 因为「会先播报窗口标题，用户感觉不到延迟」，同时给窗口切换留出时间。
-        val transitionStart = event.eventTime
-        val elapsed = SystemClock.uptimeMillis() - transitionStart
-
-        if (ScreenStateTiming.shouldDelay(elapsed)) {
-            mainHandler.postDelayed(
-                { performScreenStateRecovery(transitionStart) },
-                ScreenStateTiming.WINDOW_CHANGE_DELAY_MS - elapsed
-            )
-        } else {
-            performScreenStateRecovery(transitionStart)
-        }
-    }
-
-    /**
-     * 执行屏幕状态恢复
-     */
-    private fun performScreenStateRecovery(transitionStart: Long) {
-        try {
-            val ok = screenRecovery.onScreenStateChanged(transitionStart)
-            if (ok) {
-                log("屏幕状态恢复: ${screenRecovery.stats()}")
-            }
-        } catch (e: Throwable) {
-            ReaderLog.w("Service", "屏幕状态恢复失败: ${e.message}")
-        }
-    }
-
-    /**
-     * 恢复初始焦点 —— 对应 TalkBack 的 pipeline.input(WindowChange)
-     *
-     * 策略：
-     *   ① 优先用焦点历史里的锚点位置找最近的节点
-     *   ② 退化到「窗口内第一个可聚焦节点」
-     */
-    private fun restoreInitialFocus(force: Boolean) {
-        val root = rootInActiveWindow ?: return
-
-        // ① 找第一个可聚焦（本窗口）
-        val strategy = TraversalStrategyFactory.createDefault(
-            root = root,
-            filter = { ShouldFocusNode.shouldFocus(it) }
-        )
-        val first = try {
-            FocusSearch.findFirstFocus(
-                traversal = strategy,
-                root = root,
-                direction = TraversalDirection.FORWARD,
-                filter = { ShouldFocusNode.shouldFocus(it) }
-            )
-        } finally {
-            strategy.release()
-        }
-
-        if (first != null) {
-            if (focus.applyFocus(first)) {
-                recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION)
-                speakNode(first, "恢复焦点")
-            }
-        } else {
-            log("恢复焦点：本窗口无可聚焦节点")
-        }
-    }
-
-    /**
-     * 滚动处理 —— 对应天坦 M6/r ProcessorScroll.e()
-     *
-     * 两层节流：① 250ms 时间窗 ② 同节点+同窗口去重
-     */
-    private fun handleScroll(event: AccessibilityEvent) {
-        val now = SystemClock.uptimeMillis()
-
-        // ① 时间节流
-        if (now - lastScrollTime < SCROLL_THROTTLE_MS) return
-        lastScrollTime = now
-
-        // ★ 滚动后节点可见性变了 → 只失效判定/文本/边界（结构未变）
-        CacheRegistry.invalidate(CacheRegistry.Level.SCROLL)
-
-        val node = event.source
-        val nodeKey = node?.hashCode() ?: -1
-        val windowId = node?.windowId ?: -1
-
-        // ② 节点去重
-        if (nodeKey == lastScrollNodeKey && windowId == lastScrollWindowId) return
-        lastScrollNodeKey = nodeKey
-        lastScrollWindowId = windowId
-
-        // ③ 滚动音效（速率随速度动态变化）—— 对应天坦 M6/r.e()
-        sound.scroll(autoScroll.computeEarconRate(event))
-
-        // ④ ★ 标记滚动状态（供 FocusManager 的"滚动中导航"拦截使用）
-        //
-        // 方向来自 AutoScrollManager 判定好的三级结果
-        // （比直接用 scrollDeltaY 可靠 —— 该字段在很多 App 上恒为 -1）
-        val scrollDir = when (autoScroll.lastDetectedDirection) {
-            ScrollDirectionDetector.FORWARD -> 1
-            ScrollDirectionDetector.BACKWARD -> -1
-            else -> 0
-        }
-        if (scrollDir != 0) {
-            focus.onScrollStart(scrollDir)
-        }
-
-        // ⑤ 识别语音输入触发的滚动 —— 对应天坦 M6/r.h()
-        //
-        // 用户在语音输入时，输入法会自动滚列表（候选词翻页等）。
-        // 这类滚动不该播报位置，否则会盖住用户正在说的话。
-        val userAction = voiceScroll.identify(event.eventTime, node)
-        if (voiceScroll.shouldSuppressAnnouncement(userAction)) {
-            log("滚动（语音输入触发，静默）")
-            return
-        }
-
-        // ⑥ 播报滚动位置 —— 走统一格式化（对应天坦 M6/r.f()）
-        val msg = ScrollPositionFormatter.format(
-            fromIndex = event.fromIndex,
-            toIndex = event.toIndex,
-            itemCount = event.itemCount,
-            isPager = node?.let { NodeRoleHelper.roleOf(it) == NodeRoleHelper.ROLE_PAGER } ?: false
-        )
-        if (msg != null) {
-            log("滚动: $msg")
-            speech.speak(msg, interrupt = true)
-        } else {
-            log("滚动（无位置信息）")
-        }
-    }
+    // 事件分发已抽到 AccessibilityEventHandler（见该类注释）
 
     // ==================== 播报 ====================
 
@@ -898,7 +583,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         log("触摸: $spoken")
         speech.speak(spoken, interrupt = true)
         // 记录触摸探索动作（供屏幕状态恢复的竞态判定）
-        recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_TOUCH_EXPLORATION)
+        eventHandler.recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_TOUCH_EXPLORATION)
         focus.focusForTouch(node)
         playFocusSound(node)
     }
@@ -970,8 +655,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             val raw = SpeechCompositor.compose(
                 node = node,
                 order = speechOrder,
-                includeRole = includeRole,
-                granularity = navigation.granularityLevel()
+                includeRole = includeRole
             )
             // ★ 应用朗读替换（两级作用域）
             replacement.apply(raw, node.packageName?.toString())
@@ -1019,7 +703,27 @@ class ReaderAccessibilityService : AccessibilityService() {
      */
     private fun moveFocusInternal(forward: Boolean): Boolean {
         // 记录逻辑导航动作（供屏幕状态恢复的竞态判定）
-        recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION)
+        eventHandler.recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION)
+
+        // ★ 窗口导航模式：直接跨窗口，不做窗口内遍历
+        //
+        // 对应天坦导航码 9（WINDOWS_NAVIGATION）。
+        // 这个导航的本质就是「切到下一个窗口的第一个焦点」。
+        if (navigation.current == NavigationMode.WINDOWS_NAVIGATION) {
+            val cross = WindowTraversal.navigateToNextWindow(
+                service = this,
+                forward = forward
+            )
+            if (cross != null) {
+                if (focus.applyFocus(cross)) {
+                    eventHandler.speakNode(cross, "窗口导航")
+                    return true
+                }
+            }
+            haptic.boundary()
+            log("窗口导航：无更多窗口")
+            return false
+        }
 
         val dir = if (forward) FocusManager.DIR_NEXT else FocusManager.DIR_PREVIOUS
         // ★ 走当前导航的模式与过滤器
@@ -1180,6 +884,41 @@ class ReaderAccessibilityService : AccessibilityService() {
             block()
         } catch (e: Throwable) {
             ReaderLog.w("Shutdown", "$name 关闭失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 恢复初始焦点 —— 对应 TalkBack pipeline.input(WindowChange)
+     *
+     * 策略：找本窗口内第一个可聚焦节点并设焦点。
+     */
+    private fun restoreInitialFocus(force: Boolean) {
+        val root = rootInActiveWindow ?: return
+
+        val strategy = TraversalStrategyFactory.createDefault(
+            root = root,
+            filter = { ShouldFocusNode.shouldFocus(it) }
+        )
+        val first = try {
+            FocusSearch.findFirstFocus(
+                traversal = strategy,
+                root = root,
+                direction = TraversalDirection.FORWARD,
+                filter = { ShouldFocusNode.shouldFocus(it) }
+            )
+        } finally {
+            strategy.release()
+        }
+
+        if (first != null) {
+            if (focus.applyFocus(first)) {
+                eventHandler.recordFocusAction(
+                    ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION
+                )
+                eventHandler.speakNode(first, "恢复焦点")
+            }
+        } else {
+            log("恢复焦点：本窗口无可聚焦节点")
         }
     }
 

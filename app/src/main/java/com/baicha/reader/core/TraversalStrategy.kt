@@ -411,8 +411,11 @@ object TraversalStrategyFactory {
     const val TYPE_LIST = 16
     const val TYPE_ROW_COLUMN = 31
 
-    /** 空间查找（按几何方向找最近节点）—— 本项目新增，对应 TalkBack DirectionalTraversalStrategy */
+    /** 空间查找（按几何方向找最近节点）—— 对应 TalkBack DirectionalTraversalStrategy */
     const val TYPE_SPATIAL = 100
+
+    /** 垂直遍历 —— 只沿垂直方向移动（跳过同行的其他节点）*/
+    const val TYPE_VERTICAL = 17
 
     /**
      * 创建遍历策略
@@ -449,6 +452,7 @@ object TraversalStrategyFactory {
             TYPE_LIST -> ListTraversalStrategy(root, filter)
             TYPE_CACHED -> CachedTraversalStrategy(root, filter)
             TYPE_SPATIAL -> SpatialTraversalAdapter(root, filter)
+            TYPE_VERTICAL -> VerticalTraversalStrategy(root, filter)
             else -> DefaultTraversalStrategy(root, filter)
         }
     }
@@ -487,5 +491,53 @@ class SpatialTraversalAdapter(
     override fun release() = spatial.release()
 
     /** 可聚焦节点数（诊断） */
+    fun nodeCount(): Int = spatial.nodeCount()
+}
+
+
+/**
+ * 垂直遍历策略 —— 只沿垂直方向移动
+ *
+ * 【与默认遍历的区别】
+ *   默认遍历按「上→下，左→右」的几何顺序走全部节点。
+ *   垂直遍历**忽略水平位置**，只按垂直方向推进 ——
+ *   适合「一行有多个元素，但用户只想逐行浏览」的场景。
+ *
+ * 对应天坦导航码 17（VERTICAL_TRAVERSAL），
+ * TalkBack 用 `SEARCH_FOCUS_UP/DOWN` 的空间查找实现类似效果。
+ *
+ * 【实现方式】
+ *   用空间方向（UP/DOWN）做几何查找，而不是走树序。
+ *   复用 [SpatialTraversalStrategy] 的算法。
+ */
+class VerticalTraversalStrategy(
+    private val root: AccessibilityNodeInfo?,
+    private val filter: (AccessibilityNodeInfo) -> Boolean
+) : TraversalStrategy {
+
+    private val spatial = SpatialTraversalStrategy(root, filter)
+
+    override fun next(node: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
+        // 逻辑方向映射为空间方向：前进=下，后退=上
+        val spatialDir = if (direction == TraversalStrategy.DIRECTION_NEXT) {
+            TraversalDirection.DOWN
+        } else {
+            TraversalDirection.UP
+        }
+        val found = spatial.findFocusInDirection(node, spatialDir)
+        if (found != null) return found
+
+        // 空间查找失败（可能同行无可比节点）→ 退回默认遍历
+        return DefaultTraversalStrategy(root, filter).next(node, direction)
+    }
+
+    override fun start(root: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
+        // 起点：垂直方向的第一个/最后一个
+        return spatial.start(root, direction)
+    }
+
+    override fun release() = spatial.release()
+
+    /** 可聚焦节点数（诊断）*/
     fun nodeCount(): Int = spatial.nodeCount()
 }

@@ -45,12 +45,19 @@ class GranularityNavigatorTest {
     }
 
     @Test
-    fun cycle_walks_default_to_line_and_wraps() {
+    fun cycle_walks_all_six_levels_and_wraps() {
         GranularityNavigator.setLevel(GranularityNavigator.Level.DEFAULT)
         assertEquals(GranularityNavigator.Level.CHARACTER, GranularityNavigator.cycle())
         assertEquals(GranularityNavigator.Level.WORD, GranularityNavigator.cycle())
+        assertEquals(GranularityNavigator.Level.SENTENCE, GranularityNavigator.cycle())
         assertEquals(GranularityNavigator.Level.LINE, GranularityNavigator.cycle())
+        assertEquals(GranularityNavigator.Level.PARAGRAPH, GranularityNavigator.cycle())
         assertEquals(GranularityNavigator.Level.DEFAULT, GranularityNavigator.cycle())
+    }
+
+    @Test
+    fun level_count_is_six() {
+        assertEquals(6, GranularityNavigator.Level.values().size)
     }
 
     @Test
@@ -58,7 +65,35 @@ class GranularityNavigatorTest {
         assertEquals("默认", GranularityNavigator.levelName(GranularityNavigator.Level.DEFAULT))
         assertEquals("按字", GranularityNavigator.levelName(GranularityNavigator.Level.CHARACTER))
         assertEquals("按词", GranularityNavigator.levelName(GranularityNavigator.Level.WORD))
+        assertEquals("按句", GranularityNavigator.levelName(GranularityNavigator.Level.SENTENCE))
         assertEquals("按行", GranularityNavigator.levelName(GranularityNavigator.Level.LINE))
+        assertEquals("按段", GranularityNavigator.levelName(GranularityNavigator.Level.PARAGRAPH))
+    }
+
+    // ==================== 新增粒度的切分 ====================
+
+    @Test
+    fun sentence_splitting_works() {
+        val result = GranularityNavigator.split("你好。世界！", GranularityNavigator.Level.SENTENCE)
+        assertEquals(listOf("你好。", "世界！"), result)
+    }
+
+    @Test
+    fun sentence_splitting_handles_english() {
+        val result = GranularityNavigator.split("Hello. World!", GranularityNavigator.Level.SENTENCE)
+        assertEquals(listOf("Hello.", "World!"), result)
+    }
+
+    @Test
+    fun paragraph_splitting_works() {
+        val text = "第一段\n\n第二段\n\n第三段"
+        val result = GranularityNavigator.split(text, GranularityNavigator.Level.PARAGRAPH)
+        assertEquals(3, result.size)
+    }
+
+    @Test
+    fun empty_text_returns_original_for_new_levels() {
+        assertEquals(listOf("x"), GranularityNavigator.split("x", GranularityNavigator.Level.SENTENCE))
     }
 
     @Test

@@ -95,8 +95,10 @@ object SpeechCompositor {
         order: SpeechOrder = SpeechOrder.TEXT_FIRST,
         includeRole: Boolean = true,
         includeState: Boolean = true,
-        includePosition: Boolean = true,
-        granularity: GranularityNavigator.Level = GranularityNavigator.currentLevel
+        includePosition: Boolean = true
+        // 【修正】删除了 granularity 参数（P0-2）。
+        // 它此前只驱动一个 split+join 的假动作，现已由 GranularityMover 承担。
+        // 保留参数会诱导调用方以为「传了粒度就会按粒度朗读」。
     ): String? {
         if (node == null) return null
         // 【修正】不再在此处判可见性。
@@ -126,8 +128,19 @@ object SpeechCompositor {
         // ④ 位置信息
         val posText = if (includePosition) positionText(node) else null
 
-        // ⑤ 应用粒度切分（对主文本）
-        val processedMain = applyGranularity(mainText, granularity)
+        // ⑤ 【修正】此处不再做粒度切分。
+        //
+        // 原实现把整段文本按粒度 split 再用「，」join 回去 —— 这既没改变
+        // 光标位置，也没改变朗读范围，纯属假动作（P0-2）。
+        //
+        // 粒度移动的正确职责链（对齐 TalkBack / 天坦）：
+        //   NavigationMode(CHARACTERS/WORDS/...)
+        //     → FocusManager.granularityMover
+        //       → GranularityMover.move()  发送 ACTION_*_AT_MOVEMENT_GRANULARITY
+        //         → 系统移动文本光标 → 触发 TYPE_VIEW_TEXT_SELECTION_CHANGED
+        //           → 服务朗读「新选中的那一段」
+        // 即：粒度决定「光标停在哪」，合成器只负责朗读光标处的文本。
+        val processedMain = mainText
 
         // 去重 + 拼接
         val seen = HashSet<String>(8)
@@ -373,16 +386,6 @@ object SpeechCompositor {
     }
 
     // ==================== 粒度应用 ====================
-
-    /** 应用粒度切分 */
-    private fun applyGranularity(text: String?, level: GranularityNavigator.Level): String? {
-        if (text.isNullOrEmpty()) return text
-        if (level == GranularityNavigator.Level.DEFAULT) return text
-
-        val segments = GranularityNavigator.split(text, level)
-        if (segments.isEmpty()) return text
-        return segments.joinToString(SEPARATOR)
-    }
 
     // ==================== 工具 ====================
 

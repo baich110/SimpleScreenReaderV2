@@ -184,3 +184,226 @@ class NavigationManagerTest {
         assertTrue(m.current != first)
     }
 }
+
+/**
+ * P0-1 回归测试 —— 导航码 ≠ 遍历器码
+ *
+ * 【背景】之前 `strategyTypeCode()` 直接返回导航码，
+ * 而导航码会撞上遍历器类型码：
+ *   WORDS(2)    → TYPE_CACHED(2)
+ *   CONTROLS(8) → TYPE_GRID(8)
+ * 导致 3 个导航行为完全错误。
+ *
+ * 本测试锁定「两个码分离」的设计。
+ */
+class NavigationTraversalTypeTest {
+
+    /**
+     * ★ 核心断言：导航码与遍历器码必须是两个独立字段
+     */
+    @Test
+    fun words_navigation_must_not_use_cached_traversal() {
+        // 导航码是 2（天坦定义）
+        assertEquals(2, NavigationMode.WORDS.typeCode)
+        // 但遍历器类型必须是默认，不能是 TYPE_CACHED(=2)
+        assertEquals(
+            "「字词」导航必须用默认遍历，不能撞上缓存遍历器",
+            TraversalStrategyFactory.TYPE_DEFAULT,
+            NavigationMode.WORDS.traversalType
+        )
+    }
+
+    @Test
+    fun controls_navigation_must_not_use_grid_traversal() {
+        assertEquals(8, NavigationMode.CONTROLS.typeCode)
+        assertEquals(
+            "「控件」导航必须用默认遍历，不能撞上网格遍历器",
+            TraversalStrategyFactory.TYPE_DEFAULT,
+            NavigationMode.CONTROLS.traversalType
+        )
+    }
+
+    @Test
+    fun vertical_traversal_uses_vertical_type() {
+        assertEquals(17, NavigationMode.VERTICAL_TRAVERSAL.typeCode)
+        assertEquals(
+            "「垂直遍历」必须用垂直遍历器",
+            TraversalStrategyFactory.TYPE_VERTICAL,
+            NavigationMode.VERTICAL_TRAVERSAL.traversalType
+        )
+    }
+
+    @Test
+    fun list_traversal_uses_list_type() {
+        assertEquals(TraversalStrategyFactory.TYPE_LIST, NavigationMode.LIST_TRAVERSAL.traversalType)
+    }
+
+    @Test
+    fun row_column_uses_row_column_type() {
+        assertEquals(
+            TraversalStrategyFactory.TYPE_ROW_COLUMN,
+            NavigationMode.ROW_AND_COLUMN_TRAVERSAL.traversalType
+        )
+    }
+
+    /**
+     * 粒度类导航都不改变遍历方式（都用默认遍历器）
+     */
+    @Test
+    fun granularity_modes_all_use_default_traversal() {
+        val granularityModes = listOf(
+            NavigationMode.DEFAULT, NavigationMode.CHARACTERS,
+            NavigationMode.WORDS, NavigationMode.SENTENCE,
+            NavigationMode.PARAGRAPHS, NavigationMode.LINES
+        )
+        granularityModes.forEach {
+            assertEquals(
+                "${it.label} 应使用默认遍历",
+                TraversalStrategyFactory.TYPE_DEFAULT,
+                it.traversalType
+            )
+        }
+    }
+
+    /**
+     * 过滤类导航也不改变遍历（只改变"停在哪里"）
+     */
+    @Test
+    fun filter_modes_all_use_default_traversal() {
+        val filterModes = listOf(
+            NavigationMode.LINKS, NavigationMode.HEADINGS,
+            NavigationMode.CONTROLS, NavigationMode.SCROLLABLE_WIDGET
+        )
+        filterModes.forEach {
+            assertEquals(
+                "${it.label} 应使用默认遍历",
+                TraversalStrategyFactory.TYPE_DEFAULT,
+                it.traversalType
+            )
+        }
+    }
+
+    /**
+     * usesTraversal 属性应正确反映「是否换遍历器」
+     */
+    @Test
+    fun uses_traversal_flag_is_accurate() {
+        assertTrue("列表遍历应换遍历器", NavigationMode.LIST_TRAVERSAL.usesTraversal)
+        assertTrue("垂直遍历应换遍历器", NavigationMode.VERTICAL_TRAVERSAL.usesTraversal)
+        assertFalse("默认导航不换遍历器", NavigationMode.DEFAULT.usesTraversal)
+        assertFalse("字词导航不换遍历器", NavigationMode.WORDS.usesTraversal)
+    }
+
+    // ==================== P0-3：窗口导航已实现 ====================
+
+    @Test
+    fun windows_navigation_is_now_implemented() {
+        assertTrue(
+            "窗口导航应标记为已实现（WindowTraversal 已就绪）",
+            NavigationMode.WINDOWS_NAVIGATION.implemented
+        )
+    }
+
+    // ==================== P0-3：未实现导航有反馈 ====================
+
+    @Test
+    fun unimplemented_mode_triggers_callback() {
+        val m = NavigationManager()
+        var notified: NavigationMode? = null
+        m.onUnimplemented = { notified = it }
+
+        val ok = m.setMode(NavigationMode.SELECTOR_OCR)
+
+        assertFalse("未实现导航不应切换成功", ok)
+        assertEquals("应回调通知用户", NavigationMode.SELECTOR_OCR, notified)
+    }
+
+    @Test
+    fun implemented_mode_does_not_trigger_unimplemented_callback() {
+        val m = NavigationManager()
+        var notified: NavigationMode? = null
+        m.onUnimplemented = { notified = it }
+
+        m.setMode(NavigationMode.CHARACTERS)
+
+        assertEquals("已实现导航不该触发未实现回调", null, notified)
+    }
+}
+
+/**
+ * 粒度级别测试 —— P0-2 / P1-4
+ */
+class GranularityLevelTest {
+
+    @Test
+    fun level_has_six_values() {
+        assertEquals(6, GranularityNavigator.Level.values().size)
+    }
+
+    @Test
+    fun sentence_and_paragraph_exist() {
+        // 天坦/TalkBack 都有，原实现缺失
+        val names = GranularityNavigator.Level.values().map { it.name }
+        assertTrue(names.contains("SENTENCE"))
+        assertTrue(names.contains("PARAGRAPH"))
+    }
+
+    /**
+     * 系统粒度常量对齐 Android
+     */
+    @Test
+    fun system_granularity_constants() {
+        assertEquals(1, GranularityMover.MOVEMENT_GRANULARITY_CHARACTER)
+        assertEquals(2, GranularityMover.MOVEMENT_GRANULARITY_WORD)
+        assertEquals(4, GranularityMover.MOVEMENT_GRANULARITY_LINE)
+        assertEquals(8, GranularityMover.MOVEMENT_GRANULARITY_PARAGRAPH)
+    }
+
+    @Test
+    fun action_constants_match_android() {
+        assertEquals(256, GranularityMover.ACTION_NEXT_AT_MOVEMENT_GRANULARITY)
+        assertEquals(512, GranularityMover.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY)
+    }
+
+    @Test
+    fun level_to_system_granularity_mapping() {
+        assertEquals(
+            GranularityMover.MOVEMENT_GRANULARITY_CHARACTER,
+            GranularityMover.toSystemGranularity(GranularityNavigator.Level.CHARACTER)
+        )
+        assertEquals(
+            GranularityMover.MOVEMENT_GRANULARITY_WORD,
+            GranularityMover.toSystemGranularity(GranularityNavigator.Level.WORD)
+        )
+        assertEquals(
+            GranularityMover.MOVEMENT_GRANULARITY_LINE,
+            GranularityMover.toSystemGranularity(GranularityNavigator.Level.LINE)
+        )
+        assertEquals(
+            GranularityMover.MOVEMENT_GRANULARITY_PARAGRAPH,
+            GranularityMover.toSystemGranularity(GranularityNavigator.Level.PARAGRAPH)
+        )
+        // DEFAULT 无对应系统常量
+        assertEquals(0, GranularityMover.toSystemGranularity(GranularityNavigator.Level.DEFAULT))
+    }
+
+    @Test
+    fun sentence_has_no_system_constant() {
+        // SENTENCE 在 Android 系统 API 中没有对应常量（TalkBack 用自定义实现）
+        assertEquals(
+            "SENTENCE 无系统常量，应返回 0 以便回退",
+            0,
+            GranularityMover.toSystemGranularity(GranularityNavigator.Level.SENTENCE)
+        )
+    }
+
+    @Test
+    fun move_with_null_node_is_safe() {
+        assertFalse(GranularityMover.move(null, GranularityNavigator.Level.WORD, true))
+    }
+
+    @Test
+    fun is_supported_with_null_node() {
+        assertFalse(GranularityMover.isSupported(null, GranularityNavigator.Level.WORD))
+    }
+}

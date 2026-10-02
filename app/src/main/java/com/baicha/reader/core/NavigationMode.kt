@@ -60,8 +60,33 @@ enum class NavigationMode(
     /** 中文名（对齐天坦资源表） */
     val label: String,
 
-    /** 遍历策略类型码（传给 TraversalStrategyFactory） */
+    /**
+     * 导航标识码 —— 天坦 `X6/z.b` 的导航码
+     *
+     * ⚠️ **这不是遍历器类型码！**
+     *   天坦 `M6/h.D(i9, ..., i10)` 里：
+     *     i9  = 导航码（本字段）
+     *     i10 = 遍历模式（见 [traversalType]）
+     *   两者是**独立的参数**。
+     *
+     *   把导航码当遍历器码用会导致 3 个导航行为完全错误：
+     *     WORDS(2)    → 撞上 TYPE_CACHED(2)   → 用了缓存遍历器
+     *     CONTROLS(8) → 撞上 TYPE_GRID(8)     → 用了网格遍历
+     *     VERTICAL(17)→ 无对应 → 落到 default
+     */
     val typeCode: Int,
+
+    /**
+     * 遍历器类型码 —— 传给 [TraversalStrategyFactory]，对应天坦 `C1427v.h()` 的 `i10`
+     *
+     * 取值语义（天坦）：
+     *   0 → 默认遍历（滑动浏览用）
+     *   2 → 带锚点的遍历
+     *   8 → 网格遍历
+     *
+     * 本项目的扩展：另有 TYPE_LIST / TYPE_ROW_COLUMN / TYPE_VERTICAL / TYPE_SPATIAL
+     */
+    val traversalType: Int,
 
     /** 导航类别 */
     val kind: NavigationKind,
@@ -70,46 +95,54 @@ enum class NavigationMode(
     val implemented: Boolean = true
 ) {
 
-    // ==================== 粒度类（对当前节点文本细分）====================
-    DEFAULT("默认", 0, NavigationKind.GRANULARITY),
-    CHARACTERS("字符", 1, NavigationKind.GRANULARITY),
-    WORDS("字词", 2, NavigationKind.GRANULARITY),
-    SENTENCE("逐句", 3, NavigationKind.GRANULARITY),
-    PARAGRAPHS("段落", 4, NavigationKind.GRANULARITY),
-    LINES("逐行", 5, NavigationKind.GRANULARITY),
+    // ==================== 粒度类（不改变遍历，只改变文本切分）====================
+    DEFAULT("默认", 0, 0, NavigationKind.GRANULARITY),
+    CHARACTERS("字符", 1, 0, NavigationKind.GRANULARITY),
+    WORDS("字词", 2, 0, NavigationKind.GRANULARITY),
+    SENTENCE("逐句", 3, 0, NavigationKind.GRANULARITY),
+    PARAGRAPHS("段落", 4, 0, NavigationKind.GRANULARITY),
+    LINES("逐行", 5, 0, NavigationKind.GRANULARITY),
 
     // ==================== 过滤类（只停在特定节点）====================
-    LINKS("链接", 6, NavigationKind.FILTER),
-    HEADINGS("标题", 7, NavigationKind.FILTER),
-    CONTROLS("控件", 8, NavigationKind.FILTER),
-    SCROLLABLE_WIDGET("可滚动控件", 12, NavigationKind.FILTER),
+    LINKS("链接", 6, 0, NavigationKind.FILTER),
+    HEADINGS("标题", 7, 0, NavigationKind.FILTER),
+    CONTROLS("控件", 8, 0, NavigationKind.FILTER),
+    SCROLLABLE_WIDGET("可滚动控件", 12, 0, NavigationKind.FILTER),
 
     // ==================== 特殊标记 ====================
-    GUIDEPOST("路标", 13, NavigationKind.MARKER, implemented = false),
+    GUIDEPOST("路标", 13, 0, NavigationKind.MARKER, implemented = false),
 
     // ==================== 选择器类（对当前节点做操作）====================
-    SELECTOR_ACTIONS("操作选择器", 30, NavigationKind.SELECTOR, implemented = false),
-    SELECTOR_EDIT("编辑", 32, NavigationKind.SELECTOR, implemented = false),
-    SELECTOR_COPY("复制选择器", 10, NavigationKind.SELECTOR, implemented = false),
-    SELECTOR_OCR("OCR 识别", 14, NavigationKind.SELECTOR, implemented = false),
-    SELECTOR_MAGNIFICATION("放大镜", 19, NavigationKind.SELECTOR, implemented = false),
-    SELECTOR_TRANSLATE("翻译", 15, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_ACTIONS("操作选择器", 30, 0, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_EDIT("编辑", 32, 0, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_COPY("复制选择器", 10, 0, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_OCR("OCR 识别", 14, 0, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_MAGNIFICATION("放大镜", 19, 0, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_TRANSLATE("翻译", 15, 0, NavigationKind.SELECTOR, implemented = false),
 
-    // ==================== 遍历结构类 ====================
-    LIST_TRAVERSAL("列表遍历", 16, NavigationKind.TRAVERSAL),
-    ROW_AND_COLUMN_TRAVERSAL("行列遍历", 31, NavigationKind.TRAVERSAL),
-    VERTICAL_TRAVERSAL("垂直遍历", 17, NavigationKind.TRAVERSAL),
-    SPLIT_TRAVERSAL("拆分遍历", 18, NavigationKind.TRAVERSAL, implemented = false),
-    WINDOWS_NAVIGATION("窗口导航", 9, NavigationKind.TRAVERSAL, implemented = false),
+    // ==================== 遍历结构类（★ 真正改变遍历方式）====================
+    //
+    // ⚠️ 注意 traversalType 与 typeCode **不同**：
+    //   天坦把它们作为独立参数传给 M6/h.D(i9, ..., i10)
+    //   若混用会导致：WORDS(2) 撞 TYPE_CACHED(2)、CONTROLS(8) 撞 TYPE_GRID(8)
+    LIST_TRAVERSAL("列表遍历", 16, 16, NavigationKind.TRAVERSAL),
+    ROW_AND_COLUMN_TRAVERSAL("行列遍历", 31, 31, NavigationKind.TRAVERSAL),
+    VERTICAL_TRAVERSAL("垂直遍历", 17, 17, NavigationKind.TRAVERSAL),
+    SPLIT_TRAVERSAL("拆分遍历", 18, 0, NavigationKind.TRAVERSAL, implemented = false),
+    WINDOWS_NAVIGATION("窗口导航", 9, 0, NavigationKind.TRAVERSAL),
 
     // ==================== 自动类 ====================
-    CONTINUES_READING("连续朗读", 11, NavigationKind.AUTO, implemented = false),
+    CONTINUES_READING("连续朗读", 11, 0, NavigationKind.AUTO, implemented = false),
 
     // ==================== 工具类（调节设置）====================
-    SPEECH_RATE("语速", 20, NavigationKind.TOOL, implemented = false),
-    SPEECH_TIMES("语速倍数", 21, NavigationKind.TOOL, implemented = false),
-    VOLUME_CONTROL("音量", 22, NavigationKind.TOOL, implemented = false),
-    VIDEO_BROWSE("视频浏览", 23, NavigationKind.TOOL, implemented = false);
+    SPEECH_RATE("语速", 20, 0, NavigationKind.TOOL, implemented = false),
+    SPEECH_TIMES("语速倍数", 21, 0, NavigationKind.TOOL, implemented = false),
+    VOLUME_CONTROL("音量", 22, 0, NavigationKind.TOOL, implemented = false),
+    VIDEO_BROWSE("视频浏览", 23, 0, NavigationKind.TOOL, implemented = false);
+
+    /** 当前导航是否使用遍历结构（用于区分"换遍历器"与"只换过滤器"）*/
+    val usesTraversal: Boolean
+        get() = traversalType != 0
 
     companion object {
         /**
@@ -201,6 +234,18 @@ class NavigationManager {
     @Volatile
     var onModeChanged: ((NavigationMode) -> Unit)? = null
 
+    /**
+     * 未实现导航的切换尝试回调
+     *
+     * 【为什么需要】
+     *   原先 `setMode()` 对未实现的导航**静默拒绝**（只写日志），
+     *   用户做了手势却什么都没发生 —— 以为读屏坏了。
+     *
+     *   现在通过这个回调让服务播报「XXX 尚未实现」，给出明确反馈。
+     */
+    @Volatile
+    var onUnimplemented: ((NavigationMode) -> Unit)? = null
+
     /** 各导航的过滤器缓存（惰性构建，切换时复用） */
     private val filterCache = HashMap<NavigationMode, (AccessibilityNodeInfo) -> Boolean>(8)
 
@@ -211,6 +256,8 @@ class NavigationManager {
         if (mode == current) return false
         if (!mode.implemented) {
             ReaderLog.d("NavigationMode", "${mode.label} 尚未实现，拒绝切换")
+            // ★ 给用户反馈，而不是静默拒绝
+            onUnimplemented?.invoke(mode)
             return false
         }
         current = mode

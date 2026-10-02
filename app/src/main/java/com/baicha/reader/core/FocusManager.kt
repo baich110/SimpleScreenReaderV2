@@ -145,6 +145,15 @@ class FocusManager(
     @Volatile
     var onCancelScroll: (() -> Unit)? = null
 
+    /**
+     * 粒度移动器 —— 由服务注入
+     *
+     * 返回 true 表示「系统已处理粒度移动」，此时不应再做节点遍历。
+     * 对应天坦 `AbstractC3675b0.c(node, action, bundle)`。
+     */
+    @Volatile
+    var granularityMover: ((node: AccessibilityNodeInfo, forward: Boolean) -> Boolean)? = null
+
     // ==================== 统计 ====================
 
     @Volatile
@@ -337,7 +346,28 @@ class FocusManager(
 
         val forward = isForward(direction)
 
-        // ★ ③ 搜索（走策略）
+        // ★ ③ 粒度导航：优先用系统 API 移动光标（而不是找下一个节点）
+        //
+        // 【为什么】
+        //   粒度导航（按字/词/句/行/段）的本质是「移动光标」，
+        //   不是「移动焦点到下一个节点」。
+        //   App 维护光标位置，必须通过
+        //   ACTION_NEXT_AT_MOVEMENT_GRANULARITY 让 App 自己移动。
+        //
+        // 天坦 X6/e.java:271 / TalkBack CursorGranularityManager 都是这个机制。
+        val gm = granularityMover
+        if (gm != null) {
+            val moved = gm.invoke(current, forward)
+            if (moved) {
+                // 系统已处理 —— 新位置的内容由
+                // TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY 事件回传
+                ReaderLog.d(TAG, "粒度移动已由系统处理")
+                return current
+            }
+            // 系统不支持 → 回退到普通遍历（下方逻辑）
+        }
+
+        // ★ ④ 搜索（走策略）
         var target = searchFocus(current, forward, strategyType, root, filter)
 
         // ★ ④ 搜索失败 → 递归重试（天坦 C1423r.s() 机制）
