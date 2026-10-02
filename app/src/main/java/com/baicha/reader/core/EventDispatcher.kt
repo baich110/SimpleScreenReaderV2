@@ -198,6 +198,26 @@ class EventDispatcher(
         val pkg = event.packageName?.toString().orEmpty()
 
         if (lastFocusHash == hash) {
+            // ★ 例外 0（本轮补上）：**输入框正在编辑时不判重**
+            //
+            // 【天坦原文】`G6/AccessibilityEventDispatcher.java:304`：
+            //   ```java
+            //   if (this.lastFocusHash == iHashCode
+            //       && !getTextEditingState().i()            // ← 本守卫
+            //       && !s.a(pkg, "com.miui.securityinputmethod")) {
+            //   ```
+            // `TextEditingState.i()` 返回 `f29324e` ——
+            // 语义是「文本输入框正在编辑中」（`m6/TextEditingState.java:209`）。
+            //
+            // 【为什么必须有】编辑框内焦点文本变化频繁且
+            //   `hashCode()` 基于内容 —— 用户输入相同内容时哈希相同，
+            //   会被判为「重复焦点」而**静默丢弃**。
+            //   表现为：在输入框里操作，读屏不吭声。
+            //
+            // 【本轮补齐理由】这是逐函数对照天坦时发现的**抄漏**，
+            //   不是新设计。缺失会让编辑场景的朗读失效。
+            if (isEditingText) return false
+
             // 例外 1：小米安全输入法每次都要读
             if (pkg == PKG_MIUI_SECURITY_INPUT) return false
 
@@ -217,6 +237,18 @@ class EventDispatcher(
     /** 微信读书上次的内容描述 */
     @Volatile
     private var lastWereadDescription: String? = null
+
+    /**
+     * 文本输入框是否正在编辑 —— 对应天坦 `TextEditingState.f29324e`
+     * （`m6/TextEditingState.java:209` 的 `i()`）。
+     *
+     * 由事件处理器在收到文本选择变化事件时更新：
+     * 输入框内有选区/光标 ⇒ 正在编辑。
+     *
+     * 用途：正在编辑时**不做焦点去重** —— 见 isDuplicateFocus 的注释。
+     */
+    @Volatile
+    var isEditingText: Boolean = false
 
     // ==================== ② 14 条过滤规则（天坦 shouldDropEvent）====================
 

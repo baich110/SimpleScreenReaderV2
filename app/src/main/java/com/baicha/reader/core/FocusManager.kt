@@ -328,6 +328,13 @@ class FocusManager(
         strategyType: Int,
         filter: ((AccessibilityNodeInfo) -> Boolean)?
     ): AccessibilityNodeInfo? {
+        // ★ 决策追踪（本轮新增）—— 让「这次滑动为什么没找到焦点」可回答
+        //
+        // 【真机教训】排查 P0 时，日志只能看到「没找到焦点」这个**结果**，
+        // 看不到「在哪一步被拒绝」——而焦点查找有十几道判定，
+        // 任何一道返回 false 都是同一种表现。
+        // 本追踪把每一步的通过/否决汇总成**一行**记录。
+        val trace = FocusTrace.begin(if (isForward(direction)) "下一焦点" else "上一焦点")
         // ★ ⓪ 滚动定位（跳到顶部/底部）
         //
         // 对应 TalkBack `performActionScrollToPosition()`。
@@ -369,7 +376,9 @@ class FocusManager(
             if (isSameScrollDirection(direction)) {
                 // 同方向 → 直接吞掉
                 blockedByScroll++
-                ReaderLog.d(TAG, "滚动中同向导航 → 吞掉")
+                trace.step("滚动拦截", passed = false, detail = "同向滚动画吞掉")
+                trace.reject("滚动中同向导航被吞")
+                trace.end()
                 return null
             }
             // 反方向 → 取消滚动，继续导航
@@ -385,8 +394,12 @@ class FocusManager(
             val window = (BASE_DEBOUNCE_MS + navStreak * DEBOUNCE_STEP_MS)
                 .coerceAtMost(MAX_DEBOUNCE_MS)
             if (now - lastNavTime < window) {
+                trace.step("防抖", passed = false, detail = "${now - lastNavTime}ms<${window}ms")
+                trace.reject("防抖窗口内被丢弃")
+                trace.end()
                 return null
             }
+            trace.step("防抖", passed = true, detail = "第${navStreak + 1}次连滑")
             navStreak++
         } else {
             // 换方向 → 立即放行，重置连续计数
@@ -405,10 +418,19 @@ class FocusManager(
 
         // 无焦点 → 取第一个
         if (current == null) {
+            trace.step("当前焦点", passed = true, detail = "无 → 取第一个")
             val first = findFirstFocusable(root, strategyType)
-            if (first == null) return null
-            return if (applyFocus(first)) first else null
+            if (first == null) {
+                trace.reject("当前无焦点且找不到首个可聚焦节点")
+                trace.end()
+                return null
+            }
+            val ok = applyFocus(first)
+            if (ok) trace.accept(first) else trace.reject("设焦点失败", "performAction 返回 false")
+            trace.end()
+            return if (ok) first else null
         }
+        trace.step("当前焦点", passed = true, detail = FocusTrace.describe(current))
 
         val forward = isForward(direction)
 
@@ -427,9 +449,12 @@ class FocusManager(
             if (moved) {
                 // 系统已处理 —— 新位置的内容由
                 // TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY 事件回传
-                ReaderLog.d(TAG, "粒度移动已由系统处理")
+                trace.step("粒度", passed = true, detail = "系统已移动光标")
+                trace.accept(current)
+                trace.end()
                 return current
             }
+            trace.skip("粒度")
             // 系统不支持 → 回退到普通遍历（下方逻辑）
         }
 
@@ -439,9 +464,20 @@ class FocusManager(
         // ★ ④ 搜索失败 → 递归重试（天坦 C1423r.s() 机制）
         if (target == null) {
             retryCount++
-            ReaderLog.d(TAG, "搜索无果 → 重试一次")
+            trace.step("搜索", passed = false, detail = "首次无果，用默认策略重试")
             // 重试时强制用默认策略（避免策略本身导致的死路）
             target = searchFocus(current, forward, TraversalStrategyFactory.TYPE_DEFAULT, root, filter)
+            if (target == null) {
+                trace.reject(
+                    "遍历无果",
+                    "策略重试后仍未找到可聚焦节点（过滤=${filterDescription(filter)}）"
+                )
+                trace.end()
+                return null
+            }
+            trace.step("搜索", passed = true, detail = "重试命中 ${FocusTrace.describe(target)}")
+        } else {
+            trace.step("搜索", passed = true, detail = FocusTrace.describe(target))
         }
 
         if (target != null && target != current) {
@@ -451,9 +487,18 @@ class FocusManager(
             // 导致「焦点丢失」。现在改成返回「实际应该聚焦的节点」。
             val actual = resolveReachable(target)
             if (actual !== target) {
-                ReaderLog.d(TAG, "目标不可达 → 退到父节点 ${desc(actual)}")
+                trace.step("可达性", passed = true, detail = "退到父节点")
+            } else {
+                trace.step("可达性", passed = true)
             }
-            return if (applyFocus(actual)) actual else null
+            val ok = applyFocus(actual)
+            if (ok) {
+                trace.accept(actual)
+            } else {
+                trace.reject("设焦点失败", "performAction(ACTION_ACCESSIBILITY_FOCUS) 返回 false")
+            }
+            trace.end()
+            return if (ok) actual else null
         }
 
         // ① 走到头 → 循环（回到另一端）
@@ -624,6 +669,17 @@ class FocusManager(
         touchTime = SystemClock.uptimeMillis()
         return applyFocus(node, force = true)
     }
+
+    /**
+     * 过滤器描述 —— 日志里能看出「这次导航用的是哪种过滤」
+     *
+     * 【为什么需要】焦点找不到的常见原因之一是**过滤器过严**：
+     *   比如导航模式是「标题」但页面上没有标题，
+     *   此时遍历会走遍整棵树然后失败。
+     *   日志里带上过滤条件，能立刻区分「过滤器问题」与「树结构问题」。
+     */
+    private fun filterDescription(filter: ((AccessibilityNodeInfo) -> Boolean)?): String =
+        if (filter == null) "默认(可聚焦)" else "自定义过滤器"
 
     // ==================== 操作目标 ====================
 

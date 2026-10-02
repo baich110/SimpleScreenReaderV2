@@ -481,6 +481,11 @@ class ReaderAccessibilityService : AccessibilityService() {
         //   否则触摸探索的事件会打断朗读流。
         //   原来该字段无人置 true，规则 4 永不成立。
         dispatcher.fullScreenReadState = { continuousReader.state.isActive }
+        // ★ 编辑状态转发（本轮补齐天坦的 TextEditingState 守卫）
+        //   编辑态下不做焦点去重，否则输入框内相同内容会被判重丢弃
+        eventHandler.onEditingStateChanged = { editing ->
+            dispatcher.isEditingText = editing
+        }
         dispatcher.fullScreenReadInterrupt = { type, time, isBar ->
             continuousReader.onEvent(type, time, isBar)
         }
@@ -1287,16 +1292,58 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * 服务侧日志 —— 事件的**唯一**出口
+     *
+     * ══════════════════════════════════════════════════════
+     * 【为什么这里要指定分类，而不是靠 [ReaderLog] 按 tag 猜】
+     * ══════════════════════════════════════════════════════
+     *
+     * 这个方法收到的是**原始中文消息**（「焦点清除」「触摸: xxx」
+     * 「无障碍焦点: xxx」），不带 tag，靠 tag 猜只能全归到一类。
+     * 分类信息此刻就在手边 —— 消息本身就是分类：
+     *   「焦点清除」→ FOCUS     「触摸: …」→ EVENT（触摸探索）
+     *   「无障碍焦点: …」→ FOCUS 「滚动…」→ EVENT
+     *   「TTS …」→ SPEECH
+     * 显式归类后，「只看焦点导航」能真正筛出这一批。
+     */
     private fun log(msg: String) {
-        ReaderLog.i("Service", msg)
-        val time = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.CHINA)
-            .format(java.util.Date())
-        val line = "[$time] $msg"
+        ReaderLog.log(LogLevel.INFO, "Service", msg, classifyServiceMessage(msg))
+    }
+
+    /**
+     * 兼容旧的双缓冲写入 —— **保留给外部直接把行推给面板的场景**
+     *
+     * 【为什么不再由 [log] 调用】[ReaderLog] 自己已经有内存环形缓冲和
+     * 面板回调（[ReaderLog.onLogUpdate]），服务再攒一份就是三份重复。
+     * 之前 3.2MB 撑爆 Bundle 的日志文本，正是从 `eventLog` +
+     * `onLogUpdate` 这条线一路流到 UI 的。
+     */
+    @Deprecated("改用 ReaderLog；保留仅为兼容旧的 onLogUpdate 消费方")
+    private fun pushEventLog(line: String) {
         synchronized(eventLog) {
             eventLog.addFirst(line)
             while (eventLog.size > MAX_LOG) eventLog.removeLast()
         }
         onLogUpdate?.invoke(line)
+    }
+
+    /**
+     * 按消息内容给服务日志分类
+     *
+     * 【为什么用「前缀词表」而不是正则】这是热路径（每个无障碍事件都过），
+     * 一次 `String.startsWith` 比正则便宜一个数量级。
+     * 而且写错时的表现是「落到 OTHER」，不会漏日志。
+     */
+    private fun classifyServiceMessage(msg: String): LogCategory = when {
+        msg.startsWith("焦点清除") || msg.startsWith("无障碍焦点") -> LogCategory.FOCUS
+        msg.startsWith("恢复焦点") || msg.startsWith("窗口导航") -> LogCategory.FOCUS
+        msg.startsWith("触摸") || msg.startsWith("滚动") -> LogCategory.EVENT
+        msg.startsWith("双击") || msg.startsWith("长按") -> LogCategory.EVENT
+        msg.startsWith("手势") || msg.startsWith("→") -> LogCategory.GESTURE
+        msg.startsWith("TTS") || msg.startsWith("测试朗读") -> LogCategory.SPEECH
+        msg.startsWith("屏幕") -> LogCategory.SYSTEM
+        else -> LogCategory.SYSTEM
     }
 
     fun speakTest(text: String) {

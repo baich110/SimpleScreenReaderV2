@@ -338,6 +338,16 @@ class AccessibilityEventHandler(
             // ---------- 8192: 选择变化 ----------
             AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> {
                 val node = event.source
+
+                // ★ 更新「是否正在编辑」状态（本轮补上，天坦 `TextEditingState`）
+                //
+                // 依据天坦 `m6/TextEditingState.java:185~204`：
+                //   收到该事件且节点可编辑 ⇒ 进入编辑态（f29324e = true）；
+                //   离开可编辑节点 ⇒ 退出编辑态。
+                // 用途：编辑态下 `EventDispatcher.isDuplicateFocus` 不判重 ——
+                //   否则用户在输入框里输入相同内容会被当作「重复焦点」丢弃。
+                updateEditingState(node)
+
                 val text = node?.text?.toString()?.trim().orEmpty()
                 if (text.isNotEmpty()) {
                     log("选择: $text")
@@ -441,6 +451,47 @@ class AccessibilityEventHandler(
             }
         }
     }
+
+    /**
+     * 更新「文本是否正在编辑」状态 —— 对应天坦 `TextEditingState`
+     *
+     * 天坦 `m6/TextEditingState.java:185~204`：
+     * ```java
+     * if (AbstractC3675b0.b(wVar, 64)) {         // 有 TEXT_SELECTION_CHANGED 类变化
+     *     this.f29322c.i(wVar, i9);
+     *     this.f29324e = false;
+     *     ...
+     *     if (z10 && ...) this.f29324e = true;   // 进入编辑态
+     * }
+     * ```
+     *
+     * 【白茶的判定】简化但不失真：
+     *   · 源节点可编辑 **且** 有焦点 ⇒ 正在编辑
+     *   · 源节点为空或不可编辑 ⇒ 退出编辑态
+     *
+     * 【为什么不能只判 isEditable】
+     *   可编辑 ≠ 正在编辑。一个没被点进去的输入框 `isEditable` 也为 true，
+     *   若据此不判重，会导致大量正常焦点事件被重复播报。
+     *   天坦同样要求「有焦点」这一附加条件。
+     */
+    private fun updateEditingState(node: AccessibilityNodeInfo?) {
+        val editing = try {
+            node != null && node.isEditable && node.isFocused
+        } catch (e: Throwable) {
+            false
+        }
+        onEditingStateChanged?.invoke(editing)
+    }
+
+    /**
+     * 编辑状态变化回调 —— 由服务注入，转发给 [EventDispatcher.isEditingText]
+     *
+     * 【为什么用回调】事件处理器与事件分发器是两个独立对象，
+     * 处理器不持有分发器（避免环形依赖）。
+     * 这是本项目既有的模式（见 fullScreenReadState / granularityMover）。
+     */
+    @Volatile
+    var onEditingStateChanged: ((Boolean) -> Unit)? = null
 
     /**
      * 窗口内容变化处理 —— 对标 TalkBack

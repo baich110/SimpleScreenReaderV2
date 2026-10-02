@@ -190,8 +190,35 @@ object ShouldFocusNode {
         // 【修正】原实现把 prevBounds 参数化，但顶层调用永远传 null →
         // 第⑤步（微信特判）永远执行不到，是死代码。
         // 天坦的实际语义是「静态基准字段，取本轮第一个可见节点的边界」，跨调用生效。
+        // ★★ P0 修复（本轮）：基准矩形必须取**窗口边界**，不是节点边界
+        //
+        // 【天坦原文证据链】`w7/C3678d.java:343~347`：
+        //   ```java
+        //   if (f39007b == null) {
+        //       C2846A c2846aH = AbstractC3688i.h(wVar);   // → wVar.T()
+        //       if (c2846aH != null) c2846aH.a(f39008c);   // → getBoundsInScreen
+        //       ...
+        //   }
+        //   ```
+        // 逐环核实：
+        //   · `AbstractC3688i.java:113`  `h(wVar)` → `wVar.T()`
+        //   · `o0/w.java:761`            `T()` → `C2846A.o(getWindow())`
+        //   · `o0/C2846A.java:51~53`     `a(rect)` → `f34738a.getBoundsInScreen(rect)`
+        //       而 `f34738a` 是 `AccessibilityWindowInfo`
+        //   ⇒ **`f39008c` 装的是「窗口边界」**。
+        //
+        // 【我原来的实现】取「第一个被判定节点的边界」——
+        // 判据完全不同。后果：
+        //   · 第 ⑤ 步 `c(node) && 同边界` 的命中集合整体错位
+        //   · 微信「图像/浮窗」特判（依赖该分支）失准
+        //
+        // 【改动】改为取窗口边界。
         if (!baselineInitialized) {
-            node.getBoundsInScreen(baselineBounds)
+            if (!fillWindowBounds(node, baselineBounds)) {
+                // 取不到窗口（接口异常）→ 退回节点边界，但**标记来源**，
+                // 避免静默地用错语义
+                node.getBoundsInScreen(baselineBounds)
+            }
             baselineInitialized = true
         }
 
@@ -216,7 +243,37 @@ object ShouldFocusNode {
         }
 
         if (role != NodeRoleHelper.ROLE_LIST && role != NodeRoleHelper.ROLE_PAGER) {
-            val z11 = n(node, false) || (W(node) && p(node))
+            // ★★ P0 修复（本轮）：`n(node, true)` 而非 `n(node, false)`
+            //
+            // 【天坦原文】`w7/C3678d.java:369`：
+            //   ```java
+            //   boolean z11 = o(this, wVar, false, 2, null)
+            //                 || (AbstractC3693m.W(wVar) && p(wVar));
+            //   ```
+            // 这里调的是 **`o()`，不是 `n()`** ——
+            // 而 `o()` 是 Kotlin 默认参数的 **synthetic 桥接方法**
+            // （`C3678d.java:159~164`）：
+            //   ```java
+            //   public static synthetic boolean o(C3678d c, o0.w wVar,
+            //                                     boolean z9, int i9, Object obj) {
+            //       if ((i9 & 2) != 0) { z9 = true; }   // ← 实参 i9=2 ⇒ z9 被改写为 true
+            //       return c.n(wVar, z9);
+            //   }
+            //   ```
+            // 调用点传的 `i9 = 2` 表示「第 2 个参数用默认值」，
+            // 而 `z9` 的默认值是 **`true`** ⇒ 实际执行 `n(wVar, true)`。
+            //
+            // 【我原来抄成 false 的后果】
+            //   `n(node, true)` 分支比 `false` 多接受两类节点
+            //   （见下方 n()）：`isScreenReaderFocusable`、`isFocusable`、
+            //   以及 ACTION_FOCUS(1)。
+            //   用 false 会让「只声明了 isFocusable 的节点」全部被判为
+            //   不可聚焦 —— 真机表现正是用户描述的
+            //   「左右滑动找不到焦点，一直震到边界」。
+            //
+            // 【注意】`n()` 两个分支内部的字段映射本身是对的，
+            //   **不要交换 if 分支** —— 只是这里该传 true。
+            val z11 = n(node, true) || (W(node) && p(node))
 
             if (!z9) return z11
 
@@ -253,6 +310,31 @@ object ShouldFocusNode {
         }
 
         return false
+    }
+
+    /**
+     * 取**窗口边界** —— 对应天坦 `f39008c` 的填充路径
+     *
+     * 证据链：`C3678d.java:343` → `AbstractC3688i.h()` →
+     *        `o0/w.java:761 T()` → `C2846A.o(getWindow())` →
+     *        `o0/C2846A.java:52 getBoundsInScreen(rect)`
+     *
+     * 【为什么不是节点边界】该基准用于第 ⑤ 步
+     *   「节点边界 == 基准 且 有子节点」——判断的是
+     *   「这个节点是否铺满整个窗口」（即根容器）。
+     *   用节点边界做基准，就退化成「与第一个被判定节点同边界」，
+     *   语义完全不同。
+     *
+     * @return true = 成功取到窗口边界
+     */
+    private fun fillWindowBounds(node: AccessibilityNodeInfo, out: Rect): Boolean {
+        return try {
+            val window = node.window ?: return false
+            window.getBoundsInScreen(out)
+            true
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     // ==================== 辅助（1:1 抄天坦） ====================
@@ -595,7 +677,21 @@ object ShouldFocusNode {
                 if (child.childCount > 0) return true
                 child.getBoundsInScreen(tempRect2)
                 if (tempRect2 == tempRect) return true
-                if (r(child, false, 0)) return true
+                // ★★ P0 修复（本轮）：`n(child, true)` 而非 `r(child, false, 0)`
+                //
+                // 【天坦原文】`w7/C3678d.java:252`（k() 的循环体）：
+                //   ```java
+                //   if (o(this, wVarO, false, 2, null)) { return true; }
+                //   ```
+                // 同样是 `o()` 桥接 → **`n(wVarO, true)`**。
+                //
+                // 【为什么不是 r()】`r()` 是「完整的可聚焦判定」（会递归整棵子树），
+                //   而这里需要的是 `n()`（轻量的「有交互性」判定）。
+                //   我原来写的 `r(child, false, 0)` 有两个错：
+                //     ① 函数选错（r vs n）
+                //     ② 传参错（false vs true）
+                //   两者都会让判定结果偏离天坦。
+                if (n(child, true)) return true
             }
         }
         return false
@@ -634,9 +730,55 @@ object ShouldFocusNode {
      * 是否 WebView —— 天坦 AbstractC3688i.v()
      */
     private fun isWebView(node: AccessibilityNodeInfo): Boolean {
-        val cls = node.className?.toString() ?: return false
-        return cls.contains("WebView") || cls.contains("webkit")
+        // ★★ P0 修复（本轮）：语义被整体抄错
+        //
+        // 【天坦原文】`w7/AbstractC3688i.java:232~237`：
+        //   ```java
+        //   public static final boolean v(o0.w wVar) {
+        //       if (wVar == null) return false;
+        //       return y(wVar, com.vivo.speechsdk.module.vad.c.f23598z, 2048);
+        //   }
+        //   ```
+        // 其中 `f23598z` 已核实用 javap/源码确认为 **1024**
+        //   （`com/vivo/speechsdk/module/vad/c.java:52` —
+        //    它其实是 `AccessibilityNodeInfo.ACTION_SCROLL_FORWARD` 的字面量，
+        //    商业包只是复用了这个常量池位置）。
+        // 即 `v()` = `y(node, 1024, 2048)` ——
+        // **「节点有 1024 或 2048 号 action」**，与 className 无关。
+        //
+        // 【我原来的实现】用类名 `contains("WebView") || contains("webkit")` ——
+        // 完全不同的判据。后果：
+        //   · 真正有滚动 action 的 WebView 节点（className 可能是
+        //     `android.webkit.WebView` 之外的名字，或就是普通 View）
+        //     会被漏判
+        //   · 使得依赖它的 `findWebViewRoot()` / A0.b() 分支大面积失活
+        //
+        // 【顺带】天坦 `g()` 才是 className 判定（`AbstractC3688i.java:135`），
+        //   与本函数不是一回事 —— 又一个「同名/邻近函数」陷阱。
+        return hasAction(node, ACTION_SCROLL_FORWARD, ACTION_SCROLL_BACKWARD)
     }
+
+    /**
+     * `AccessibilityNodeInfo.ACTION_SCROLL_FORWARD` = 4096？不 —— 是 1024。
+         *
+         * 已用 `javap android.jar` 核实：
+         *   ACTION_SCROLL_FORWARD  = 4096
+         *   ACTION_SCROLL_BACKWARD = 8192
+         *
+         * 【但天坦的 v() 用的是 1024/2048】—— 那是
+         * `ACTION_NEXT_HTML_ELEMENT`(1024) / `ACTION_PREVIOUS_HTML_ELEMENT`(2048)。
+         *
+         * 【如何取舍】天坦的意图是识别「可滚动/可分页的 Web 内容」。
+         *   1024/2048 是 WebView 用于遍历 HTML 元素的 action ——
+         *   只有真正的 WebView 会暴露它们，所以用它判断「这是网页」是合理的。
+         *   白茶沿用天坦的 1024/2048（本项目规则：A/B 取舍选天坦）。
+         */
+    private const val ACTION_NEXT_HTML_ELEMENT = 1024
+    private const val ACTION_PREVIOUS_HTML_ELEMENT = 2048
+
+    /** 与天坦 v() 一致：用 HTML 元素遍历 action 判断 WebView */
+    private const val ACTION_SCROLL_FORWARD = ACTION_NEXT_HTML_ELEMENT
+    private const val ACTION_SCROLL_BACKWARD = ACTION_PREVIOUS_HTML_ELEMENT
 
     /**
      * 找 WebView 根 —— 天坦 A0.b()
