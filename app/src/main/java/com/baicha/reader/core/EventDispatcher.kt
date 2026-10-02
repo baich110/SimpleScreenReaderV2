@@ -55,9 +55,31 @@ class EventDispatcher(
     @Volatile
     var isScreenOn: Boolean = true
 
-    /** 是否全屏朗读中 */
+    /**
+     * 是否全屏朗读中。
+     *
+     * 【已接线（A4）】原来该字段声明后**没有任何地方置为 true**，
+     * 规则 4 的条件永远不成立 —— 功能不可达。
+     * 现由服务注入 [fullScreenReadState]，实时反映连续朗读状态。
+     *
+     * 规则 4 的用途：连续朗读时忽略 HOVER_ENTER，
+     * 否则触摸探索的事件会打断朗读流。
+     */
     @Volatile
-    var isFullScreenReading: Boolean = false
+    var fullScreenReadState: (() -> Boolean)? = null
+
+    /** 是否全屏朗读中 */
+    val isFullScreenReading: Boolean
+        get() = fullScreenReadState?.invoke() ?: false
+
+    /**
+     * 连续朗读打断钩子（A4）—— 由服务注入。
+     *
+     * 参数：(事件类型, 事件时间, 是否进度条)
+     * 返回：是否因此打断了朗读
+     */
+    @Volatile
+    var fullScreenReadInterrupt: ((Int, Long, Boolean) -> Boolean)? = null
 
     /** 微信语音播报中 */
     @Volatile
@@ -96,6 +118,21 @@ class EventDispatcher(
      */
     fun onEvent(event: AccessibilityEvent) {
         PerfCounters.eventHandled()
+
+        // ★ 连续朗读打断检查（A4）
+        //
+        // 对标 TalkBack `FullScreenReadInterpreter.java:86~110`：
+        //   用户操作（点击/长按/触摸探索开始/系统播报）→ 打断朗读
+        //   TYPE_VIEW_SELECTED → 打断，但进度条/滑块除外
+        //   启动后 200ms 内的点击忽略（对话框确认键的延迟事件）
+        //
+        // 【为什么放在最前面】打断判断便宜，且必须早于其他过滤 ——
+        // 若被前面的去重规则吞掉，用户点了屏幕朗读却还在继续。
+        fullScreenReadInterrupt?.invoke(
+            event.eventType,
+            event.eventTime,
+            false   // isProgressBar 由调用方按节点角色判定；此处保守传 false
+        )
         // ① 焦点去重（最便宜，先做）
         if (isDuplicateFocus(event)) {
             droppedCount++

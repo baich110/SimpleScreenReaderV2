@@ -155,6 +155,12 @@ class ReaderAccessibilityService : AccessibilityService() {
         private set
 
     /**
+     * 连续朗读（A4）—— 对标 TalkBack `FullScreenReadActor`
+     */
+    lateinit var continuousReader: ContinuousReader
+        private set
+
+    /**
      * 系统状态播报（静音/屏幕/锁屏/解锁）。
      *
      * 对标 TalkBack `RingerModeAndScreenMonitor` 与天坦 `W6/h`。
@@ -362,6 +368,73 @@ class ReaderAccessibilityService : AccessibilityService() {
             log = { msg -> log(msg) }
         )
         systemState.register()
+
+        // ★ 连续朗读（A4）
+        //
+        // 修复的问题：`EventDispatcher.isFullScreenReading` 字段声明了、
+        // 在规则 4 里被读取，但**没有任何地方置为 true** —— 功能完全不可达。
+        continuousReader = ContinuousReader(
+            state = ContinuousReadState(),
+            moveNext = {
+                // 推进 = 一次普通的下一个焦点导航
+                //（照 TalkBack moveForward()：CRM 复用普通导航，不另造机制）
+                val node = focus.moveFocus(
+                    direction = FocusManager.DIR_NEXT,
+                    strategyType = TraversalStrategyFactory.TYPE_DEFAULT,
+                    filter = navigation.filter()
+                )
+                if (node != null) {
+                    speakNode(node, "连续朗读")
+                    autoScroll.ensureVisible(node, 1)
+                    true
+                } else {
+                    false   // 走到底
+                }
+            },
+            playComplete = { sound.complete() },
+            speak = { t -> speech.speak(t, interrupt = true) },
+            currentText = { focus.getFocused()?.let { composeNode(it) } },
+            log = { msg -> log(msg) }
+        )
+        // ★ 实例化手势动作处理器
+        //
+        // 【本发现的一个严重缺陷】`gestureActions` 声明为 lateinit
+        // 却**从未初始化** —— 而它在 3 处被使用：
+        //   · isMediaPlaying = { gestureActions.isMediaActive() }
+        //   · onMappedAction = { gestureActions.handleMappedGesture(id) }
+        //   · handleMediaGesture → gestureActions.handleMappedGesture(id)
+        // 首次手势就会抛 UninitializedPropertyAccessException，
+        // 整个无障碍服务崩溃 —— 用户彻底失去辅助。
+        gestureActions = GestureActionHandler(
+            context = this,
+            onMoveFocus = { forward -> moveFocusInternal(forward) },
+            onScroll = { forward -> scrollInternal(forward) },
+            getTargetNode = { focus.getFocused() },
+            speak = { text, interrupt -> speech.speak(text, interrupt = interrupt) },
+            stopSpeech = { speech.stop() },
+            // 读屏开关状态直接读写 SpeechEngine 的 enabled ——
+            // 它就是「读屏是否出声」的唯一真相
+            isSpeechEnabled = { speech.enabled },
+            setSpeechEnabled = { enabled -> speech.enabled = enabled },
+            navigation = navigation,
+            invalidateCache = { CacheRegistry.invalidate(CacheRegistry.Level.CONTENT) },
+            onClickTarget = { focus.clickTarget() },
+            onLongClickTarget = { focus.longClickTarget() }
+        )
+        // 连续朗读切换（A4）
+        gestureActions.continuousReadToggle = {
+            continuousReader.toggle()
+            true
+        }
+
+        // ★ 把连续朗读状态接进事件分发器（A4）
+        //   规则 4 依赖它：全屏朗读中忽略 HOVER_ENTER，
+        //   否则触摸探索的事件会打断朗读流。
+        //   原来该字段无人置 true，规则 4 永不成立。
+        dispatcher.fullScreenReadState = { continuousReader.state.isActive }
+        dispatcher.fullScreenReadInterrupt = { type, time, isBar ->
+            continuousReader.onEvent(type, time, isBar)
+        }
         // ★ 增量文本监控（文本差分）—— 实时更新界面只念变化部分
         textMonitor = NodeTextMonitor().apply {
             enabled = true
@@ -1008,6 +1081,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         shutdownSafely("boundsCache") { NodeBoundsCalculator.clear() }
         shutdownSafely("gestureChain") { gestureChain.clear() }
         shutdownSafely("systemState") { systemState.unregister() }
+        shutdownSafely("continuousReader") { continuousReader.shutdown() }
 
         onLogUpdate = null
         synchronized(eventLog) { eventLog.clear() }

@@ -44,6 +44,17 @@ class GestureActionHandler(
     /** 长按当前目标（兜底路径用） */
     private val onLongClickTarget: () -> Boolean = { false }
 ) {
+    /**
+     * 连续朗读切换钩子（A4）—— 由服务注入。
+     *
+     * 【为什么用钩子而不是直接持有 ContinuousReader】
+     *   与 granularityMover / scrollJump 同构：本类不持有朗读引擎，
+     *   保持可测；具体实现由服务层注入。
+     *
+     * @return 是否处理成功
+     */
+    var continuousReadToggle: (() -> Boolean)? = null
+
 
     private val audioManager: AudioManager? =
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -96,6 +107,10 @@ class GestureActionHandler(
             GestureAction.GRANULARITY_WORD -> setGranularity(GranularityNavigator.Level.WORD)
             GestureAction.GRANULARITY_LINE -> setGranularity(GranularityNavigator.Level.LINE)
             GestureAction.GRANULARITY_DEFAULT -> cycleGranularity()
+
+            // ---- 连续朗读（A4）----
+            // 已开启则停止，未开启则从当前位置开始
+            GestureAction.CONTINUOUS_READ -> continuousReadToggle?.invoke() ?: false
 
             // ---- 文本编辑 ----
             GestureAction.COPY -> runEditAction(EditAction.COPY)

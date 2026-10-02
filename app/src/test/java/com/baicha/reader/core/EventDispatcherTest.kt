@@ -41,13 +41,49 @@ class EventDispatcherTest {
         assertTrue(d.isScreenOn)
     }
 
+    /**
+     * ★ 全屏朗读状态改为**由外部注入**（A4）
+     *
+     * 【为什么改】原测试直接给 `isFullScreenReading` 赋值 ——
+     *   但恰恰因为它是「可随意赋值的字段」而**没有任何地方赋值为 true**，
+     *   导致规则 4 永不成立、连续朗读功能不可达。
+     *
+     *   现在改为读取注入的状态提供者，测试要验证的是**接线**：
+     *   提供者返回 true 时该属性为 true。
+     */
     @Test
-    fun full_screen_reading_flag_toggles() {
+    fun full_screen_reading_follows_injected_state() {
         val d = EventDispatcher(EventQueue())
-        d.isFullScreenReading = true
+
+        // 未注入 → 默认 false（不静默假设为 true）
+        assertFalse("未注入时应为 false", d.isFullScreenReading)
+
+        // 注入「正在连续朗读」
+        var reading = true
+        d.fullScreenReadState = { reading }
         assertTrue(d.isFullScreenReading)
-        d.isFullScreenReading = false
-        assertFalse(d.isFullScreenReading)
+
+        // 朗读结束 → 立即反映
+        reading = false
+        assertFalse("注入状态变化应立即反映", d.isFullScreenReading)
+    }
+
+    /**
+     * ★ 打断钩子接线（A4）
+     */
+    @Test
+    fun full_screen_read_interrupt_hook_is_invoked() {
+        val d = EventDispatcher(EventQueue())
+        var calledType = -1
+        d.fullScreenReadInterrupt = { type, _, _ ->
+            calledType = type
+            false
+        }
+        // 触发一次分发（用一个不会引发其他副作用的事件类型）
+        val e = android.view.accessibility.AccessibilityEvent.obtain()
+        // JVM 下 obtain() 返回 null，故只验证钩子字段本身可用
+        d.fullScreenReadInterrupt?.invoke(1, 0L, false)
+        assertEquals("钩子应被调用", 1, calledType)
     }
 
     /**

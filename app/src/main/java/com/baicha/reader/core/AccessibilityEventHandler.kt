@@ -38,8 +38,10 @@ import android.view.accessibility.AccessibilityNodeInfo
  *   65536    焦点清除          → 日志
  *   131072   拖拽             → 播报
  *   262144   上下文点击        → 音效 + 播报
- *   1048576  触摸探索开始      → **先打断**
- *   2097152  触摸探索结束      → 日志
+ *   512      触摸探索开始      → **先打断**
+ *            （注：1048576 是 TYPE_TOUCH_INTERACTION_START，不是它）
+ *   1024     触摸探索结束      → 日志
+ *            （注：2097152 是 TYPE_TOUCH_INTERACTION_END，不是它）
  *   4194304  窗口集合变化      → 缓存失效
  *   + 通知 / 系统播报 / 内容变化
  */
@@ -279,14 +281,14 @@ class AccessibilityEventHandler(
                 }
             }
 
-            // ---------- 1048576: 触摸探索开始 ----------
+            // ---------- 512: 触摸探索开始 ----------
             AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_START -> {
                 log("触摸探索开始")
                 // ★ 天坦行为：探索开始也先打断
                 speech.interruptChannelA()
             }
 
-            // ---------- 2097152: 触摸探索结束 ----------
+            // ---------- 1024: 触摸探索结束 ----------
             AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_END -> {
                 log("触摸探索结束")
             }

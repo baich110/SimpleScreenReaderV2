@@ -180,6 +180,15 @@ enum class GestureAction {
     /** 粒度：默认 */
     GRANULARITY_DEFAULT,
 
+    /**
+     * 连续朗读（A4）—— 对标 TalkBack 的 Continuous Reading Mode。
+     *
+     * 【为什么选 4 指三击】该手势此前映射到 SCREEN_RECOGNIZE，
+     * 而识别功能尚未实现（见 NavigationMode.SELECTOR_OCR 标 false）。
+     * 用一个未实现的功能占着手势不如给已实现的能力。
+     */
+    CONTINUOUS_READ,
+
     /** 复制 */
     COPY,
 
@@ -281,7 +290,9 @@ object GestureMap {
         Gestures.GESTURE_2_FINGER_TRIPLE_TAP -> GestureAction.SCREENSHOT
         Gestures.GESTURE_3_FINGER_SINGLE_TAP -> GestureAction.GLOBAL_MENU
         Gestures.GESTURE_3_FINGER_DOUBLE_TAP -> GestureAction.GRANULARITY_DEFAULT
-        Gestures.GESTURE_3_FINGER_TRIPLE_TAP -> GestureAction.SCREEN_RECOGNIZE
+        // 【A4 变更】原绑 SCREEN_RECOGNIZE（识别功能未实现，
+        // 按了没反应且不吭声）。改绑已实现的连续朗读。
+        Gestures.GESTURE_3_FINGER_TRIPLE_TAP -> GestureAction.CONTINUOUS_READ
         Gestures.GESTURE_4_FINGER_SINGLE_TAP -> GestureAction.TOGGLE_SPEAK
         Gestures.GESTURE_4_FINGER_DOUBLE_TAP -> GestureAction.GRANULARITY_CHARACTER
         Gestures.GESTURE_4_FINGER_TRIPLE_TAP -> GestureAction.GRANULARITY_WORD
