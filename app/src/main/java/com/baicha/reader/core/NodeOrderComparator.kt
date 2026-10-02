@@ -65,6 +65,35 @@ object NodeOrderComparator {
         threshold10dp = dp10
     }
 
+    /**
+     * 从 Context 初始化 —— 对应天坦 `C1423r.a.M(Context)`
+     *
+     * 【为什么必须调用】
+     *   排序算法用屏幕尺寸算三个阈值：
+     *     threshold02H = 屏高 * 0.2
+     *     threshold03H = 屏高 * 0.3
+     *     threshold10dp = 10dp 对应的像素数
+     *   不初始化就会用硬编码的 1080x1920 —— 在其他分辨率设备上
+     *   排序判定会系统性偏差。
+     *
+     * 天坦的调用时机（源码 4 处）：
+     *   ① 横竖屏切换（onConfigurationChanged）
+     *   ② 服务重启 / 恢复
+     *   ③ 服务连接
+     *   ④ 窗口变化后的重建
+     */
+    fun initFromContext(context: android.content.Context) {
+        try {
+            val metrics = context.resources.displayMetrics
+            val density = metrics.density
+            val dp10 = (10 * density).toInt()
+            initScreen(metrics.widthPixels, metrics.heightPixels, dp10)
+            ReaderLog.d("NodeOrder", "屏幕参数: ${metrics.widthPixels}x${metrics.heightPixels} dp10=$dp10")
+        } catch (e: Throwable) {
+            ReaderLog.w("NodeOrder", "屏幕参数初始化失败: ${e.message}")
+        }
+    }
+
     // ==================== 入口：q() ====================
 
     /**

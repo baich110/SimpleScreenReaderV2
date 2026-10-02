@@ -182,6 +182,9 @@ class ReaderAccessibilityService : AccessibilityService() {
             selfPackageName = packageName
             isScreenOn = true
         }
+        // ★ 初始化屏幕参数（排序算法依赖，天坦 C1423r.M(Context)）
+        NodeOrderComparator.initFromContext(this)
+
         // ★ 把缓存注入到热点路径（排序 + 可聚焦判定）
         NodeOrderComparator.cache = nodeCache
         ShouldFocusNode.cache = nodeCache
@@ -217,6 +220,13 @@ class ReaderAccessibilityService : AccessibilityService() {
         // ---- 音频焦点委托 ----
         speech.onRequestAudioFocus = { audioFocus.requestFocus() }
         speech.onAbandonAudioFocus = { audioFocus.abandonFocus() }
+
+        // ---- ★ 语音输入静音闸门（对应天坦 SpeechController 的录音检测）----
+        //
+        // 原来 AudioFocusManager.shouldMute() 写好了却从未被调用 ——
+        // 用户在语音输入时读屏仍会朗读，把用户的话盖掉。
+        // 接进 SpeechEngine 的播报入口后，所有播报路径统一受控。
+        speech.speechGate = { audioFocus.shouldMute() }
 
         // ---- 焦点管理委托 ----
         focus.onCancelScroll = { autoScroll.stop() }
@@ -592,7 +602,14 @@ class ReaderAccessibilityService : AccessibilityService() {
         } else 1.0f
         sound.scroll(rate)
 
-        // ④ 播报滚动位置
+        // ④ ★ 标记滚动状态（供 FocusManager 的"滚动中导航"拦截使用）
+        val scrollDir = if (deltaY > 0) 1 else if (deltaY < 0) -1
+        else if (event.scrollDeltaX > 0) 1 else if (event.scrollDeltaX < 0) -1 else 0
+        if (scrollDir != 0) {
+            focus.onScrollStart(scrollDir)
+        }
+
+        // ⑤ 播报滚动位置
         val total = event.itemCount
         if (total > 0 && event.toIndex >= 0) {
             val from = event.fromIndex
@@ -976,6 +993,29 @@ class ReaderAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         log("服务中断")
+    }
+
+    /**
+     * 配置变化（横竖屏切换等）—— 对应天坦 SoundBackService.onConfigurationChanged
+     *
+     * 【为什么必须处理】
+     *   屏幕尺寸/方向变了 → 排序算法的阈值全部失效 → 必须重算。
+     *   同时缓存的边界与判定也要失效（布局变了）。
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+
+        ReaderLog.i("Service", "配置变化: orientation=${newConfig.orientation}")
+
+        // ① 重算屏幕参数（天坦 C1423r.f23902d.M(this)）
+        NodeOrderComparator.initFromContext(this)
+
+        // ② 全部缓存失效（布局变了）
+        nodeCache.invalidateAll()
+        NodeBoundsCalculator.clear()
+
+        // ③ 焦点状态重置
+        focus.onWindowChanged()
     }
 
     private fun isScreenOn(): Boolean = try {

@@ -95,6 +95,17 @@ class SpeechEngine(
     @Volatile
     var onStateChanged: (() -> Unit)? = null
 
+    /**
+     * 播报闸门 —— 返回 true 时丢弃本次播报
+     *
+     * 对应天坦 `SpeechController.fw()` 的录音检测：
+     * 用户在语音输入 / 麦克风被占用时，读屏不应出声（会盖住用户说话）。
+     *
+     * 所有播报入口统一走这个闸门，避免漏判某条路径。
+     */
+    @Volatile
+    var speechGate: (() -> Boolean)? = null
+
     // ==================== 语音参数 ====================
 
     @Volatile
@@ -245,6 +256,12 @@ class SpeechEngine(
     fun speakInternal(text: String, interrupt: Boolean, extraFlags: Int) {
         if (!enabled) return
         if (text.isEmpty()) return
+
+        // ★ 语音输入静音闸门（天坦行为：录音中不出声）
+        if (speechGate?.invoke() == true) {
+            ReaderLog.d("SpeechEngine", "语音输入中，静音: ${text.take(20)}")
+            return
+        }
 
         val useChannelB = SpeechFlags.has(extraFlags, SpeechFlags.INTERRUPT_CHANNEL)
         var flags = extraFlags
