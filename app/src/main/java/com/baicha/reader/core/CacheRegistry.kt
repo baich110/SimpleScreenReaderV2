@@ -61,15 +61,57 @@ object CacheRegistry {
         private set
 
     /**
-     * 登记一个缓存的失效回调
+     * 登记一个缓存的失效回调 —— **同名覆盖**（不追加）
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮修复：原来只 add 不查重 ⇒ 服务每次重启都累积 7 条】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 原实现：
+     * ```kotlin
+     *   handlers.getOrPut(level) { ArrayList(8) }.add(name to onInvalidate)
+     * ```
+     *
+     * 而 `CacheRegistry` 是 **object（进程级单例）**，服务每次
+     * `onServiceConnected()` 都会调 `registerCacheHandlers()`
+     * 注册 7 条 handler。无障碍服务**被系统反复重启是常态**
+     * （崩溃自动重启 / 用户开关 / 内存回收 / 配置变化）。
+     *
+     * 【两条后果】
+     * ① **内存泄漏**：每条 handler 是捕获了服务实例的 lambda
+     *    （`{ nodeCache.invalidateAll() }` 里的 `nodeCache` 即 `this.nodeCache`）。
+     *    旧服务实例本该被 GC，却因被 lambda 强引用在单例里**永不回收**
+     *    —— n 次重启 ⇒ n 个服务实例及其全部子组件（NodeCache /
+     *    SpeechEngine / …）无法释放。
+     * ② **热点路径退化**：每次 `invalidate(WINDOW)` 执行 **7n** 个回调，
+     *    其中 7(n−1) 个操作的是**已废弃实例**（纯浪费）。
+     *    窗口变化是高频事件。
+     *
+     * 【为什么之前没暴露】上一个 P0（服务启动即崩）修好前，
+     * 服务根本活不到被反复重启 —— 这个问题现在才会真正显现。
+     *
+     * 【修复】按 `(level, name)` **去重**：同名 handler 覆盖旧的。
+     *
+     * 【为什么选去重而不是 clear+重注册】
+     *   · 去重**不依赖调用方记得清理**，更稳；
+     *   · 语义更合理：同名就是同一个缓存的失效动作，本就该覆盖；
+     *   · 且服务重启时，旧实例的 handler 自动被新实例顶掉，
+     *     旧实例随之可被 GC。
      *
      * @param level 该缓存在哪个级别需要失效
-     * @param name 缓存名（诊断用）
+     * @param name 缓存名（**作为去重键**，同时用于诊断）
      * @param onInvalidate 失效动作
      */
     fun register(level: Level, name: String, onInvalidate: () -> Unit) {
         synchronized(this) {
-            handlers.getOrPut(level) { ArrayList(8) }.add(name to onInvalidate)
+            val list = handlers.getOrPut(level) { ArrayList(8) }
+            val existing = list.indexOfFirst { it.first == name }
+            if (existing >= 0) {
+                // 同名 → 覆盖（顶掉旧实例的 lambda，使其可被 GC）
+                list[existing] = name to onInvalidate
+            } else {
+                list.add(name to onInvalidate)
+            }
         }
     }
 
