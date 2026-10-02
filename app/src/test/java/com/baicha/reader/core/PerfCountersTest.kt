@@ -2,6 +2,7 @@ package com.baicha.reader.core
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -14,6 +15,36 @@ import org.junit.Test
  *   会得出「缓存命中率 100%，不需要优化」的错误结论。
  */
 class PerfCountersTest {
+
+    /**
+     * ★ 本轮修复：原来只有 `@After` reset，**没有 `@Before`**
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【这是一个真实的测试隔离缺陷】
+     * ══════════════════════════════════════════════════════════
+     *
+     * `PerfCounters` 是**全局单例可变状态**，而本类的断言全部依赖
+     * 「从零开始计数」（如 `hitRate()` 期望 0.7 = 7/(7+3)）。
+     *
+     * 只有 `@After` 的问题：**任何其他测试类**只要调用过
+     * `PerfCounters.cacheHit()/cacheMiss()`（例如 `NodeCache` 内部就会调），
+     * 就会污染本类的初始状态，使断言失败。
+     *
+     * 【实际发生】第十四轮新增 `NodeCacheBoundTest`（大量调用
+     * `shouldFocus` → 内部走 `PerfCounters.cacheHit/cacheMiss`），
+     * 于是 `hit_rate_is_accurate` 断言失败：
+     * ```
+     *   expected:<0.7> but was:<0.006910167818361303>
+     * ```
+     * —— 分子分母都被别人的计数稀释了。
+     *
+     * **这类失败具有「顺序依赖」特征**：单独跑本类通过、全量跑失败，
+     * 极易被误判为「偶发」而放过。必须靠 `@Before` 把前置状态钉死。
+     */
+    @Before
+    fun setUp() {
+        PerfCounters.reset()
+    }
 
     @After
     fun tearDown() {
