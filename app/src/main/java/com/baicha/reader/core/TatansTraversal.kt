@@ -92,6 +92,25 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
         private var cacheChildIndex = -1
         private var cacheChildCount = -1
 
+        /**
+         * 缓存代数 —— 窗口/内容变化时自增，强制缓存失效
+         *
+         * 天坦只靠内容哈希自动失效；本项目额外加一代数校验，
+         * 覆盖「内容哈希恰好相同但结构已变」的边界情况。
+         */
+        @Volatile
+        private var cacheGeneration = 0
+
+        /**
+         * 使索引缓存失效 —— 窗口/内容变化时由服务调用
+         */
+        fun invalidateIndexCache() {
+            cacheGeneration++
+            cacheParentHash = -1
+            cacheChildIndex = -1
+            cacheChildCount = -1
+        }
+
         /** 天坦 f23906h —— q() 找不到时置 true，s() 读 */
         @Volatile
         var lastSearchFailed = false
@@ -118,6 +137,9 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
 
     /** 已访问集合（天坦 f23914a）—— identity 语义防环 */
     private val visited = IdentitySet()
+
+    /** 本实例创建时的缓存代数快照 */
+    private val generation: Int = cacheGeneration
 
     /** 目标节点（天坦 f23915b）—— 遇到就停 */
     private var target: AccessibilityNodeInfo? = null
@@ -512,17 +534,30 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
      *
      * 天坦：命中缓存后，从上次索引位置**向两侧扩展**搜索。
      * 这是列表滚动的性能关键。
+     *
+     * 【缓存键的选择 —— 这是个陷阱】
+     *
+     * 天坦用 `wVar.hashCode()`（**内容**哈希）做缓存键，这带来了一个关键性质：
+     * **内容变化会自动让缓存失效**（hash 变了 → 不匹配 → 走完整线性搜索）。
+     *
+     * 如果改用 `System.identityHashCode`（对象身份），身份在对象存活期间恒定，
+     * 子节点增删后**缓存依然命中** → 用旧的中心索引做双向扩展搜索
+     * → 搜不到就漏掉，导致索引错位、焦点跳错位置。
+     *
+     * 所以这里**故意用内容哈希**（与天坦一致）：
+     *   ① 内容哈希变化 → 自动失效（安全性）
+     *   ② 加 generation 校验 → 窗口/内容变化时强制失效（双保险）
      */
     private fun indexOf(parent: AccessibilityNodeInfo, child: AccessibilityNodeInfo): Int {
         val count = parent.childCount
         var result = -1
 
         try {
-            // 【修正】原来用 parent.hashCode()（内容 hash）。
-            // 内容相同的不同父节点会命中错误缓存 → 索引错位 → 焦点跳错位置。
-            // 改用对象身份。
-            val hash = System.identityHashCode(parent)
-            if (hash != -1 && hash == cacheParentHash && count == cacheChildCount) {
+            val hash = parent.hashCode()
+            // ★ 双保险：内容哈希匹配 + 代数匹配（窗口/内容变化时代数自增）
+            if (hash != -1 && hash == cacheParentHash &&
+                count == cacheChildCount && Companion.cacheGeneration == generation
+            ) {
                 val center = cacheChildIndex
                 var offset = 0
                 while (true) {
@@ -558,12 +593,13 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
             // 【修正】身份比较，对齐天坦 o0.w 的语义
             if (c === child) {
                 try {
-                    cacheParentHash = System.identityHashCode(parent)
+                    cacheParentHash = parent.hashCode()
                 } catch (e: Exception) {
                     cacheParentHash = -1
                 }
                 cacheChildIndex = i
                 cacheChildCount = count
+                Companion.cacheGeneration = generation
                 return i
             }
         }

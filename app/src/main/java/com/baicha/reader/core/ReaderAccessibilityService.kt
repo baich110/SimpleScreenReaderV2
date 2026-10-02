@@ -466,6 +466,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
                 nodeCache.invalidateAll()
                 NodeBoundsCalculator.clear()
+                TatansTraversal.invalidateIndexCache()
             }
 
             // ---------- 通知 ----------
@@ -491,6 +492,7 @@ class ReaderAccessibilityService : AccessibilityService() {
                 // 不播报（太吵），但缓存要失效
                 nodeCache.invalidateAll()
                 NodeBoundsCalculator.clear()
+                TatansTraversal.invalidateIndexCache()
             }
 
             // ---------- 16384: 文本按粒度遍历（读屏软件的"按字/词/行"回调）----------
@@ -567,6 +569,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         focus.onWindowChanged()
         nodeCache.invalidateAll()
         NodeBoundsCalculator.clear()
+        TatansTraversal.invalidateIndexCache()
 
         // 播报页面标题
         val title = event.text?.joinToString("")?.trim().orEmpty()
@@ -899,6 +902,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         // ② 全部缓存失效（布局变了）
         nodeCache.invalidateAll()
         NodeBoundsCalculator.clear()
+        TatansTraversal.invalidateIndexCache()
 
         // ③ 焦点状态重置
         focus.onWindowChanged()

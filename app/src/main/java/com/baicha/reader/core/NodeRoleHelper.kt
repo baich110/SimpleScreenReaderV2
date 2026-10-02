@@ -266,17 +266,24 @@ object NodeRoleHelper {
 
     private fun classNameEquals(cls: String?, target: String): Boolean = cls == target
 
+    /**
+     * 判断类是否继承自某个父类 —— 走 ClassLoadingCache
+     *
+     * 【性能修正】
+     *
+     * 原实现每次调用都执行 `Class.forName()` 两次 —— 而本方法是
+     * 角色判定（`roleOf()`）的热路径，滑动浏览时**每个节点**都会走。
+     *
+     * `Class.forName` 会触发类加载（拿 ClassLoader 锁），
+     * 在大列表快速滚动时是明确的卡顿来源。
+     *
+     * 现在改为：
+     *   ① Class 对象缓存（对应 TalkBack ClassLoadingCache）
+     *   ② **继承关系结果缓存**（比 TalkBack 更进一步：
+     *      连 `isAssignableFrom` 的结果都缓存，避免重复计算）
+     */
     private fun classNameExtends(cls: String?, parent: String): Boolean {
-        if (cls == null) return false
-        if (cls == parent) return true
-        // 简化：只做字符串匹配（反编译环境无法反射继承链）
-        return try {
-            val c = Class.forName(cls)
-            val p = Class.forName(parent)
-            p.isAssignableFrom(c)
-        } catch (e: Throwable) {
-            false
-        }
+        return ClassLoadingCache.isInstanceOf(cls, parent)
     }
 
     private fun isActionable(node: AccessibilityNodeInfo): Boolean {
