@@ -21,18 +21,77 @@ import org.junit.Test
  */
 class SpatialAlgorithmTest {
 
-    private val strategy = SpatialTraversalStrategy(null) { false }
+    /**
+     * 几何算法已抽到 [SpatialGeometry]（顶层 object，纯函数）。
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【本类原先是「反射调用 private 方法」——已改为直接调用】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 原实现：
+     * ```kotlin
+     *   private val strategy = SpatialTraversalStrategy(null) { false }
+     *   private fun callBool(name: String, vararg args: Any?): Boolean {
+     *       val m = strategy.javaClass.declaredMethods.first { it.name == name }
+     *       m.isAccessible = true
+     *       return m.invoke(strategy, *args) as Boolean
+     *   }
+     * ```
+     * 问题有三：
+     *   ① 依赖**方法名字符串** —— 重命名方法后测试抛
+     *      `NoSuchElementException: Array contains no element matching the predicate`
+     *      （本轮抽取 SpatialGeometry 时就全部炸了 9 条），
+     *      报错信息完全看不出真正原因；
+     *   ② 反射绕过编译期检查，参数类型写错要到运行时才发现；
+     *   ③ 需要构造 `SpatialTraversalStrategy(null)` 只为拿一个纯几何函数。
+     *
+     * 现在直接调用 [SpatialGeometry] 的公开函数 —— 编译期检查、无反射、
+     * 语义清晰。**这是「更好的测试基础设施」的直接收益。**
+     */
+    private object Geo {
+        fun isCandidate(src: Bounds, dest: Bounds, direction: Int) =
+            SpatialGeometry.isCandidate(src, dest, direction)
 
-    private fun callBool(name: String, vararg args: Any?): Boolean {
-        val m = strategy.javaClass.declaredMethods.first { it.name == name }
-        m.isAccessible = true
-        return m.invoke(strategy, *args) as Boolean
+        fun beamBeats(direction: Int, source: Bounds, r1: Bounds, r2: Bounds) =
+            SpatialGeometry.beamBeats(direction, source, r1, r2)
+
+        fun weightedDistance(direction: Int, source: Bounds, dest: Bounds) =
+            SpatialGeometry.weightedDistance(direction, source, dest)
+
+        fun majorAxisDistance(direction: Int, source: Bounds, dest: Bounds) =
+            SpatialGeometry.majorAxisDistance(direction, source, dest)
+
+        fun majorAxisDistanceToFarEdge(direction: Int, source: Bounds, dest: Bounds) =
+            SpatialGeometry.majorAxisDistanceToFarEdge(direction, source, dest)
+
+        fun minorAxisDistance(direction: Int, source: Bounds, dest: Bounds) =
+            SpatialGeometry.minorAxisDistance(direction, source, dest)
+
+        fun isBetterCandidate(direction: Int, source: Bounds, r1: Bounds, r2: Bounds) =
+            SpatialGeometry.isBetterCandidate(direction, source, r1, r2)
+
+        fun isToDirectionOf(direction: Int, src: Bounds, dest: Bounds) =
+            SpatialGeometry.isToDirectionOf(direction, src, dest)
+
+        fun beamsOverlap(direction: Int, r1: Bounds, r2: Bounds) =
+            SpatialGeometry.beamsOverlap(direction, r1, r2)
     }
 
-    private fun callInt(name: String, vararg args: Any?): Int {
-        val m = strategy.javaClass.declaredMethods.first { it.name == name }
-        m.isAccessible = true
-        return m.invoke(strategy, *args) as Int
+    private fun callBool(name: String, vararg args: Any?): Boolean = when (name) {
+        "isCandidate" -> Geo.isCandidate(args[0] as Bounds, args[1] as Bounds, args[2] as Int)
+        "beamBeats" -> Geo.beamBeats(args[0] as Int, args[1] as Bounds, args[2] as Bounds, args[3] as Bounds)
+        "isBetterCandidate" -> Geo.isBetterCandidate(args[0] as Int, args[1] as Bounds, args[2] as Bounds, args[3] as Bounds)
+        "isToDirectionOf" -> Geo.isToDirectionOf(args[0] as Int, args[1] as Bounds, args[2] as Bounds)
+        "beamsOverlap" -> Geo.beamsOverlap(args[0] as Int, args[1] as Bounds, args[2] as Bounds)
+        else -> throw IllegalArgumentException("未知布尔函数: $name")
+    }
+
+    private fun callInt(name: String, vararg args: Any?): Int = when (name) {
+        "weightedDistance" -> Geo.weightedDistance(args[0] as Int, args[1] as Bounds, args[2] as Bounds)
+        "majorAxisDistance" -> Geo.majorAxisDistance(args[0] as Int, args[1] as Bounds, args[2] as Bounds)
+        "majorAxisDistanceToFarEdge" -> Geo.majorAxisDistanceToFarEdge(args[0] as Int, args[1] as Bounds, args[2] as Bounds)
+        "minorAxisDistance" -> Geo.minorAxisDistance(args[0] as Int, args[1] as Bounds, args[2] as Bounds)
+        else -> throw IllegalArgumentException("未知整数函数: $name")
     }
 
     private fun b(l: Int, t: Int, r: Int, bt: Int) = Bounds(l, t, r, bt)

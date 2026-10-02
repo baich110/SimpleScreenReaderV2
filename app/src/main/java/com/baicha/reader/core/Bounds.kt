@@ -70,6 +70,54 @@ data class Bounds(
 
     val centerY: Int get() = (top + bottom) / 2
 
+    /**
+     * 中心 X —— **AOSP 公式**，供 `FocusFinder` 类算法使用
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【为什么必须单独提供（★ 本轮修复）】
+     * ══════════════════════════════════════════════════════════
+     *
+     * AOSP `DirectionalTraversalStrategy.minorAxisDistance()` 原文：
+     * ```java
+     *   case SEARCH_FOCUS_LEFT, SEARCH_FOCUS_RIGHT -> {
+     *     // the distance between the center verticals
+     *     return Math.abs(((source.top + source.height() / 2)
+     *                      - ((dest.top + dest.height() / 2))));
+     *   }
+     * ```
+     * 即中心 = **`top + height / 2`**，而 [centerY] 用的是
+     * **`(top + bottom) / 2`**。
+     *
+     * 【两者何时不同】在**非负坐标**下恒等；在**负坐标**下差 1 ——
+     * 因为 Kotlin/Java 的整数除法**向零截断**：
+     * ```
+     *   top=-20, bottom=-19  (height=1)
+     *     AOSP:   -20 + 1/2 = -20 + 0 = -20
+     *     centerY: (-20 + -19)/2 = -39/2 = -19      ← 差 1
+     * ```
+     *
+     * 【为什么这是真问题，不是抠细节】
+     * Android 屏幕坐标**可以为负**：视图滚动出屏幕上方/左侧时，
+     * `getBoundsInScreen()` 返回的 top/left 就是负数。
+     * 长列表滚动、横向滚动、被状态栏遮挡的内容 —— 全都产生负坐标。
+     * 于是「按方向找最近焦点」在**滚动过的内容上会选错候选**：
+     * 两个候选的 `minorAxisDistance` 都被算小/算大 1 像素，
+     * 加权距离比较（13×major² + minor²）可能因此翻转，
+     * 表现为「上下滑动时焦点跳到了斜对面的元素上」。
+     *
+     * 【为什么不用 13 倍权重抵消】major 项权重 13，minor 项权重 1。
+     * 当两个候选的 major 距离相同时（同一行/同一列的常见情形），
+     * **minor 就是唯一决定因素** —— 差 1 足以翻转结果。
+     *
+     * 【修复策略】不去改 [centerX]/[centerY]（它们被别的算法依赖，
+     * 改了会引入新偏差），而是**新增** AOSP 公式的独立访问器，
+     * 让 `SpatialTraversal` 用它 —— 与「同名不同函数不能混用」同一原则。
+     */
+    val aospCenterX: Int get() = left + width / 2
+
+    /** 中心 Y —— AOSP 公式，见 [aospCenterX] 的完整说明 */
+    val aospCenterY: Int get() = top + height / 2
+
     // ==================== 几何运算 ====================
 
     /**

@@ -198,202 +198,32 @@ class SpatialTraversalStrategy(
     //     ③ 缺加权距离 → 距离权重不对（TalkBack 主轴权重 13 倍）
     // ══════════════════════════════════════════════════════════
 
-    /**
-     * 比较两个候选谁更优 —— 1:1 抄 TalkBack `isBetterCandidate()`
-     *
-     * 五层判定：
-     *   ① rect1 不是候选 → false
-     *   ② rect2 不是候选 → true
-     *   ③ rect1 靠 beam 胜出 → true
-     *   ④ rect2 靠 beam 胜出 → false
-     *   ⑤ 加权距离比较（主轴权重 13 倍）
-     */
+    // ==================== 算法委托 ====================
+    //
+    // 全部几何判定已抽到 [SpatialGeometry]（纯函数，可用 Bounds 直接单测）。
+    // 这里只做委托，保留原方法名便于对照阅读 ——
+    // 真正的实现与源码依据（AOSP 行号）见 SpatialGeometry 各函数注释。
+    //
+    // 【为什么抽出去】这些函数本来就只依赖矩形，与「节点」无关；
+    // 作为 private 实例方法就永远只能靠「构造真节点树 + 跑真遍历」验证，
+    // 而节点在 JVM 里需要专门替身 —— 导致**算法本身从未被逐条断言过**。
+
     private fun isBetterCandidate(
         direction: Int,
         source: Bounds,
         rect1: Bounds,
         rect2: Bounds
-    ): Boolean {
-        // ① 候选资格（比 isToDirectionOf 严格）
-        if (!isCandidate(source, rect1, direction)) return false
+    ): Boolean = SpatialGeometry.isBetterCandidate(direction, source, rect1, rect2)
 
-        // ② rect2 不是候选 → rect1 胜
-        if (!isCandidate(source, rect2, direction)) return true
+    private fun isCandidate(src: Bounds, dest: Bounds, direction: Int): Boolean =
+        SpatialGeometry.isCandidate(src, dest, direction)
 
-        // ③ beam 判定
-        if (beamBeats(direction, source, rect1, rect2)) return true
+    private fun beamsOverlap(direction: Int, rect1: Bounds, rect2: Bounds): Boolean =
+        SpatialGeometry.beamsOverlap(direction, rect1, rect2)
 
-        // ④ 反向 beam（rect2 更优）
-        if (beamBeats(direction, source, rect2, rect1)) return false
-
-        // ⑤ 加权距离（含溢出保护）
-        return weightedDistance(direction, source, rect1) <
-                weightedDistance(direction, source, rect2)
-    }
-
-    /**
-     * 候选资格 —— 1:1 抄 TalkBack `isCandidate()`
-     *
-     * 比 `isToDirectionOf` 严格：要求候选**至少部分地**位于目标方向，
-     * 且不能在起点之前。
-     *
-     * TalkBack 原注释：
-     *   "This checks whether the dest is at least partially to the direction of
-     *    (e.g left of) from source."
-     */
-    private fun isCandidate(src: Bounds, dest: Bounds, direction: Int): Boolean {
-        return when (direction) {
-            TraversalDirection.LEFT ->
-                (src.right > dest.right || src.left >= dest.right) && src.left > dest.left
-
-            TraversalDirection.RIGHT ->
-                (src.left < dest.left || src.right <= dest.left) && src.right < dest.right
-
-            TraversalDirection.UP ->
-                (src.bottom > dest.bottom || src.top >= dest.bottom) && src.top > dest.top
-
-            TraversalDirection.DOWN ->
-                (src.top < dest.top || src.bottom <= dest.top) && src.bottom < dest.bottom
-
-            else -> false
-        }
-    }
-
-    /**
-     * beam 判定 —— 1:1 抄 TalkBack `beamBeats()`
-     *
-     * 【什么是 beam】
-     *   "beam" 指「从起点出发、沿目标方向的投影带」。
-     *   如果候选在 beam 内而另一个不在，候选通常胜出 ——
-     *   因为不在 beam 里的那个需要"斜着走"才能到达。
-     *
-     * TalkBack 原注释（垂直方向的部分）：
-     *   "for vertical directions, beams only beat up to a point:
-     *    now, as long as rect2 isn't completely closer, rect1 wins"
-     */
-    private fun beamBeats(
-        direction: Int,
-        source: Bounds,
-        rect1: Bounds,
-        rect2: Bounds
-    ): Boolean {
-        val rect1InBeam = beamsOverlap(direction, source, rect1)
-        val rect2InBeam = beamsOverlap(direction, source, rect2)
-
-        // rect1 不是「独占 beam」→ 不赢
-        if (rect2InBeam || !rect1InBeam) return false
-
-        // 现在知道：rect1 在 beam 内，rect2 不在
-        // 若 rect1 在目标方向而 rect2 不在 → rect1 胜
-        if (!isToDirectionOf(direction, source, rect2)) return true
-
-        // 水平方向：独占 beam 永远胜
-        if (direction == TraversalDirection.LEFT ||
-            direction == TraversalDirection.RIGHT
-        ) {
-            return true
-        }
-
-        // 垂直方向：beam 只能赢到一定程度
-        // （rect2 不能"整体更近"）
-        return majorAxisDistance(direction, source, rect1) <
-                majorAxisDistanceToFarEdge(direction, source, rect2)
-    }
-
-    /**
-     * beam 是否重叠 —— 1:1 抄 TalkBack `beamsOverlap()`
-     */
-    private fun beamsOverlap(direction: Int, rect1: Bounds, rect2: Bounds): Boolean {
-        return when (direction) {
-            TraversalDirection.LEFT, TraversalDirection.RIGHT ->
-                rect2.bottom >= rect1.top && rect2.top <= rect1.bottom
-
-            TraversalDirection.UP, TraversalDirection.DOWN ->
-                rect2.right >= rect1.left && rect2.left <= rect1.right
-
-            else -> false
-        }
-    }
-
-    /**
-     * 加权距离 —— 1:1 抄 TalkBack `getWeightedDistanceFor()`
-     *
-     * **主轴权重 13 倍** —— 这是「优先选正前方」的量化表达。
-     *
-     * TalkBack 原注释：
-     *   "Warning: this fudge factor is finely tuned, be sure to run all
-     *    focus tests if you dare to tweak it."
-     *
-     * 溢出保护：超 10000 直接返回 MAX_VALUE（最大可能值 1400000000 < Int.MAX）。
-     */
-    private fun weightedDistance(direction: Int, source: Bounds, dest: Bounds): Int {
-        val major = majorAxisDistance(direction, source, dest)
-        val minor = minorAxisDistance(direction, source, dest)
-        if (major > 10000 || minor > 10000) return Int.MAX_VALUE
-        return 13 * major * major + minor * minor
-    }
-
-    /**
-     * 主轴距离（到近边）—— 1:1 抄 TalkBack `majorAxisDistance()`
-     *
-     * 注意 TalkBack 用 `Math.max(0, ...)` —— 目标不在该方向时返回 0（不是 1）。
-     */
-    private fun majorAxisDistance(direction: Int, source: Bounds, dest: Bounds): Int =
-        Math.max(0, majorAxisDistanceRaw(direction, source, dest))
-
-    private fun majorAxisDistanceRaw(direction: Int, source: Bounds, dest: Bounds): Int =
-        when (direction) {
-            TraversalDirection.LEFT -> source.left - dest.right
-            TraversalDirection.RIGHT -> dest.left - source.right
-            TraversalDirection.UP -> source.top - dest.bottom
-            TraversalDirection.DOWN -> dest.top - source.bottom
-            else -> 0
-        }
-
-    /**
-     * 主轴距离（到远边）—— 1:1 抄 TalkBack `majorAxisDistanceToFarEdge()`
-     *
-     * 注意最小值为 **1**（不是 0）—— 用于与 majorAxisDistance 打破平局。
-     */
-    private fun majorAxisDistanceToFarEdge(direction: Int, source: Bounds, dest: Bounds): Int =
-        Math.max(1, majorAxisDistanceToFarEdgeRaw(direction, source, dest))
-
-    private fun majorAxisDistanceToFarEdgeRaw(direction: Int, source: Bounds, dest: Bounds): Int =
-        when (direction) {
-            TraversalDirection.LEFT -> source.left - dest.left
-            TraversalDirection.RIGHT -> dest.right - source.right
-            TraversalDirection.UP -> source.top - dest.top
-            TraversalDirection.DOWN -> dest.bottom - source.bottom
-            else -> 0
-        }
-
-    /**
-     * 垂直轴距离（中心线距离）—— 1:1 抄 TalkBack `minorAxisDistance()`
-     */
-    private fun minorAxisDistance(direction: Int, source: Bounds, dest: Bounds): Int =
-        when (direction) {
-            TraversalDirection.LEFT, TraversalDirection.RIGHT ->
-                Math.abs(source.centerY - dest.centerY)
-
-            TraversalDirection.UP, TraversalDirection.DOWN ->
-                Math.abs(source.centerX - dest.centerX)
-
-            else -> 0
-        }
-
-    /**
-     * 方向判定 —— 1:1 抄 TalkBack `isToDirectionOf()`
-     *
-     * 用于 beamBeats 内部；候选资格由 isCandidate 负责。
-     */
     private fun isToDirectionOf(direction: Int, src: Bounds, dest: Bounds): Boolean =
-        when (direction) {
-            TraversalDirection.LEFT -> src.left >= dest.right
-            TraversalDirection.RIGHT -> src.right <= dest.left
-            TraversalDirection.UP -> src.top >= dest.bottom
-            TraversalDirection.DOWN -> src.bottom <= dest.top
-            else -> false
-        }
+        SpatialGeometry.isToDirectionOf(direction, src, dest)
+
 
     /** 可聚焦节点数（诊断） */
     fun nodeCount(): Int = focusableNodes.size
