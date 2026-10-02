@@ -63,6 +63,9 @@ object NodeOrderComparator {
         screenWidth = width
         screenHeight = height
         threshold10dp = dp10
+        // ★ 同步到纯几何引擎（NodeBoundsComparator 用它算阈值）
+        NodeBoundsComparator.screenWidth = width
+        NodeBoundsComparator.screenHeight = height
     }
 
     /**
@@ -389,102 +392,48 @@ object NodeOrderComparator {
         val ra = boundsMap[a]
         val rb = boundsMap[b]
 
-        val validA = ra != null && ((ra.width() > 0 && ra.height() > 0) || a.isImportantForAccessibility)
-        val validB = rb != null && ((rb.width() > 0 && rb.height() > 0) || b.isImportantForAccessibility)
+        val validA = NodeBoundsComparator.isValid(
+            ra?.let { Bounds(it) }, a.isImportantForAccessibility
+        )
+        val validB = NodeBoundsComparator.isValid(
+            rb?.let { Bounds(it) }, b.isImportantForAccessibility
+        )
 
-        if (!validA && !validB) return 0
-        if (!validA) return 1
-        if (!validB) return -1
+        // 边界缺失 → 交给纯引擎按「无效」处理
+        val bA = ra?.let { Bounds(it) } ?: Bounds.EMPTY
+        val bB = rb?.let { Bounds(it) } ?: Bounds.EMPTY
+        val rawA = rawBoundsMap[a]?.let { Bounds(it) } ?: bA
+        val rawB = rawBoundsMap[b]?.let { Bounds(it) } ?: bB
 
-        val rawA = rawBoundsMap[a] ?: ra!!
-        val rawB = rawBoundsMap[b] ?: rb!!
-
-        // ① 特殊规则 z()
-        val z = compareSpecial(a, b, rawA, rawB)
-        if (z != 0) return z
-
-        // ② 包含关系 A()
-        val aResult = compareContain(ra!!, rb!!)
-        if (aResult != null) return aResult
-
-        // ③ top → bottom
-        val topDiff = ra.top - rb.top
-        if (topDiff != 0) return topDiff
-        return ra.bottom - rb.bottom
+        // ★ 委托给纯几何引擎（可单测）
+        return NodeBoundsComparator.compare(
+            boundsA = bA,
+            boundsB = bB,
+            rawA = rawA,
+            rawB = rawB,
+            roleA = NodeRoleHelper.roleOf(a),
+            roleB = NodeRoleHelper.roleOf(b),
+            validA = validA,
+            validB = validB
+        )
     }
 
     // ==================== 特殊规则：z() ====================
 
-    /**
-     * 特殊排序规则 —— 1:1 抄天坦 a.z(a, b, rectA, rectB)
-     *
-     * 场景：父子容器嵌套时，子元素应该排在父容器前面/后面。
-     */
-    private fun compareSpecial(
-        a: AccessibilityNodeInfo,
-        b: AccessibilityNodeInfo,
-        ra: Rect,
-        rb: Rect
-    ): Int {
-        // 情况 1：b 包含 a，且 a 是「窄条」
-        if (rb.contains(ra) &&
-            rb.width() > screenWidth * 0.7 &&
-            ra.height() < threshold03H &&
-            ra.height() < rb.height() / 2
-        ) {
-            if (ra.top >= threshold02H || ra.centerY() >= rb.centerY()) {
-                val roleB = NodeRoleHelper.roleOf(b)
-                return if (ra.right != rb.right ||
-                    ra.width() >= rb.width() * 0.3 ||
-                    ra.top >= screenHeight / 2 ||
-                    roleB == NodeRoleHelper.ROLE_EDIT_TEXT
-                ) 0 else -1
-            }
-            return -1
-        }
-
-        // 情况 2：a 包含 b，且 b 是「窄条」
-        if (ra.contains(rb) &&
-            ra.width() > screenWidth * 0.7 &&
-            rb.height() < threshold03H &&
-            rb.height() < ra.height() / 2
-        ) {
-            if (rb.top < threshold02H && rb.centerY() < ra.centerY()) {
-                return 1
-            }
-            val roleA = NodeRoleHelper.roleOf(a)
-            if (ra.right == rb.right &&
-                rb.width() < ra.width() * 0.3 &&
-                rb.top < screenHeight / 2 &&
-                roleA != NodeRoleHelper.ROLE_EDIT_TEXT
-            ) {
-                return 1
-            }
-        }
-
-        return 0
-    }
-
-    // ==================== 包含关系：A() ====================
-
-    /**
-     * 包含关系处理 —— 1:1 抄天坦 a.A(rectA, rectB)
-     *
-     * 返回 null 表示无法判断，继续后续比较。
-     */
-    private fun compareContain(ra: Rect, rb: Rect): Int? {
-        if (ra.contains(rb) || rb.contains(ra)) return null
-
-        val overlapH = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top)
-        if (overlapH > THRESHOLD_20 &&
-            intersectsVertically(ra, rb) &&
-            !intersectsHorizontally(ra, rb)
-        ) {
-            // 垂直重叠但水平不重叠 → 按左右排
-            return ra.left - rb.left
-        }
-        return null
-    }
+    // ==================== 特殊规则 / 包含关系 ====================
+    //
+    // 【重构说明】原先这里有两个方法：
+    //   compareSpecial(a, b, ra, rb)   → 天坦 a.z()
+    //   compareContain(ra, rb)         → 天坦 a.A()
+    //
+    // 它们已迁到 `NodeBoundsComparator`（纯几何引擎，不依赖 android.graphics）。
+    // 原因：这两个算法决定「焦点顺序」，是核心逻辑，但原先因
+    // `android.graphics.Rect` 在 JVM 单测中是空壳而**完全无法测试**。
+    //
+    // 迁出后：
+    //   ① 算法可穷举测试（见 NodeBoundsComparatorTest）
+    //   ② 本类只剩「数据采集 + 调用引擎」的职责
+    //   ③ 避免了「两套几何逻辑并存」导致的行为漂移
 
     // ==================== RecyclerView 排序：J() ====================
 
