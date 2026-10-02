@@ -76,6 +76,22 @@ class AccessibilityEventHandler(
 ) {
 
     companion object {
+
+        /**
+         * 动作 ID —— 与 `AccessibilityNodeInfo.ACTION_*` 一致
+         *
+         * 【为什么用字面量而不是引用 android 常量】
+         * 这些值同时要与天坦源码对照（`matchActionMask3(node, 1, 16, 32)`
+         * 用的是字面量），写成同名常量后**两边一眼能对上**。
+         * 取值已由 `IsActionableFidelityTest.actionIdsMatchPlatformConstants`
+         * 与官方常量逐条断言锁定。
+         */
+        private const val ACTION_FOCUS = 1
+        private const val ACTION_CLICK = 16
+        private const val ACTION_LONG_CLICK = 32
+        private const val ACTION_NEXT_HTML_ELEMENT = 1024
+        private const val ACTION_PREVIOUS_HTML_ELEMENT = 2048
+
         private const val TAG = "EventHandler"
 
         /** 滚动节流窗口 —— 天坦 ProcessorScroll 用 250ms */
@@ -843,19 +859,104 @@ class AccessibilityEventHandler(
         sound.progressEarcon(percent)
     }
 
-    /** 天坦 AbstractC3688i.j(node) */
+    /**
+     * 节点是否「可操作」—— 1:1 对应天坦 `w7/NodeUtils.java:136~139`
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【天坦原文】
+     * ══════════════════════════════════════════════════════════
+     * ```java
+     *   public static final boolean isActionable(NodeInfo nodeInfo) {
+     *       return nodeInfo.isFocusable() || nodeInfo.isClickable()
+     *           || nodeInfo.isLongClickable()
+     *           || matchActionMask3(nodeInfo, 1, 16, 32)
+     *           || matchActionMask2(nodeInfo, com.vivo.speechsdk.module.vad.c.f23604z, 2048);
+     *   }
+     * ```
+     *
+     * `matchActionMask3`（`:291~294`）：
+     * ```java
+     *   int actions = nodeInfo.getActions();           // ① 位掩码
+     *   return (actions & i9) == i9 || (actions & i10) == i10 || (actions & i11) == i11
+     *       || hasAction(nodeInfo, i9)                 // ② 动作表
+     *       || hasAction(nodeInfo, i10) || hasAction(nodeInfo, i11);
+     * ```
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮修复的两处偏差】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 原实现：
+     * ```kotlin
+     *   node.actionList.any {
+     *       it.id == 1 || it.id == 16 || it.id == 32 || it.id == 131072 || it.id == 2048
+     *   }
+     * ```
+     *
+     * **偏差 A：131072 应为 1024**
+     *   天坦用的是 `f23604z`，其取值由 `o0/NodeInfo.java:477` 确认：
+     *   ```
+     *    case com.vivo.speechsdk.module.vad.c.f23604z /* 1024 */:
+     *        return "ACTION_NEXT_HTML_ELEMENT";
+     *   ```
+     *   即 **1024 = `ACTION_NEXT_HTML_ELEMENT`**，与
+     *   2048 = `ACTION_PREVIOUS_HTML_ELEMENT` 成对
+     *   （官方取值表一致）。
+     *   白茶写的 **131072** 是**事件**常量
+     *   （`TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY`），
+     *   作为 action id **永远不可能匹配** —— 该条件恒假。
+     *
+     * **偏差 B：只查了 actionList，漏了 `getActions()` 位掩码**
+     *   两者是**独立字段**：部分 App 把动作只放在位掩码里。
+     *   ⇒ 那些节点被判「不可操作」→ **用户滑不到它们**
+     *   （漏掉可聚焦元素，是"少读内容"的直接原因）。
+     *
+     * 【为什么用 hasAction 辅助函数】与天坦的 `hasAction(node, id)`
+     * 同名同义，便于将来对照维护；也让本方法读起来与源码同构。
+     */
     private fun isActionable(node: AccessibilityNodeInfo): Boolean {
         if (node.isFocusable) return true
         if (node.isClickable) return true
         if (node.isLongClickable) return true
         return try {
-            node.actionList.any {
-                it.id == 1 || it.id == 16 || it.id == 32 || it.id == 131072 || it.id == 2048
-            }
+            // ① 位掩码路径 —— 天坦 `(actions & i9) == i9`
+            //
+            //    `AccessibilityNodeInfo.getActions()` 返回一个位掩码，
+            //    与 `getActionList()`（结构化动作表）是**两个独立字段**。
+            //    只查其中一个会漏掉另一部分节点。
+            val actions = node.actions
+            val maskHit = (actions and ACTION_FOCUS) == ACTION_FOCUS ||
+                    (actions and ACTION_CLICK) == ACTION_CLICK ||
+                    (actions and ACTION_LONG_CLICK) == ACTION_LONG_CLICK ||
+                    (actions and ACTION_NEXT_HTML_ELEMENT) == ACTION_NEXT_HTML_ELEMENT ||
+                    (actions and ACTION_PREVIOUS_HTML_ELEMENT) == ACTION_PREVIOUS_HTML_ELEMENT
+            if (maskHit) return true
+
+            // ② 动作表路径 —— 天坦 `hasAction(nodeInfo, i9)`
+            node.actionList.any { hasActionId(it.id) }
         } catch (e: Throwable) {
             false
         }
     }
+
+    /**
+     * 天坦 `NodeUtils.hasAction(nodeInfo, id)` 的「id 匹配」部分
+     *
+     * 天坦检查的五个动作 ID（`matchActionMask3` + `matchActionMask2`）：
+     * | ID | 常量 | 来源 |
+     * |---|---|---|
+     * | 1 | `ACTION_FOCUS` | `matchActionMask3` 第 1 参 |
+     * | 16 | `ACTION_CLICK` | 第 2 参 |
+     * | 32 | `ACTION_LONG_CLICK` | 第 3 参 |
+     * | 1024 | `ACTION_NEXT_HTML_ELEMENT` | `matchActionMask2` 第 1 参（`f23604z`）|
+     * | 2048 | `ACTION_PREVIOUS_HTML_ELEMENT` | 第 2 参 |
+     */
+    private fun hasActionId(id: Int): Boolean =
+        id == ACTION_FOCUS ||
+                id == ACTION_CLICK ||
+                id == ACTION_LONG_CLICK ||
+                id == ACTION_NEXT_HTML_ELEMENT ||
+                id == ACTION_PREVIOUS_HTML_ELEMENT
 
     private fun updateScreenState() {
         val now = SystemClock.uptimeMillis()
