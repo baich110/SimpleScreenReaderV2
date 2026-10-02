@@ -74,8 +74,31 @@ class EventQueue(
     var polledCount = 0L
         private set
 
-    /** 主线程 handler */
-    private val handler = Handler(Looper.getMainLooper())
+    /**
+     * 主线程 handler —— **懒加载**
+     *
+     * 不在构造时创建，避免纯 JVM 单测环境（无 Looper）构造失败。
+     * 首次真正需要投递时才初始化。
+     */
+    private val handler: Handler by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        Handler(Looper.getMainLooper())
+    }
+
+    /** handler 是否已初始化（懒加载代理无法直接查询，这里用标志追踪） */
+    private var handlerInitialized = false
+
+    private val handlerLazyInitialized: Boolean
+        get() {
+            if (handlerInitialized) return true
+            // 触发懒加载并标记
+            return try {
+                handler
+                handlerInitialized = true
+                true
+            } catch (e: Throwable) {
+                false
+            }
+        }
 
     /** 是否已有待处理的 drain 任务（避免重复 post） */
     @Volatile
@@ -233,7 +256,10 @@ class EventQueue(
             head = 0
             tail = 0
         }
-        handler.removeCallbacks(drainRunnable)
+        // 只在 handler 已初始化时才移除（懒加载可能尚未创建）
+        if (handlerLazyInitialized) {
+            handler.removeCallbacks(drainRunnable)
+        }
         synchronized(this) { drainScheduled = false }
     }
 

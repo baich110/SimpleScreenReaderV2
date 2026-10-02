@@ -40,7 +40,7 @@ import android.view.accessibility.AccessibilityNodeInfo
  */
 class AutoScrollManager(
     private val service: android.accessibilityservice.AccessibilityService,
-    private val focusController: FocusController
+    private val focusManager: FocusManager
 ) {
 
     companion object {
@@ -162,7 +162,7 @@ class AutoScrollManager(
         return try {
             // ① 从滚动容器开始遍历
             val traversal = TatansTraversal(scrollNode)
-            traversal.setFilter { focusController.shouldFocusNode(it) }
+            traversal.setFilter { ShouldFocusNode.shouldFocus(it) }
 
             // ② 找下一个
             val forward = direction == 1
@@ -180,9 +180,9 @@ class AutoScrollManager(
             }
 
             // ④ 尝试聚焦
-            val focused = focusController.focusNode(next, FocusHistory.Source.LOGICAL_NAVIGATION)
+            val focused = focusManager.applyFocus(next)
             if (focused) {
-                ReaderLog.d(TAG, "autoScroll: focused ${focusController.desc(next)}")
+                ReaderLog.d(TAG, "autoScroll: focused ${focusManager.desc(next)}")
             }
             focused
         } catch (e: Exception) {

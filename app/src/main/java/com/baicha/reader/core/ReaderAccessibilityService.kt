@@ -1,13 +1,14 @@
 package com.baicha.reader.core
 
+import android.accessibilityservice.AccessibilityGestureEvent
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.accessibilityservice.AccessibilityGestureEvent
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import android.view.KeyEvent
@@ -15,31 +16,39 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * 白茶读屏 —— 无障碍服务核心
+ * 白茶读屏 —— 无障碍服务核心（框架层重构版）
  *
- * 架构 1:1 抄天坦 SoundBackService：
+ * 【完整链路（照抄天坦，不遗漏）】
  *
- *   onAccessibilityEvent(event)
+ *   onAccessibilityEvent(event)                    无障碍线程，必须极快
  *        ↓
- *   EventFunnel.shouldDrop(event)      ← 天坦 AccessibilityEventDispatcher
- *        ↓（不丢）
- *   handleEvent(event)                 ← 天坦 SoundBackService.handleEvent() 的 switch
- *        ├─ 1    点击        → speakNode
- *        ├─ 2    长按        → 提示音
- *        ├─ 4    选中        → speakNode
- *        ├─ 8    滚动        → 播报滚动位置
- *        ├─ 16   焦点        → speakNode
- *        ├─ 32   窗口变化    → 播报页面
- *        ├─ 64   无障碍焦点  → speakNode   ← 关键
- *        ├─ 128  触摸探索    → speakHover  ← 关键
- *        ├─ 2048 文本变化    → 播报文本
- *        ├─ 8192 选择变化    → 播报选中文本
- *        ├─ 32768 无障碍焦点 → speakNode   ← 关键
- *        ├─ 1048576 触摸探索开始
- *        ├─ 2097152 触摸探索结束
- *        └─ 4194304 窗口集合变化
+ *   EventDispatcher.onEvent(event)                 ① 焦点去重 ② 14 条过滤
  *        ↓
- *   NodeSpeaker.describe()  →  TtsManager.speak()
+ *   EventQueue.offer(event)                        环形缓冲入队（拷贝事件）
+ *        ↓
+ *   主线程 drain                                   批量消费，不阻塞系统派发
+ *        ↓
+ *   handleEvent(event)                             19 种事件分发
+ *        ├─ 点击/长按/选中   → SpeechCompositor + SpeechEngine
+ *        ├─ 滚动            → AutoScrollManager + 音效
+ *        ├─ 焦点            → FocusManager
+ *        ├─ 触摸探索        → SpeechEngine.interruptChannelA() ★ 先打断
+ *        ├─ 窗口变化        → FocusManager.onWindowChanged + 缓存失效
+ *        └─ 文本变化        → 增量播报
+ *        ↓
+ *   SpeechCompositor.compose()                     六片段合成（角色/文本/状态/位置）
+ *        ↓
+ *   SpeechEngine.speak()                           双通道（A 普通 / B 打断）
+ *        ↓
+ *   TtsManager → TextToSpeech
+ *
+ * 【高性能要点】
+ *   ① 事件异步化：无障碍线程只做「过滤 + 入队」，立即返回
+ *   ② 零 GC 队列：EventQueue 用环形缓冲，稳态无分配
+ *   ③ 三代缓存：NodeCache 缓存子节点列表 / 可聚焦判定 / 合成文本
+ *   ④ 锁最小化：只 EventQueue/EventDispatcher 内部有锁，且临界区极短
+ *   ⑤ 懒创建：SpeechEngine 的 B 通道按需创建
+ *   ⑥ 批量消费：一次 drain 最多 16 条，避免逐条 Context switch
  */
 class ReaderAccessibilityService : AccessibilityService() {
 
@@ -47,8 +56,11 @@ class ReaderAccessibilityService : AccessibilityService() {
         private const val TAG = "BaiChaReader"
         private const val MAX_LOG = 300
 
-        /** 滚动节流窗口（天坦 ProcessorScroll 是 250ms） */
+        /** 滚动节流窗口 —— 天坦 ProcessorScroll 用 250ms */
         private const val SCROLL_THROTTLE_MS = 250L
+
+        /** 启动播报 */
+        private const val MSG_READY = "白茶读屏已启动"
 
         val eventLog = ArrayDeque<String>(MAX_LOG)
 
@@ -63,13 +75,53 @@ class ReaderAccessibilityService : AccessibilityService() {
         var onLogUpdate: ((String) -> Unit)? = null
     }
 
-    private lateinit var funnel: EventFunnel
-    private lateinit var tts: TtsManager
-    private lateinit var haptic: HapticFeedback
-    private lateinit var focusController: FocusController
-    private lateinit var autoScroll: AutoScrollManager
-    private lateinit var audioFocus: AudioFocusManager
-    private lateinit var sound: SoundManager
+    // ==================== 框架组件 ====================
+
+    /** 事件队列（环形缓冲，零 GC） */
+    lateinit var eventQueue: EventQueue
+        private set
+
+    /** 事件分发器（焦点去重 + 14 条过滤） */
+    lateinit var dispatcher: EventDispatcher
+        private set
+
+    /** 播报引擎（双通道） */
+    lateinit var speech: SpeechEngine
+        private set
+
+    /** 焦点管理器（滚动拦截 + 重试 + 可达性） */
+    lateinit var focus: FocusManager
+        private set
+
+    /** 节点缓存（三代缓存） */
+    lateinit var nodeCache: NodeCache
+        private set
+
+    /** 手势责任链（Actor 模式） */
+    lateinit var gestureChain: GestureChain
+        private set
+
+    // ==================== 辅助组件 ====================
+
+    lateinit var haptic: HapticFeedback
+        private set
+
+    lateinit var audioFocus: AudioFocusManager
+        private set
+
+    lateinit var sound: SoundManager
+        private set
+
+    lateinit var autoScroll: AutoScrollManager
+        private set
+
+    // ==================== 朗读设置 ====================
+
+    /** 语序（对应天坦 GlobalConfig.z()） */
+    @Volatile
+    var speechOrder: SpeechOrder = SpeechOrder.TEXT_FIRST
+
+    // ==================== 内部状态 ====================
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -80,238 +132,234 @@ class ReaderAccessibilityService : AccessibilityService() {
     /** 触摸探索：上次悬停节点 */
     private var lastHoverHash = -1
 
-    /** 屏幕状态 */
+    /** 屏幕状态（带缓存，避免每次都查 PowerManager） */
+    @Volatile
     private var screenOn = true
+
+    private var lastScreenCheckTime = 0L
+
+    /** 滚动节流 */
+    private var lastScrollTime = 0L
+    private var lastScrollNodeKey = -1
+    private var lastScrollWindowId = -1
+
+    // ==================== 生命周期 ====================
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         isRunning = true
 
-        // 初始化独立日志系统（写文件，不依赖 logcat）
         ReaderLog.init(this)
         ReaderLog.i("Service", "=== onServiceConnected ===")
 
-        funnel = EventFunnel().apply {
+        // ---- 框架组件（按依赖顺序初始化）----
+        nodeCache = NodeCache()
+        eventQueue = EventQueue(capacity = 256) { dropped ->
+            if (dropped > 0) ReaderLog.w("EventQueue", "队列满，丢弃 $dropped")
+        }
+        dispatcher = EventDispatcher(eventQueue).apply {
             selfPackageName = packageName
             isScreenOn = true
         }
-        tts = TtsManager(this)
+        focus = FocusManager(this)
+        speech = SpeechEngine(this).apply {
+            enginePackage = TtsEngineManager.getSavedEngine(this@ReaderAccessibilityService)
+            speechRate = TtsEngineManager.getRate(this@ReaderAccessibilityService)
+            pitch = TtsEngineManager.getPitch(this@ReaderAccessibilityService)
+            volume = TtsEngineManager.getVolume(this@ReaderAccessibilityService)
+        }
+        gestureChain = GestureChain()
+
+        // ---- 辅助组件 ----
         haptic = HapticFeedback(this)
-        focusController = FocusController(this)
-        autoScroll = AutoScrollManager(this, focusController)
         audioFocus = AudioFocusManager(this)
-        sound = SoundManager(this)
-        sound.preloadAll()   // 预加载苹果音效
+        sound = SoundManager(this).apply { preloadAll() }
+        autoScroll = AutoScrollManager(this, focus)
+
+        // ---- 事件消费：队列 → handleEvent ----
+        eventQueue.consumer = { event -> handleEvent(event) }
+
+        // ---- 音频焦点委托 ----
+        speech.onRequestAudioFocus = { audioFocus.requestFocus() }
+        speech.onAbandonAudioFocus = { audioFocus.abandonFocus() }
+
+        // ---- 焦点管理委托 ----
+        focus.onCancelScroll = { autoScroll.stop() }
+
+        // ---- 手势责任链装配（顺序 = 优先级）----
+        setupGestureChain()
 
         log("=== 服务已连接 ===")
         Log.i(TAG, "onServiceConnected")
 
-        // 关键：开启触摸探索
         enableTouchExploration()
 
-        tts.setOnReady {
+        // TTS 就绪后打招呼
+        speech.init {
             log("TTS 就绪")
-            tts.speak("白茶读屏已启动")
+            speech.speak(MSG_READY, interrupt = true)
             haptic.focus()
         }
     }
 
     /**
-     * 开启触摸探索
+     * 装配手势责任链 —— 对应天坦 SoundBackService.X1 的顺序
      *
-     * 【修正】原注释与代码矛盾：注释说"天坦不在代码里设 FLAG_REQUEST_TOUCH_EXPLORATION_MODE"，
-     * 代码却明确设了。事实是 —— 天坦**两边都做**：
-     *   ① XML 的 accessibilityFlags 声明（服务注册时生效）
-     *   ② 运行时代码里再设一次（确保 MIUI/HyperOS 上不被系统重置）
-     * 所以保留代码设置，并把注释改正。
+     *   ① 双击 / 双击长按（硬编码优先，见 GestureChain.handle）
+     *   ② MediaControlActor    媒体控制
+     *   ③ FullScreenModeActor  全屏朗读/复制
+     *   ④ VideoBrowseActor     视频浏览
+     *   ⑤ SlidingMenuActor     边缘菜单
+     *   ⑥ DefaultNavigationActor 兜底
      */
-    private fun enableTouchExploration() {
-        try {
-            val info = serviceInfo ?: run {
-                log("serviceInfo 为 null，跳过触摸探索设置")
-                return
+    private fun setupGestureChain() {
+        // 双击 → 点击当前焦点
+        gestureChain.onDoubleTap = { _ ->
+            val ok = focus.clickTarget()
+            if (ok) {
+                haptic.click()
+                log("→ 双击：点击")
+            } else {
+                haptic.error()
+                log("→ 双击：点击失败")
             }
-
-            // 照天坦 AbstractC1945c.a()：
-            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
-            info.feedbackType = info.feedbackType or
-                    (AccessibilityServiceInfo.FEEDBACK_SPOKEN or
-                            AccessibilityServiceInfo.FEEDBACK_HAPTIC or
-                            AccessibilityServiceInfo.FEEDBACK_AUDIBLE)
-            info.notificationTimeout = 0L
-
-            // flags：明确设置
-            // 关键：必须设 FLAG_REQUEST_TOUCH_EXPLORATION_MODE，否则手势识别不工作
-            var flags = info.flags
-
-            // ① 明确打开触摸探索模式（手势识别的前提）
-            flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
-
-            // ② 明确关闭双指穿透（会干扰手势识别）
-            flags = flags and AccessibilityServiceInfo.FLAG_REQUEST_2_FINGER_PASSTHROUGH.inv()
-
-            // ③ 其他必要 flag
-            flags = flags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
-            flags = flags or AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
-            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-            flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
-            flags = flags or 4096   // FLAG_REQUEST_MULTI_FINGER_GESTURES
-            flags = flags or AccessibilityServiceInfo.FLAG_ENABLE_ACCESSIBILITY_VOLUME
-            flags = flags or 128    // FLAG_REQUEST_SHORTCUT_WARNING_DIALOG_SPOKEN_FEEDBACK
-
-            info.flags = flags
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                info.setInteractiveUiTimeoutMillis(10000)
-            }
-
-            serviceInfo = info
-
-            ReaderLog.i("Service", "flags set: 0x${flags.toString(16)} " +
-                    "(touchExplorationFlag=${flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE != 0})")
-            Log.i(TAG, "serviceInfo set, flags=0x${flags.toString(16)}")
-        } catch (e: Exception) {
-            log("开启触摸探索失败: ${e.message}")
-            Log.e(TAG, "enableTouchExploration failed", e)
+            ok
         }
+
+        // 双击长按 → 长按当前焦点
+        gestureChain.onDoubleTapHold = { _ ->
+            val ok = focus.longClickTarget()
+            if (ok) haptic.longPress() else haptic.error()
+            ok
+        }
+
+        // ② 媒体控制（仅播放时激活）
+        gestureChain.register(MediaControlActor(
+            isMediaPlaying = { isMediaActive() },
+            onMediaControl = { id, _ -> handleMediaGesture(id) }
+        ))
+
+        // ⑤ 边缘菜单
+        gestureChain.register(SlidingMenuActor(
+            isMenuEnabled = { false },   // 功能层再开
+            onEdgeGesture = { _, _ -> false }
+        ))
+
+        // ⑥ 兜底导航
+        gestureChain.register(DefaultNavigationActor(
+            onFocusMove = { forward, _ -> moveFocusInternal(forward) },
+            onScroll = { forward, _ -> scrollInternal(forward) },
+            onMappedAction = { id, _ -> handleMappedGesture(id) }
+        ))
     }
 
-    // ==================== 事件入口（天坦 onAccessibilityEvent）====================
+    // ==================== 事件入口 ====================
 
+    /**
+     * 无障碍事件回调 —— **必须极快**
+     *
+     * 只做：屏幕状态跟踪 + 滚动预处理 + 过滤 + 入队。
+     * 真正的处理在主线程 handleEvent()。
+     */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
-        // 调试：记录所有事件类型（排查手势事件是否到达）
         val et = event.eventType
-        if (et == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
-            et == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END ||
-            et == AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_START ||
-            et == AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_END ||
-            et == AccessibilityEvent.TYPE_GESTURE_DETECTION_START ||
-            et == AccessibilityEvent.TYPE_GESTURE_DETECTION_END
-        ) {
-            ReaderLog.i("Event", "type=$et")
-        }
 
-        // 屏幕状态跟踪（用 PowerManager，AccessibilityEvent 没有 SCREEN_ON/OFF 常量）
-        val screenOnNow = isScreenOn()
-        if (screenOnNow != screenOn) {
-            screenOn = screenOnNow
-            funnel.isScreenOn = screenOnNow
-            log(if (screenOnNow) "屏幕亮起" else "屏幕关闭")
-        }
+        // ① 屏幕状态（1 秒缓存，避免高频查 PowerManager）
+        updateScreenState()
 
-        // 滚动事件 → 交给 AutoScrollManager（天坦 C2121b.i()）
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+        // ② 滚动事件需要立即反馈（音效要跟手），不能等队列
+        if (et == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
             autoScroll.onScrollEvent(event)
         }
 
-        // ① 过滤
-        if (funnel.shouldDrop(event)) return
-
-        // ② 分发
-        try {
-            handleEvent(event)
-        } catch (e: Exception) {
-            Log.e(TAG, "handleEvent error", e)
-        }
+        // ③ 过滤 + 入队
+        dispatcher.onEvent(event)
     }
 
     /**
-     * 事件分发 —— 1:1 抄天坦 SoundBackService.handleEvent() 的 switch
+     * 屏幕状态更新 —— 1 秒节流
+     */
+    private fun updateScreenState() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastScreenCheckTime < 1000) return
+        lastScreenCheckTime = now
+
+        val on = isScreenOn()
+        if (on != screenOn) {
+            screenOn = on
+            dispatcher.isScreenOn = on
+            log(if (on) "屏幕亮起" else "屏幕关闭")
+        }
+    }
+
+    // ==================== 事件分发（主线程）====================
+
+    /**
+     * 事件分发 —— 对应天坦 SoundBackService.handleEvent()
+     *
+     * 19 种事件类型完整覆盖。
      */
     private fun handleEvent(event: AccessibilityEvent) {
         when (event.eventType) {
 
             // ---------- 1: 点击 ----------
             AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                val node = event.source
-
-                val text = NodeSpeaker.describe(node)
-                if (!text.isNullOrBlank()) {
-                    log("点击: $text")
-                    speak(text, interrupt = true)
-                    sound.tick()
-                    haptic.click()
-                } else {
-                    log("点击（无文本）")
-                    sound.tick()
-                }
+                handleNodeEvent(event, "点击", interrupt = true)
             }
 
             // ---------- 2: 长按 ----------
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
-                val text = NodeSpeaker.describe(event.source)
+                val text = composeNode(event.source)
                 log("长按: ${text ?: "无文本"}")
                 sound.longClicked()
                 haptic.longPress()
-                if (!text.isNullOrBlank()) speak(text, interrupt = true)
+                if (!text.isNullOrBlank()) speech.speak(text, interrupt = true)
             }
 
             // ---------- 4: 选中 ----------
             AccessibilityEvent.TYPE_VIEW_SELECTED -> {
-                val text = NodeSpeaker.describe(event.source)
-                if (!text.isNullOrBlank()) {
-                    log("选中: $text")
-                    speak(text, interrupt = true)
-                }
+                handleNodeEvent(event, "选中", interrupt = true)
             }
 
             // ---------- 8: 滚动 ----------
-            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
-                handleScroll(event)
-            }
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> handleScroll(event)
 
             // ---------- 16: 焦点 ----------
             AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
                 speakNode(event.source, "焦点")
             }
 
-            // ---------- 32: 窗口变化 ----------
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                val pkg = event.packageName?.toString().orEmpty()
-                val cls = event.className?.toString().orEmpty()
-                log("窗口: $pkg / $cls")
+            // ---------- 32: 窗口状态变化 ----------
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> handleWindowChanged(event)
 
-                // 音效：窗口切换
-                sound.windowState()
-
-                // 更新前台包名（给语音输入检测用）
-                if (pkg.isNotEmpty()) {
-                    audioFocus.foregroundPackage = pkg
-                }
-
-                lastSpokenHash = -1
-                lastHoverHash = -1
-                funnel.resetFocusHash()
-                // 清焦点缓存（新页面重新定位）
-                focusController.onWindowChanged()
-
-                // 播报页面标题（天坦行为）
-                val title = event.text?.joinToString("")?.trim().orEmpty()
-                if (title.isNotEmpty()) speak(title, interrupt = true)
-            }
-
-            // ---------- 64: 无障碍焦点 ----------
+            // ---------- 64 / 32768: 无障碍焦点（值同为 32768）----------
             AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED -> {
-                // 去重：自己设的焦点不重复播报（抄 TalkBack isEventFromFocusManagement）
-                if (focusController.history.isEventFromSelf(event)) {
-                    log("无障碍焦点（自己设的，跳过播报）")
-                } else {
-                    speakNode(event.source, "无障碍焦点")
+                val text = composeNode(event.source)
+                log("无障碍焦点: ${text ?: "(无内容)"}")
+                if (!text.isNullOrBlank()) {
+                    val hash = event.source?.hashCode() ?: -1
+                    val now = SystemClock.uptimeMillis()
+                    if (hash != lastSpokenHash || now - lastSpeakTime > 300) {
+                        lastSpokenHash = hash
+                        lastSpeakTime = now
+                        speech.speak(text, interrupt = true)
+                        playFocusSound(event.source)
+                    }
                 }
             }
 
-            // ---------- 64 的清除 ----------
             AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED -> {
                 log("焦点清除")
             }
 
-            // ---------- 128: 触摸探索（手指摸到节点）----------
+            // ---------- 128: 触摸探索 ----------
             AccessibilityEvent.TYPE_VIEW_HOVER_ENTER -> {
-                val node = event.source ?: return
-                speakHover(node)
+                // ★ 天坦行为：触摸一碰先打断当前播报
+                speech.interruptChannelA()
+                event.source?.let { speakHover(it) }
             }
 
             AccessibilityEvent.TYPE_VIEW_HOVER_EXIT -> {
@@ -324,7 +372,7 @@ class ReaderAccessibilityService : AccessibilityService() {
                 val text = node?.text?.toString()?.trim().orEmpty()
                 if (text.isNotEmpty()) {
                     log("文本: $text")
-                    speak(text, interrupt = false)
+                    speech.speak(text, interrupt = false)
                 }
             }
 
@@ -334,25 +382,26 @@ class ReaderAccessibilityService : AccessibilityService() {
                 val text = node?.text?.toString()?.trim().orEmpty()
                 if (text.isNotEmpty()) {
                     log("选择: $text")
-                    speak(text, interrupt = false)
+                    speech.speak(text, interrupt = false)
                 }
             }
 
             // ---------- 1048576: 触摸探索开始 ----------
             AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_START -> {
                 log("触摸探索开始")
-                funnel.isTouchExploring = true
+                dispatcher.isFullScreenReading = false
+                // ★ 天坦行为：探索开始也先打断
+                speech.interruptChannelA()
             }
 
             // ---------- 2097152: 触摸探索结束 ----------
             AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_END -> {
                 log("触摸探索结束")
-                funnel.isTouchExploring = false
             }
 
             // ---------- 4194304: 窗口集合变化 ----------
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
-                log("窗口集合变化")
+                nodeCache.invalidateAll()
             }
 
             // ---------- 通知 ----------
@@ -360,7 +409,7 @@ class ReaderAccessibilityService : AccessibilityService() {
                 val text = event.text?.joinToString("")?.trim().orEmpty()
                 if (text.isNotEmpty()) {
                     log("通知: $text")
-                    speak(text, interrupt = true)
+                    speech.speak(text, interrupt = true)
                 }
             }
 
@@ -369,13 +418,14 @@ class ReaderAccessibilityService : AccessibilityService() {
                 val text = event.text?.joinToString("")?.trim().orEmpty()
                 if (text.isNotEmpty()) {
                     log("播报: $text")
-                    speak(text, interrupt = true)
+                    speech.speak(text, interrupt = true)
                 }
             }
 
             // ---------- 内容变化 ----------
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                // 不播报，太吵（天坦也不播）
+                // 不播报（太吵），但缓存要失效
+                nodeCache.invalidateAll()
             }
 
             else -> {
@@ -384,28 +434,58 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ==================== 滚动处理（抄天坦 ProcessorScroll）====================
-
-    /** 上次滚动处理时间（250ms 节流） */
-    private var lastScrollTime = 0L
-
-    /** 上次滚动的节点标识（去重） */
-    private var lastScrollNodeKey = -1
-
-    /** 上次滚动的窗口 ID */
-    private var lastScrollWindowId = -1
+    /**
+     * 通用节点事件处理（点击/选中）
+     */
+    private fun handleNodeEvent(event: AccessibilityEvent, tag: String, interrupt: Boolean) {
+        val node = event.source
+        val text = composeNode(node)
+        if (!text.isNullOrBlank()) {
+            log("$tag: $text")
+            speech.speak(text, interrupt = interrupt)
+            sound.tick()
+            haptic.click()
+        } else {
+            log("$tag（无内容）")
+            sound.tick()
+        }
+    }
 
     /**
-     * 滚动事件处理 —— 1:1 抄天坦 M6/r.java ProcessorScroll.e()
+     * 窗口变化处理
+     */
+    private fun handleWindowChanged(event: AccessibilityEvent) {
+        val pkg = event.packageName?.toString().orEmpty()
+        val cls = event.className?.toString().orEmpty()
+        log("窗口: $pkg / $cls")
+
+        sound.windowState()
+
+        if (pkg.isNotEmpty()) {
+            audioFocus.foregroundPackage = pkg
+        }
+
+        // 重置全部状态
+        lastSpokenHash = -1
+        lastHoverHash = -1
+        dispatcher.resetFocusHash()
+        focus.onWindowChanged()
+        nodeCache.invalidateAll()
+
+        // 播报页面标题
+        val title = event.text?.joinToString("")?.trim().orEmpty()
+        if (title.isNotEmpty()) speech.speak(title, interrupt = true)
+    }
+
+    /**
+     * 滚动处理 —— 对应天坦 M6/r ProcessorScroll.e()
      *
-     * 天坦的两层节流：
-     * ① 时间节流：250ms 内的滚动事件全部丢弃（m(now) = now - last < 250）
-     * ② 节点去重：同一节点 + 同一窗口的连续滚动，只播一次
+     * 两层节流：① 250ms 时间窗 ② 同节点+同窗口去重
      */
     private fun handleScroll(event: AccessibilityEvent) {
         val now = SystemClock.uptimeMillis()
 
-        // ① 时间节流（天坦 250ms）
+        // ① 时间节流
         if (now - lastScrollTime < SCROLL_THROTTLE_MS) return
         lastScrollTime = now
 
@@ -413,26 +493,30 @@ class ReaderAccessibilityService : AccessibilityService() {
         val nodeKey = node?.hashCode() ?: -1
         val windowId = node?.windowId ?: -1
 
-        // ② 节点去重：同一节点 + 同一窗口 → 跳过
-        if (nodeKey == lastScrollNodeKey && windowId == lastScrollWindowId) {
-            return
-        }
+        // ② 节点去重
+        if (nodeKey == lastScrollNodeKey && windowId == lastScrollWindowId) return
         lastScrollNodeKey = nodeKey
         lastScrollWindowId = windowId
 
-        // ③ 播滚动音效（天坦：速率随滚动速度变化）
+        // ③ 滚动音效（速率随速度变化）
         val deltaY = event.scrollDeltaY
         val rate = if (deltaY != 0) {
             Math.pow(2.0, (deltaY / 50.0) - 1).toFloat().coerceIn(0.5f, 2.0f)
         } else 1.0f
         sound.scroll(rate)
 
-        // ④ 播报滚动位置（列表才有）
+        // ④ 播报滚动位置
         val total = event.itemCount
         if (total > 0 && event.toIndex >= 0) {
-            val msg = "第 ${event.toIndex + 1} 项，共 $total 项"
+            val from = event.fromIndex
+            val to = event.toIndex
+            val msg = if (from == to || to < 0 || to + 1 > total) {
+                "第 ${from + 1} 项，共 $total 项"
+            } else {
+                "第 ${from + 1} 到 ${to + 1} 项，共 $total 项"
+            }
             log("滚动: $msg")
-            speak(msg, interrupt = true)
+            speech.speak(msg, interrupt = true)
         } else {
             log("滚动")
         }
@@ -440,109 +524,77 @@ class ReaderAccessibilityService : AccessibilityService() {
 
     // ==================== 播报 ====================
 
-    /** 触摸探索：手指摸到节点 → 播报 + 震动 */
+    /**
+     * 触摸探索播报 —— 天坦 M6/A.C()
+     */
     private fun speakHover(node: AccessibilityNodeInfo) {
         val hash = node.hashCode()
         val now = SystemClock.uptimeMillis()
 
-        // 同一节点 250ms 内不重复播报
         if (hash == lastHoverHash && now - lastSpeakTime < 250) return
 
-        val text = NodeSpeaker.describe(node, includeRole = true)
-        val role = if (text.isNullOrBlank()) NodeSpeaker.roleOf(node) else null
+        val text = composeNode(node, includeRole = true)
+        val roleName = if (text.isNullOrBlank()) {
+            SpeechCompositor.roleName(NodeRoleHelper.roleOf(node), node)
+        } else null
 
-        if (text.isNullOrBlank() && role == null) {
-            // 既无文本也无角色 → 不播报，但仍设焦点（保证滑动能从这继续）
+        if (text.isNullOrBlank() && roleName == null) {
             lastHoverHash = hash
             lastSpeakTime = now
-            log("触摸: (无文本节点)")
-            focusController.focusForTouch(node)
+            log("触摸: (无内容)")
+            focus.focusForTouch(node)
             return
         }
 
-        // ★ 修正：原实现同时写 lastSpokenHash 和 lastHoverHash 两个独立去重窗口，
-        // 导致后续 speakNode 的去重判定混乱。触摸只维护 lastHoverHash。
         lastHoverHash = hash
         lastSpeakTime = now
 
-        val spoken = text ?: role!!
+        val spoken = text ?: roleName!!
         log("触摸: $spoken")
-        speak(spoken, interrupt = true)
-
-        // 触摸探索也设无障碍焦点，让触摸焦点和滑动焦点统一
-        focusController.focusForTouch(node)
-
-        // 音效 + 震动 —— 统一走 playFocusSound
+        speech.speak(spoken, interrupt = true)
+        focus.focusForTouch(node)
         playFocusSound(node)
     }
 
     /**
-     * 天坦 AbstractC3688i.j(node) —— 判断节点"是否可操作"
-     *
-     *   j(node) = isFocusable || isClickable || isLongClickable
-     *             || z(node, 1, 16, 32)              ← ACTION_FOCUS/CLICK/LONG_CLICK
-     *             || y(node, 131072, 2048)           ← 单指上滑 / PREVIOUS_HTML_ELEMENT
-     *
-     * 【修正】原来第二个动作常量写的是 1024，天坦实际是 131072。
+     * 焦点变化播报
      */
-    private fun isActionable(node: AccessibilityNodeInfo): Boolean {
-        if (node.isFocusable) return true
-        if (node.isClickable) return true
-        if (node.isLongClickable) return true
-
-        return try {
-            node.actionList.any {
-                it.id == 1 ||          // ACTION_FOCUS
-                        it.id == 16 ||         // ACTION_CLICK
-                        it.id == 32 ||         // ACTION_LONG_CLICK
-                        it.id == 131072 ||     // ACTION_SCROLL_UP 之外的语义动作
-                        it.id == 2048          // ACTION_PREVIOUS_HTML_ELEMENT
-            }
-        } catch (e: Throwable) {
-            false
-        }
-    }
-
-    /** 焦点变化播报 */
     private fun speakNode(node: AccessibilityNodeInfo?, tag: String) {
         if (node == null) return
 
         val hash = node.hashCode()
         val now = SystemClock.uptimeMillis()
-
         if (hash == lastSpokenHash && now - lastSpeakTime < 300) return
 
-        val text = NodeSpeaker.describe(node, includeRole = true) ?: run {
-            // 无文本 → 播报角色
-            val role = NodeSpeaker.roleOf(node)
+        val text = composeNode(node, includeRole = true) ?: run {
+            val role = SpeechCompositor.roleName(NodeRoleHelper.roleOf(node), node)
             if (role != null) {
                 lastSpokenHash = hash
                 lastSpeakTime = now
                 log("$tag: $role")
-                speak(role, interrupt = true)
+                speech.speak(role, interrupt = true)
                 playFocusSound(node)
             } else {
-                log("$tag: (无文本节点)")
+                log("$tag: (无内容)")
             }
             return
         }
 
         lastSpokenHash = hash
         lastSpeakTime = now
-
         log("$tag: $text")
-        speak(text, interrupt = true)
+        speech.speak(text, interrupt = true)
         playFocusSound(node)
     }
 
     /**
-     * 播焦点音效 —— 按节点可操作性判定（和触摸探索一致）
+     * 播焦点音效 —— 天坦 z6/C4421m.java:898
      *
-     * 天坦 z6/C4421m.java:898 真实逻辑：
-     *   j(node)==true  → raw/focus_actionable
-     *   j(node)==false → raw/focus
+     *   j(node)==true  → focus_actionable（可操作）
+     *   j(node)==false → focus（不可操作）
      */
-    private fun playFocusSound(node: AccessibilityNodeInfo) {
+    private fun playFocusSound(node: AccessibilityNodeInfo?) {
+        if (node == null) return
         if (isActionable(node)) {
             sound.focusActionable()
             haptic.focusClickable()
@@ -553,342 +605,208 @@ class ReaderAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 滑动浏览后主动播报当前焦点
-     *
-     * 为什么需要：滑动时我们调 performAction 设焦点，系统会回发
-     * TYPE_VIEW_ACCESSIBILITY_FOCUSED 事件，但我们的去重逻辑
-     * （isEventFromSelf）会把它当成「自己设的」跳过播报。
-     * 结果焦点在动但没声音。
-     *
-     * 解决：滑动后主动播报，不依赖事件回调。
+     * 合成节点朗读文本 —— 走 NodeCache + SpeechCompositor
      */
-    private fun speakCurrentFocus(tag: String) {
-        val node = focusController.getFocused() ?: return
-        val text = NodeSpeaker.describe(node, includeRole = true) ?: run {
-            // 无文本 → 播报角色
-            val role = NodeSpeaker.roleOf(node)
-            if (role != null) {
-                log("$tag: $role")
-                speak(role, interrupt = true)
-            } else {
-                log("$tag: (无文本节点)")
+    private fun composeNode(
+        node: AccessibilityNodeInfo?,
+        includeRole: Boolean = true
+    ): String? {
+        if (node == null) return null
+        return nodeCache.composeText(node) {
+            SpeechCompositor.compose(
+                node = node,
+                order = speechOrder,
+                includeRole = includeRole
+            )
+        }
+    }
+
+    /**
+     * 天坦 AbstractC3688i.j(node) —— 节点是否可操作
+     */
+    private fun isActionable(node: AccessibilityNodeInfo): Boolean {
+        if (node.isFocusable) return true
+        if (node.isClickable) return true
+        if (node.isLongClickable) return true
+        return try {
+            node.actionList.any {
+                it.id == 1 || it.id == 16 || it.id == 32 || it.id == 131072 || it.id == 2048
             }
-            // ★ 修正：统一走 playFocusSound，避免音效判定与别处不一致
-            playFocusSound(node)
-            return
+        } catch (e: Throwable) {
+            false
         }
-
-        lastSpokenHash = node.hashCode()
-        lastSpeakTime = SystemClock.uptimeMillis()
-
-        log("$tag: $text")
-        speak(text, interrupt = true)
-        playFocusSound(node)
     }
 
-    private fun speak(text: String, interrupt: Boolean) {
-        // 语音输入中 → 静音（不打断用户说话）
-        if (audioFocus.shouldMute()) {
-            Log.d(TAG, "muted (voice input active): $text")
-            return
-        }
-        // 请求音频焦点（DUCK 模式，压低其他音频而不是抢断）
-        audioFocus.requestFocus()
-        tts.speak(text, interrupt)
-    }
-
-    // ==================== 手势（抄天坦 GestureController）====================
+    // ==================== 手势 ====================
 
     override fun onGesture(gestureId: Int): Boolean {
         ReaderLog.i("Service", "onGesture(Int): $gestureId")
-        return handleGesture(gestureId)
+        return gestureChain.handle(gestureId, 0)
     }
 
     override fun onGesture(gestureEvent: AccessibilityGestureEvent): Boolean {
         val id = gestureEvent.gestureId
         ReaderLog.i("Service", "onGesture(Event): $id")
-        return handleGesture(id)
+        val displayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                gestureEvent.displayId
+            } catch (e: Throwable) {
+                0
+            }
+        } else 0
+        return gestureChain.handle(id, displayId)
     }
 
-    private fun handleGesture(gestureId: Int): Boolean {
-        // 手势结束音效已去掉（用户反馈不需要）
-        return routeGesture(gestureId)
+    /**
+     * 焦点移动 —— 供手势链调用
+     */
+    private fun moveFocusInternal(forward: Boolean): Boolean {
+        val dir = if (forward) FocusManager.DIR_NEXT else FocusManager.DIR_PREVIOUS
+        val node = focus.moveFocus(dir) ?: run {
+            haptic.boundary()
+            return false
+        }
+        speakNode(node, if (forward) "下一焦点" else "上一焦点")
+        autoScroll.ensureVisible(node, if (forward) 1 else 2)
+        return true
     }
 
-    private fun routeGesture(gestureId: Int): Boolean {
-        // 46 手势完整映射 —— 抄天坦 GestureMap
+    /**
+     * 滚动 —— 供手势链调用
+     */
+    private fun scrollInternal(forward: Boolean): Boolean {
+        val ok = focus.scroll(forward)
+        if (ok) sound.scroll(if (forward) 1.1f else 0.9f)
+        return ok
+    }
+
+    /**
+     * 媒体手势
+     */
+    private fun handleMediaGesture(gestureId: Int): Boolean {
+        val keyCode = when (gestureId) {
+            Gestures.GESTURE_2_FINGER_SWIPE_LEFT -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            Gestures.GESTURE_2_FINGER_SWIPE_RIGHT -> KeyEvent.KEYCODE_MEDIA_NEXT
+            Gestures.GESTURE_2_FINGER_SINGLE_TAP -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            else -> return false
+        }
+        sendMediaKey(keyCode)
+        return true
+    }
+
+    /**
+     * 映射手势（按 GestureMap 查表执行）
+     */
+    private fun handleMappedGesture(gestureId: Int): Boolean {
         return when (GestureMap.actionOf(gestureId)) {
-
-            GestureAction.FOCUS_PREVIOUS -> {
-                val node = focusController.moveFocus(FocusController.Direction.PREVIOUS)
-                if (node != null) {
-                    speakNode(node, "上一焦点")
-                    autoScroll.ensureVisible(node, 2)
-                    true
-                } else {
-                    haptic.boundary()
-                    false
-                }
-            }
-
-            GestureAction.FOCUS_NEXT -> {
-                val node = focusController.moveFocus(FocusController.Direction.NEXT)
-                if (node != null) {
-                    speakNode(node, "下一焦点")
-                    autoScroll.ensureVisible(node, 1)
-                    true
-                } else {
-                    haptic.boundary()
-                    false
-                }
-            }
-
-            GestureAction.SCROLL_BACKWARD -> {
-                val ok = focusController.scroll(false)
-                if (ok) sound.scroll(0.9f)
-                ok
-            }
-
-            GestureAction.SCROLL_FORWARD -> {
-                val ok = focusController.scroll(true)
-                if (ok) sound.scroll(1.1f)
-                ok
-            }
-
-            GestureAction.CLICK -> {
-                val ok = focusController.clickFocused()
-                if (ok) {
-                    haptic.click()
-                    log("→ 点击")
-                } else {
-                    haptic.error()
-                    log("→ 点击失败")
-                }
-                ok
-            }
-
-            GestureAction.LONG_CLICK -> {
-                val ok = focusController.longClickFocused()
-                if (ok) haptic.longPress() else haptic.error()
-                ok
-            }
-
-            GestureAction.BACK -> {
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                log("→ 返回")
-                true
-            }
-
-            GestureAction.HOME -> {
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                log("→ 主屏")
-                true
-            }
-
-            GestureAction.RECENTS -> {
-                performGlobalAction(GLOBAL_ACTION_RECENTS)
-                log("→ 最近任务")
-                true
-            }
-
-            GestureAction.NOTIFICATIONS -> {
-                performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
-                log("→ 通知栏")
-                true
-            }
-
-            GestureAction.GLOBAL_MENU -> {
-                showGlobalMenu()
-                true
-            }
-
-            GestureAction.GRANULARITY_CHARACTER -> {
-                GranularityNavigator.setLevel(GranularityNavigator.Level.CHARACTER)
-                speak("按字", interrupt = true)
-                log("→ 粒度：按字")
-                haptic.focus()
-                true
-            }
-
-            GestureAction.GRANULARITY_WORD -> {
-                GranularityNavigator.setLevel(GranularityNavigator.Level.WORD)
-                speak("按词", interrupt = true)
-                log("→ 粒度：按词")
-                haptic.focus()
-                true
-            }
-
-            GestureAction.GRANULARITY_LINE -> {
-                GranularityNavigator.setLevel(GranularityNavigator.Level.LINE)
-                speak("按行", interrupt = true)
-                log("→ 粒度：按行")
-                haptic.focus()
-                true
-            }
-
-            GestureAction.GRANULARITY_DEFAULT -> {
-                val level = GranularityNavigator.cycle()
-                speak(GranularityNavigator.levelName(level), interrupt = true)
-                log("→ 粒度：${GranularityNavigator.levelName(level)}")
-                haptic.focus()
-                true
-            }
-
-            GestureAction.COPY -> {
-                val node = focusController.getTargetNode()
-                val ok = TextEditActions.copy(node)
-                speak(if (ok) "已复制" else "复制失败", interrupt = true)
-                ok
-            }
-            GestureAction.PASTE -> {
-                val node = focusController.getTargetNode()
-                val ok = TextEditActions.paste(node)
-                speak(if (ok) "已粘贴" else "粘贴失败", interrupt = true)
-                ok
-            }
-
-            GestureAction.CUT -> {
-                val node = focusController.getTargetNode()
-                val ok = TextEditActions.cut(node)
-                speak(if (ok) "已剪切" else "剪切失败", interrupt = true)
-                ok
-            }
-
-            GestureAction.SELECT_ALL -> {
-                val node = focusController.getTargetNode()
-                val ok = TextEditActions.selectAll(node)
-                speak(if (ok) "已全选" else "全选失败", interrupt = true)
-                ok
-            }
-
-            GestureAction.STOP_SPEAK -> {
-                tts.stop()
-                log("→ 停止朗读")
-                haptic.focus()
-                true
-            }
-
-            GestureAction.TOGGLE_SPEAK -> {
-                val enabled = !tts.isEnabled()
-                tts.setEnabled(enabled)
-                speak(if (enabled) "读屏已开启" else "读屏已关闭", interrupt = true)
-                log("→ 读屏${if (enabled) "开" else "关"}")
-                true
-            }
-
-            GestureAction.SCREENSHOT -> {
-                performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
-                log("→ 截图")
-                true
-            }
-
-            GestureAction.SCREEN_RECOGNIZE -> {
-                performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN)
-                log("→ 分屏")
-                true
-            }
-
-            GestureAction.VOLUME_UP -> {
-                // 【修正】原实现错误地执行了无障碍快捷键，与手势名不符。
-                // 四指上下滑 → 真正调音量。
-                adjustVolume(up = true)
-                true
-            }
-
-            GestureAction.VOLUME_DOWN -> {
-                adjustVolume(up = false)
-                true
-            }
-
-            GestureAction.MEDIA_PREVIOUS,
-            GestureAction.MEDIA_NEXT,
-            GestureAction.MEDIA_PLAY_PAUSE -> {
-                val keyCode = when (GestureMap.actionOf(gestureId)) {
-                    GestureAction.MEDIA_PREVIOUS -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
-                    GestureAction.MEDIA_NEXT -> KeyEvent.KEYCODE_MEDIA_NEXT
-                    else -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
-                }
-                sendMediaKey(keyCode)
-                true
-            }
-
+            GestureAction.FOCUS_PREVIOUS -> moveFocusInternal(false)
+            GestureAction.FOCUS_NEXT -> moveFocusInternal(true)
+            GestureAction.SCROLL_BACKWARD -> scrollInternal(false)
+            GestureAction.SCROLL_FORWARD -> scrollInternal(true)
+            GestureAction.CLICK -> focus.clickTarget().also { if (it) haptic.click() }
+            GestureAction.LONG_CLICK -> focus.longClickTarget()
+            GestureAction.BACK -> { performGlobalAction(GLOBAL_ACTION_BACK); true }
+            GestureAction.HOME -> { performGlobalAction(GLOBAL_ACTION_HOME); true }
+            GestureAction.RECENTS -> { performGlobalAction(GLOBAL_ACTION_RECENTS); true }
+            GestureAction.NOTIFICATIONS -> { performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS); true }
+            GestureAction.STOP_SPEAK -> { speech.stop(); true }
+            GestureAction.TOGGLE_SPEAK -> toggleSpeech()
+            GestureAction.SCREENSHOT -> { performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT); true }
+            GestureAction.VOLUME_UP -> { adjustVolume(true); true }
+            GestureAction.VOLUME_DOWN -> { adjustVolume(false); true }
+            GestureAction.MEDIA_PREVIOUS, GestureAction.MEDIA_NEXT, GestureAction.MEDIA_PLAY_PAUSE ->
+                handleMediaGesture(gestureId)
+            GestureAction.GRANULARITY_CHARACTER -> setGranularity(GranularityNavigator.Level.CHARACTER)
+            GestureAction.GRANULARITY_WORD -> setGranularity(GranularityNavigator.Level.WORD)
+            GestureAction.GRANULARITY_LINE -> setGranularity(GranularityNavigator.Level.LINE)
+            GestureAction.GRANULARITY_DEFAULT -> cycleGranularity()
+            GestureAction.COPY -> { val ok = TextEditActions.copy(focus.getTargetNode()); speech.speak(if (ok) "已复制" else "复制失败", true); ok }
+            GestureAction.PASTE -> { val ok = TextEditActions.paste(focus.getTargetNode()); speech.speak(if (ok) "已粘贴" else "粘贴失败", true); ok }
+            GestureAction.CUT -> { val ok = TextEditActions.cut(focus.getTargetNode()); speech.speak(if (ok) "已剪切" else "剪切失败", true); ok }
+            GestureAction.SELECT_ALL -> { val ok = TextEditActions.selectAll(focus.getTargetNode()); speech.speak(if (ok) "已全选" else "全选失败", true); ok }
+            GestureAction.GLOBAL_MENU -> { showGlobalMenu(); true }
+            GestureAction.SCREEN_RECOGNIZE -> { performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN); true }
             GestureAction.NONE -> false
         }
     }
 
-    /**
-     * 调音量 —— 四指上下滑
-     */
+    private fun toggleSpeech(): Boolean {
+        val enabled = !speech.enabled
+        speech.enabled = enabled
+        if (!enabled) speech.stop()
+        speech.speak(if (enabled) "读屏已开启" else "读屏已关闭", interrupt = true)
+        log("→ 读屏${if (enabled) "开" else "关"}")
+        return true
+    }
+
+    private fun setGranularity(level: GranularityNavigator.Level): Boolean {
+        GranularityNavigator.setLevel(level)
+        nodeCache.invalidateAll()
+        speech.speak(GranularityNavigator.levelName(level), interrupt = true)
+        haptic.focus()
+        return true
+    }
+
+    private fun cycleGranularity(): Boolean {
+        val level = GranularityNavigator.cycle()
+        nodeCache.invalidateAll()
+        speech.speak(GranularityNavigator.levelName(level), interrupt = true)
+        haptic.focus()
+        return true
+    }
+
     private fun adjustVolume(up: Boolean) {
         try {
-            val am = getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
-            val dir = if (up) android.media.AudioManager.ADJUST_RAISE
-            else android.media.AudioManager.ADJUST_LOWER
+            val am = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
             am.adjustStreamVolume(
                 android.media.AudioManager.STREAM_MUSIC,
-                dir,
+                if (up) android.media.AudioManager.ADJUST_RAISE
+                else android.media.AudioManager.ADJUST_LOWER,
                 android.media.AudioManager.FLAG_SHOW_UI
             )
             val vol = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
             val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
-            val percent = if (max > 0) (vol * 100 / max) else 0
-            speak("音量 $percent%", interrupt = true)
-            log("→ 音量 ${if (up) "+" else "-"} ($percent%)")
+            val pct = if (max > 0) vol * 100 / max else 0
+            speech.speakInterrupt("音量 $pct%")
             haptic.focus()
         } catch (e: Exception) {
             log("调音量失败: ${e.message}")
         }
     }
 
-    /**
-     * 发送媒体按键
-     */
     private fun sendMediaKey(keyCode: Int) {
         try {
-            val am = getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
+            val am = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
             am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
             am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-            log("→ 媒体键 $keyCode")
         } catch (e: Exception) {
             log("媒体键失败: ${e.message}")
         }
     }
 
-    /**
-     * 全局菜单 —— 抄天坦的全局菜单（C2153r0）
-     *
-     * 弹出常用操作列表
-     */
+    private fun isMediaActive(): Boolean = try {
+        val am = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
+        am.isMusicActive
+    } catch (e: Exception) {
+        false
+    }
+
     private fun showGlobalMenu() {
-        val items = arrayOf(
-            "读屏设置",
-            "语音设置",
-            "手势设置",
-            "焦点粒度",
-            "屏幕识别",
-            "停止朗读"
-        )
+        val items = arrayOf("语音设置", "焦点粒度", "停止朗读")
         android.app.AlertDialog.Builder(this)
             .setTitle("全局菜单")
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> log("→ 读屏设置")
-                    1 -> log("→ 语音设置")
-                    2 -> log("→ 手势设置")
-                    3 -> {
-                        val level = GranularityNavigator.cycle()
-                        speak(GranularityNavigator.levelName(level), interrupt = true)
-                    }
-                    4 -> performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN)
-                    5 -> tts.stop()
+                    0 -> log("→ 语音设置")
+                    1 -> cycleGranularity()
+                    2 -> speech.stop()
                 }
             }
             .setNegativeButton("取消", null)
             .show()
-        log("→ 全局菜单")
     }
 
-    /** 坐标点击（FocusController 兜底用） */
+    /** 坐标点击（焦点管理器兜底用） */
     fun dispatchGestureTap(x: Float, y: Float): Boolean {
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
@@ -897,14 +815,52 @@ class ReaderAccessibilityService : AccessibilityService() {
         return dispatchGesture(gesture, null, null)
     }
 
+    // ==================== 触摸探索配置 ====================
+
+    private fun enableTouchExploration() {
+        try {
+            val info = serviceInfo ?: run {
+                log("serviceInfo 为 null，跳过")
+                return
+            }
+
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.feedbackType = info.feedbackType or
+                    (AccessibilityServiceInfo.FEEDBACK_SPOKEN or
+                            AccessibilityServiceInfo.FEEDBACK_HAPTIC or
+                            AccessibilityServiceInfo.FEEDBACK_AUDIBLE)
+            info.notificationTimeout = 0L
+
+            var flags = info.flags
+            flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
+            flags = flags and AccessibilityServiceInfo.FLAG_REQUEST_2_FINGER_PASSTHROUGH.inv()
+            flags = flags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+            flags = flags or AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+            flags = flags or 4096
+            flags = flags or AccessibilityServiceInfo.FLAG_ENABLE_ACCESSIBILITY_VOLUME
+            flags = flags or 128
+            info.flags = flags
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                info.setInteractiveUiTimeoutMillis(10000)
+            }
+            serviceInfo = info
+
+            ReaderLog.i("Service", "flags=0x${flags.toString(16)}")
+        } catch (e: Exception) {
+            log("开启触摸探索失败: ${e.message}")
+        }
+    }
+
     // ==================== 按键 ====================
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             when (event.keyCode) {
                 KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                    tts.stop()
-                    log("音量键 → 停止朗读")
+                    speech.stop(clearQueue = false)
                     return false   // 不拦截，音量照常调
                 }
             }
@@ -916,52 +872,36 @@ class ReaderAccessibilityService : AccessibilityService() {
         log("服务中断")
     }
 
-    /** 屏幕是否亮着 */
-    private fun isScreenOn(): Boolean {
-        return try {
-            val pm = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
-            pm.isInteractive
-        } catch (e: Exception) {
-            true
-        }
+    private fun isScreenOn(): Boolean = try {
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        pm.isInteractive
+    } catch (e: Exception) {
+        true
     }
 
     override fun onDestroy() {
         super.onDestroy()
         instance = null
         isRunning = false
-        try {
-            tts.shutdown()
-        } catch (e: Exception) {
-            // ignore
-        }
-        try {
-            sound.shutdown()
-        } catch (e: Exception) {
-            // ignore
-        }
-        try {
-            autoScroll.stop()
-        } catch (e: Exception) {
-            // ignore
-        }
-        focusController.shutdown()
 
-        // ★ 修正：清静态引用，避免 Activity 回调悬挂导致泄漏
+        try { speech.shutdown() } catch (e: Exception) { }
+        try { sound.shutdown() } catch (e: Exception) { }
+        try { autoScroll.stop() } catch (e: Exception) { }
+        try { focus.shutdown() } catch (e: Exception) { }
+        try { eventQueue.clear() } catch (e: Exception) { }
+        try { nodeCache.hardClear() } catch (e: Exception) { }
+        try { gestureChain.clear() } catch (e: Exception) { }
+
         onLogUpdate = null
         synchronized(eventLog) { eventLog.clear() }
 
         log("服务已销毁")
-        Log.i(TAG, "onDestroy")
     }
 
     // ==================== 工具 ====================
 
     private fun log(msg: String) {
-        // 用独立日志系统（写文件 + 内存 + logcat）
         ReaderLog.i("Service", msg)
-
-        // 保留内存环形缓冲（App 内面板兼容）
         val time = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.CHINA)
             .format(java.util.Date())
         val line = "[$time] $msg"
@@ -973,49 +913,50 @@ class ReaderAccessibilityService : AccessibilityService() {
     }
 
     fun speakTest(text: String) {
-        tts.speak(text, true)
+        speech.speak(text, interrupt = true)
         haptic.focus()
         log("测试朗读: $text")
     }
 
-    fun stats(): String = "放行 ${funnel.passedCount} / 丢弃 ${funnel.droppedCount}"
+    fun stats(): String = buildString {
+        append("事件: ${dispatcher.stats()}\n")
+        append("队列: ${eventQueue.stats()}\n")
+        append("播报: ${speech.stats()}\n")
+        append("焦点: ${focus.stats()}\n")
+        append("缓存: ${nodeCache.stats()}\n")
+        append("手势: ${gestureChain.stats()}")
+    }
 
     /**
-     * 重新加载 TTS 设置（引擎/语速/音调/音量）
-     * 供设置界面调用 —— 改完立刻生效，不用重启服务
+     * 重载 TTS 设置
      */
     fun reloadTtsSettings() {
         val newEngine = TtsEngineManager.getSavedEngine(this)
-        if (newEngine != tts.enginePackage) {
-            // 引擎变了 → 重建
+        if (newEngine != speech.enginePackage) {
             log("切换语音库: ${newEngine ?: "系统默认"}")
-            tts.initEngine(newEngine)
+            speech.setEngine(newEngine)
         } else {
-            // 引擎没变 → 只更新参数
-            tts.setSpeechRate(TtsEngineManager.getRate(this))
-            tts.setPitch(TtsEngineManager.getPitch(this))
-            tts.setVolume(TtsEngineManager.getVolume(this))
-            val voice = TtsEngineManager.getVoiceName(this)
-            if (!voice.isNullOrEmpty()) tts.setVoice(voice)
-            val lang = TtsEngineManager.getLanguage(this)
-            if (!lang.isNullOrEmpty()) tts.setLanguage(lang)
+            speech.updateSettings(
+                TtsEngineManager.getRate(this),
+                TtsEngineManager.getPitch(this),
+                TtsEngineManager.getVolume(this),
+                TtsEngineManager.getLanguage(this)
+            )
         }
     }
 
-    /** 当前使用的语音库包名 */
-    fun currentEngine(): String? = tts.enginePackage
+    fun currentEngine(): String? = speech.enginePackage
 
-    // ==================== 天坦输入法适配回调 ====================
+    // ==================== 输入法适配 ====================
 
-    /** 输入法请求开关触摸探索 */
     fun onImeTouchExplorationChanged(disable: Boolean) {
         try {
             val info = serviceInfo ?: return
             var flags = info.flags
-            if (disable) {
-                flags = flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
+            flags = if (disable) {
+                flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
             } else {
-                flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
+                flags or AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
             }
             info.flags = flags
             serviceInfo = info
@@ -1025,54 +966,36 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** 输入法设置触摸穿透区域（键盘区域） */
     fun onImePassthroughRegionChanged(region: android.graphics.Region?) {
         try {
-            if (region == null || region.isEmpty) {
-                // 清除穿透区域
-                setTouchExplorationPassthroughRegion(
-                    android.view.Display.DEFAULT_DISPLAY,
-                    android.graphics.Region()
-                )
-                log("清除触摸穿透区域")
-            } else {
-                setTouchExplorationPassthroughRegion(
-                    android.view.Display.DEFAULT_DISPLAY,
-                    region
-                )
-                log("设置触摸穿透区域: $region")
-            }
+            val r = if (region == null || region.isEmpty) android.graphics.Region() else region
+            setTouchExplorationPassthroughRegion(android.view.Display.DEFAULT_DISPLAY, r)
         } catch (e: Exception) {
             Log.e(TAG, "onImePassthroughRegionChanged failed", e)
         }
     }
 
-    /** 输入法直接调读屏播报 */
     fun speakFromIme(text: String, queueMode: Int) {
-        // queueMode: 0 = QUEUE_FLUSH, 1 = QUEUE_ADD
-        speak(text, interrupt = queueMode == 0)
+        speech.speak(text, interrupt = queueMode == 0)
     }
 
-    /** 输入法请求中断播报 */
     fun interruptSpeech() {
-        tts.stop()
+        speech.stop()
         log("输入法中断播报")
     }
 
-    /** 按文本列表查找并激活节点（输入法候选词上屏） */
+    /** 按文本查找并激活节点（输入法候选词上屏） */
     fun activateNodeByTexts(texts: List<String>): Boolean {
         val root = rootInActiveWindow ?: return false
         val textSet = texts.toHashSet()
-
         val target = findNodeByTexts(root, textSet, 0) ?: return false
 
-        // 向上找可点击祖先
         var node: AccessibilityNodeInfo? = target
         var depth = 0
         while (node != null && depth < 10) {
             if (node.isClickable && node.isEnabled) {
                 val ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                log("输入法激活节点: ${texts.firstOrNull()}, ok=$ok")
+                log("输入法激活: ${texts.firstOrNull()}, ok=$ok")
                 return ok
             }
             node = node.parent
@@ -1096,27 +1019,15 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            val found = findNodeByTexts(child, texts, depth + 1)
-            if (found != null) return found
+            findNodeByTexts(child, texts, depth + 1)?.let { return it }
         }
         return null
     }
 
-    fun moveFocus(direction: FocusController.Direction): Boolean =
-        focusController.moveFocus(direction) != null
+    // ==================== 对外兼容接口 ====================
 
-    fun clickFocused(): Boolean = focusController.clickFocused()
+    fun moveFocus(direction: Int): Boolean =
+        focus.moveFocus(direction) != null
+
+    fun clickFocused(): Boolean = focus.clickTarget()
 }
-
-// ==================== 手势常量（对齐天坦 C0905s$b）====================
-const val GESTURE_SWIPE_UP = 1
-const val GESTURE_SWIPE_DOWN = 2
-const val GESTURE_SWIPE_LEFT = 3
-const val GESTURE_SWIPE_RIGHT = 4
-const val GESTURE_SWIPE_UP_AND_DOWN = 7
-const val GESTURE_SWIPE_DOWN_AND_UP = 8
-const val GESTURE_SWIPE_DOWN_AND_LEFT = 15
-const val GESTURE_DOUBLE_TAP = 17
-const val GESTURE_DOUBLE_TAP_AND_HOLD = 18
-const val GESTURE_TWO_FINGER_SINGLE_TAP = 19
-const val GESTURE_TWO_FINGER_DOUBLE_TAP = 20

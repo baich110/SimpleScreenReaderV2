@@ -52,7 +52,10 @@ class SpeechEngine(
         private const val TAG = "SpeechEngine"
     }
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    /** 主线程 handler —— 懒加载，避免单测环境无 Looper */
+    private val mainHandler: Handler by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        Handler(Looper.getMainLooper())
+    }
 
     // ==================== 两条通道 ====================
 
@@ -420,6 +423,55 @@ class SpeechEngine(
         }
         applySettings(CHANNEL_A)
         if (readyB) applySettings(CHANNEL_B)
+    }
+
+    // ==================== 设置界面预览 ====================
+
+    /**
+     * 即时更新语音参数（不做引擎重建）
+     *
+     * 供设置界面的滑块实时调节使用。比 updateSettings 轻量：
+     * 只改参数 + 应用到现有 TTS 实例，不触发重建。
+     */
+    fun applyRate(rate: Float) {
+        speechRate = rate
+        try {
+            ttsA?.setSpeechRate(rate)
+            if (readyB) ttsB?.setSpeechRate(rate)
+        } catch (e: Exception) { }
+    }
+
+    fun applyPitch(p: Float) {
+        pitch = p
+        try {
+            ttsA?.setPitch(p)
+            if (readyB) ttsB?.setPitch(p)
+        } catch (e: Exception) { }
+    }
+
+    fun applyVolume(v: Float) {
+        volume = v
+        // TextToSpeech 无 setVolume API，音量通过 Bundle 在 speak 时传入
+        // 这里只记录，speak 时生效
+    }
+
+    fun applyLanguage(langTag: String?) {
+        if (langTag.isNullOrEmpty()) return
+        language = Locale.forLanguageTag(langTag)
+        applySettings(CHANNEL_A)
+        if (readyB) applySettings(CHANNEL_B)
+    }
+
+    fun isReady(): Boolean = readyA
+
+    /**
+     * 试听播报 —— 设置界面用
+     *
+     * 走 B 通道（打断通道），因为试听需要立即生效，
+     * 且不应该被服务正在播报的内容阻塞。
+     */
+    fun speakPreview(text: String) {
+        speakInternal(text, interrupt = true, extraFlags = SpeechFlags.INTERRUPT_CHANNEL)
     }
 
     fun isSpeaking(): Boolean = channelA.isSpeaking || channelB.isSpeaking

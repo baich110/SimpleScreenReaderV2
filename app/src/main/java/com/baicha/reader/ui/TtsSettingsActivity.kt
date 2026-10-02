@@ -14,7 +14,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.baicha.reader.R
 import com.baicha.reader.core.ReaderAccessibilityService
 import com.baicha.reader.core.TtsEngineManager
-import com.baicha.reader.core.TtsManager
+import com.baicha.reader.core.SpeechEngine
 import java.util.Locale
 
 /**
@@ -45,8 +45,12 @@ class TtsSettingsActivity : AppCompatActivity() {
     private var engines: List<TtsEngineManager.TtsEngine> = emptyList()
     private var voices: List<TtsEngineManager.TtsVoice> = emptyList()
 
-    /** 独立 TTS 实例用于试听（不干扰服务） */
-    private var previewTts: TtsManager? = null
+    /**
+     * 独立播报引擎实例用于试听（不干扰正在运行的读屏服务）
+     *
+     * 走双通道框架的 B 通道（打断通道），试听即时生效。
+     */
+    private var previewTts: SpeechEngine? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,7 +65,13 @@ class TtsSettingsActivity : AppCompatActivity() {
         txtPitchLabel = findViewById(R.id.txtPitchLabel)
         txtVolumeLabel = findViewById(R.id.txtVolumeLabel)
 
-        previewTts = TtsManager(this)
+        previewTts = SpeechEngine(this).apply {
+            enginePackage = TtsEngineManager.getSavedEngine(this@TtsSettingsActivity)
+            speechRate = TtsEngineManager.getRate(this@TtsSettingsActivity)
+            pitch = TtsEngineManager.getPitch(this@TtsSettingsActivity)
+            volume = TtsEngineManager.getVolume(this@TtsSettingsActivity)
+            init()
+        }
 
         setupEngineSpinner()
         setupVoiceSpinner()
@@ -77,7 +87,7 @@ class TtsSettingsActivity : AppCompatActivity() {
         }
 
         findViewById<Button>(R.id.btnTestSpeak).setOnClickListener {
-            previewTts?.speak(getString(R.string.tts_test_text), true)
+            previewTts?.speakPreview(getString(R.string.tts_test_text))
         }
 
         findViewById<Button>(R.id.btnReset).setOnClickListener {
@@ -180,7 +190,7 @@ class TtsSettingsActivity : AppCompatActivity() {
                 txtRateLabel.text = "${getString(R.string.tts_rate_label)}：${String.format(Locale.CHINA, "%.2f", rate)}x"
                 if (fromUser) {
                     TtsEngineManager.saveRate(this@TtsSettingsActivity, rate)
-                    previewTts?.setSpeechRate(rate)
+                    previewTts?.applyRate(rate)
                     applyToService()
                 }
             }
@@ -192,7 +202,7 @@ class TtsSettingsActivity : AppCompatActivity() {
                 txtPitchLabel.text = "${getString(R.string.tts_pitch_label)}：${String.format(Locale.CHINA, "%.2f", pitch)}"
                 if (fromUser) {
                     TtsEngineManager.savePitch(this@TtsSettingsActivity, pitch)
-                    previewTts?.setPitch(pitch)
+                    previewTts?.applyPitch(pitch)
                     applyToService()
                 }
             }
@@ -204,7 +214,7 @@ class TtsSettingsActivity : AppCompatActivity() {
                 txtVolumeLabel.text = "${getString(R.string.tts_volume_label)}：${progress}%"
                 if (fromUser) {
                     TtsEngineManager.saveVolume(this@TtsSettingsActivity, vol)
-                    previewTts?.setVolume(vol)
+                    previewTts?.applyVolume(vol)
                     applyToService()
                 }
             }
