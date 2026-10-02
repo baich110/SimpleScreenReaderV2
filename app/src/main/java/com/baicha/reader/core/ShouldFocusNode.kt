@@ -363,13 +363,53 @@ object ShouldFocusNode {
         //   · 微信「图像/浮窗」特判（依赖该分支）失准
         //
         // 【改动】改为取窗口边界。
+        // ══════════════════════════════════════════════════════════════
+        // 【★ 本轮修复：取不到窗口时**不得**退回节点边界】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【天坦原文】`w7/FocusFinder.java:361~370`：
+        // ```java
+        //   if (f39017b == null) {                       // f39017b = 窗口对象
+        //       C2833A c2833aH = NodeUtils.h(nodeInfo);  // 取窗口
+        //       if (c2833aH != null) {
+        //           c2833aH.a(f39018c);                  // 用**窗口边界**填 f39018c
+        //       } else {
+        //           c2833aH = null;                      // ← 取不到就保持 null
+        //       }
+        //       f39017b = c2833aH;
+        //   }
+        //   if (isSameBoundsAsCached(nodeInfo) && nodeInfo.getChildCount() > 0) { ... }
+        // ```
+        // 而 `isSameBoundsAsCached`（`:178~185`）：
+        // ```java
+        //   if (f39017b == null) { return false; }       // ★ 窗口为 null → 直接 false
+        //   Rect rect = f39019d;
+        //   nodeInfo.getBoundsInScreen(rect);
+        //   return Intrinsics.areEqual(rect, f39018c);
+        // ```
+        // ⇒ **窗口取不到时，第 ④ 分支整段被跳过**。
+        //
+        // 【我原来的实现（错）】取不到窗口就**退回节点边界**
+        // （`node.getBoundsInScreen(baselineBounds)`）——
+        // 那会让「基准 == 本节点边界」**恒成立**，
+        // 于是第 ④ 分支**对每个有子节点的节点都触发**！
+        //
+        // 【后果】第 ④ 分支的语义是「这个节点与窗口根同边界」
+        // （即它是铺满全屏的根容器）。恒成立后：
+        //   · 对**普通容器**也走 `if (!k(node) || !i(node)) return false`
+        //   · 而容器通常 k/i 不满足 ⇒ **整批容器被判否**
+        //   · 但对另一批容器（恰好满足 k/i）⇒ **被误放行**
+        // 这正是真机「同一个 `(无文本)` 节点有时通过、有时被拒」
+        // 的**非纯函数**表现（外部审查的事实 4）。
+        //
+        // 【修复】与天坦一致：**取不到窗口就不初始化基准**，
+        // 第 ④ 分支自然跳过。
         if (!baselineInitialized) {
-            if (!fillWindowBounds(node, baselineBounds)) {
-                // 取不到窗口（接口异常）→ 退回节点边界，但**标记来源**，
-                // 避免静默地用错语义
-                node.getBoundsInScreen(baselineBounds)
+            if (fillWindowBounds(node, baselineBounds)) {
+                baselineInitialized = true
             }
-            baselineInitialized = true
+            // 取不到窗口 → baselineInitialized 保持 false，
+            // 第 ④ 分支跳过（与天坦 `isSameBoundsAsCached` 返回 false 等价）
         }
 
         // ⑤ 与基准边界相同 且 有子节点

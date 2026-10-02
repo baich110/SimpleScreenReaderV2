@@ -315,6 +315,21 @@ class ReaderAccessibilityService : AccessibilityService() {
             getLastFocusActionSource = { eventHandler.lastFocusActionSource }
         )
         speech = SpeechEngine(this).apply {
+            // ★ 引擎不可用时自愈：清掉持久化的选择并记住降级
+            onEngineUnusable = { failedPkg ->
+                try {
+                    // ① 清掉持久化的引擎选择 → 下次启动直接用系统默认
+                    TtsEngineManager.clearEngine(this@ReaderAccessibilityService)
+                    // ② 通知用户（否则「突然换了个声音」无法解释）
+                    speech.speak(
+                        "当前语音引擎不可用，已自动切换为系统默认语音",
+                        interrupt = true
+                    )
+                    log("引擎降级：$failedPkg → 系统默认")
+                } catch (e: Throwable) {
+                    log("引擎降级处理失败: ${e.message}")
+                }
+            }
             enginePackage = TtsEngineManager.getSavedEngine(this@ReaderAccessibilityService)
             speechRate = TtsEngineManager.getRate(this@ReaderAccessibilityService)
             pitch = TtsEngineManager.getPitch(this@ReaderAccessibilityService)

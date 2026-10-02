@@ -118,6 +118,20 @@ object TtsEngineManager {
     fun getSavedEngine(context: Context): String? =
         prefs(context).getString(KEY_PRIMARY_TTS, null)
 
+    /**
+     * 清除保存的引擎选择 → 回到系统默认
+     *
+     * 【为什么要这个】引擎**可能"存在但合成不了"**（真机 P0：
+     * `es.codefactory.vocalizertts` 的包在、服务在、onInit 返回 SUCCESS，
+     * 但每次 speak 都返回 `ERROR_SYNTHESIS(-5)`）。
+     * `SpeechEngine` 检测到连续失败后会调本方法，
+     * 让**下一次启动**不再选中那个坏引擎 —— 自愈。
+     */
+    fun clearEngine(context: Context) {
+        prefs(context).edit().remove(KEY_PRIMARY_TTS).apply()
+        Log.i(TAG, "cleared engine selection → system default")
+    }
+
     /** 保存语速 */
     fun saveRate(context: Context, rate: Float) {
         prefs(context).edit().putFloat(KEY_SPEECH_RATE, rate.coerceIn(RATE_MIN, RATE_MAX)).apply()

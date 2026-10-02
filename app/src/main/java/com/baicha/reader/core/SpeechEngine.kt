@@ -91,6 +91,67 @@ class SpeechEngine(
     @Volatile
     var enabled = true
 
+    /**
+     * 连续合成失败计数 —— 用于**自动降级到系统默认引擎**
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 真机 P0：引擎"存在但合成不了"】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 真机日志：
+     * ```
+     *   通道A 就绪, engine=es.codefactory.vocalizertts     ← onInit 返回 SUCCESS
+     *   TTS 播报出错: baicha_36 code=-5                    ← 但每次合成都失败
+     *   TTS 播报出错: baicha_38 code=-5
+     * ```
+     * **「引擎包存在」≠「引擎能合成」** —— Vocalizer 的包在、服务在、
+     * `onInit` 返回 `SUCCESS`，但中文语音是未安装的试用版，
+     * `speak()` 每次返回 `ERROR_SYNTHESIS(-5)`。
+     *
+     * 【原实现的后果】读屏**完全不出声** —— 而这是"能不能用手机"的问题。
+     * 焦点在动、音效在响、但一句都不念，用户等于没有读屏。
+     *
+     * 【修复】连续 [TtsEngineResolver.FAIL_THRESHOLD] 次 -5 ⇒ 判定
+     * 「该引擎不可用」⇒ 清掉保存值、改用系统默认、重建引擎。
+     * 这样**装上一个坏引擎不会让读屏彻底哑掉**（自愈）。
+     *
+     * 【为什么只对 -5 计数】其他错误码语义不同（见
+     * `TtsEngineResolver.isSynthesisFailure` 的说明），
+     * 一律降级会掩盖真正的调用方 bug。
+     */
+    @Volatile
+    private var consecutiveSynthFails = 0
+
+    /**
+     * 当前播报项的开始时刻（`uptimeMillis`）—— 供**卡死看门狗**判断
+     *
+     * 见 `speakInternal` 里的看门狗说明。
+     */
+    @Volatile
+    private var queueCurrentSince = 0L
+
+    /**
+     * 队列卡死判定阈值（毫秒）
+     *
+     * 最长单条播报（长段落）通常 < 8s；10s 既兜住真卡死，
+     * 又不会误杀正常长文本。
+     */
+    private val STUCK_QUEUE_MS = 10_000L
+
+    /**
+     * 是否已因合成失败而降级过 —— 防无限重试循环
+     *
+     * 【为什么需要】若系统默认引擎也失败，不加限制会形成
+     * 「失败 → 降级 → 又失败 → 又降级」的死循环。
+     * 降级**只做一次**：降级后仍失败就只记日志（让用户自己去设置页换）。
+     */
+    @Volatile
+    private var hasFallenBack = false
+
+    /** 降级回调 —— 由服务注入，用于清掉持久化的引擎选择 */
+    @Volatile
+    var onEngineUnusable: ((failedPackage: String?) -> Unit)? = null
+
     /** 音频焦点是否已持有 */
     private val audioFocusHeld = AtomicBoolean(false)
 
@@ -217,6 +278,9 @@ class SpeechEngine(
             }
 
             override fun onDone(utteranceId: String?) {
+                // ★ 合成成功 → 清零失败计数（引擎是好的）
+                onSpeakSuccess()
+
                 // ★ 朗读完成 → 通知（A5）
                 //   若两个通道都空闲才真正算「结束」，
                 //   否则 A 通道读完但 B 通道还在播时会提前解锁
@@ -258,6 +322,10 @@ class SpeechEngine(
 
             override fun onError(utteranceId: String?, errorCode: Int) {
                 ReaderLog.w(TAG, "TTS 播报出错: $utteranceId code=$errorCode")
+
+                // ★ 合成失败计数 → 必要时自动降级到系统默认引擎
+                onSpeakError(errorCode)
+
                 val q = if (channel == CHANNEL_A) channelA else channelB
                 val currentId = q.current()?.id
                 if (!UtteranceGuard.matchesCurrent(utteranceId, currentId)) {
@@ -286,6 +354,82 @@ class SpeechEngine(
             }
             ttsB = tts
         }
+    }
+
+    // ==================== 引擎可用性自愈 ====================
+
+    /**
+     * 合成失败时的自愈逻辑 —— **引擎坏了就换掉**
+     *
+     * 【真机 P0】`es.codefactory.vocalizertts` 的包存在、服务在、
+     * `onInit` 返回 SUCCESS，但中文语音是未安装的试用版 ⇒
+     * 每次 `speak` 都返回 `ERROR_SYNTHESIS(-5)` ⇒ **读屏完全不出声**。
+     *
+     * 本方法在连续失败达阈值时：
+     *   ① 记一条 **ERROR 级**日志（让用户/排障者一眼看到引擎有问题）
+     *   ② 通过 [onEngineUnusable] 通知服务**清掉持久化的引擎选择**
+     *   ③ 把 [enginePackage] 置空 ⇒ 下次 `createEngine` 用系统默认
+     *   ④ 重建两条通道的引擎
+     *
+     * 【只降级一次】若系统默认也失败，不再反复重建（防死循环），
+     * 只记日志 —— 那种情况需要用户去设置页手选引擎。
+     */
+    private fun onSpeakError(errorCode: Int) {
+        if (!TtsEngineResolver.isSynthesisFailure(errorCode)) {
+            // 其他错误码语义不同，不参与降级判定
+            return
+        }
+        consecutiveSynthFails++
+
+        if (hasFallenBack) {
+            ReaderLog.w(
+                TAG,
+                "合成失败（已降级过，不再重试）: 连续 $consecutiveSynthFails 次，" +
+                        "当前引擎=${enginePackage ?: "系统默认"}"
+            )
+            return
+        }
+
+        if (!TtsEngineResolver.shouldFallback(consecutiveSynthFails)) {
+            ReaderLog.w(
+                TAG,
+                "合成失败 $consecutiveSynthFails/${TtsEngineResolver.FAIL_THRESHOLD} 次，" +
+                        "引擎=${enginePackage ?: "系统默认"}"
+            )
+            return
+        }
+
+        // ★ 触发降级
+        val failedPkg = enginePackage
+        hasFallenBack = true
+        ReaderLog.e(
+            TAG,
+            "★ 引擎不可用（连续 $consecutiveSynthFails 次合成失败，" +
+                    "错误码 $errorCode）→ 自动降级到系统默认引擎。" +
+                    "原引擎=$failedPkg"
+        )
+
+        enginePackage = null
+        consecutiveSynthFails = 0
+        try {
+            onEngineUnusable?.invoke(failedPkg)
+        } catch (e: Throwable) {
+            ReaderLog.w(TAG, "引擎降级回调失败: ${e.message}")
+        }
+
+        // 重建两条通道（置 ready 为 false 后重新创建）
+        try {
+            readyA = false
+            readyB = false
+            createEngine(CHANNEL_A, null)
+        } catch (e: Throwable) {
+            ReaderLog.e(TAG, "降级后重建引擎失败: ${e.message}")
+        }
+    }
+
+    /** 合成成功时清零失败计数 */
+    private fun onSpeakSuccess() {
+        if (consecutiveSynthFails != 0) consecutiveSynthFails = 0
     }
 
     /** 应用语音参数 */
@@ -331,8 +475,28 @@ class SpeechEngine(
      * 完整参数播报
      */
     fun speakInternal(text: String, interrupt: Boolean, extraFlags: Int) {
-        if (!enabled) return
-        if (text.isEmpty()) return
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮补：speak 入口日志 —— 定位"导航成功但不播报"】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 【真机事实】导航成功 20+ 次（`下一焦点: 菜单` 都打出来了），
+        // 但 813 行日志里 **SpeechEngine 一条都没有**（除 3 次触摸的 -5）。
+        // ⇒ `speak()` 被调了，但**在函数内部就被静默丢弃**。
+        //
+        // 本函数有 4 个静默 return（`!enabled` / 空文本 / 重复守卫 /
+        // 语音输入闸门），加上 `trySpeakNext` 的 3 个早退，
+        // 任何一个都表现为"安静"。这条日志把它们分开。
+        ReaderLog.d(TAG, "speak 请求: '${text.take(16)}' enabled=$enabled " +
+                "interrupt=$interrupt flags=$extraFlags")
+
+        if (!enabled) {
+            ReaderLog.w(TAG, "★ speak 被丢弃：读屏开关已关闭（enabled=false）")
+            return
+        }
+        if (text.isEmpty()) {
+            ReaderLog.w(TAG, "★ speak 被丢弃：文本为空")
+            return
+        }
 
         // ★★ 高频重复播报守卫 —— 真机 P0 的第三道防线
         //
@@ -354,7 +518,11 @@ class SpeechEngine(
         val guardNow = SystemClock.uptimeMillis()
         if (lastSpokenText == text && guardNow - lastSpokenTime < REPEAT_GUARD_MS) {
             repeatGuardCount++
-            ReaderLog.d(TAG, "重复播报被守卫拦截: ${text.take(12)}")
+            ReaderLog.d(
+                TAG,
+                "★ speak 被丢弃：重复守卫（'${text.take(12)}' 在 " +
+                        "${guardNow - lastSpokenTime}ms 内重复，阈值 ${REPEAT_GUARD_MS}ms）"
+            )
             return
         }
         lastSpokenText = text
@@ -362,7 +530,7 @@ class SpeechEngine(
 
         // ★ 语音输入静音闸门（天坦行为：录音中不出声）
         if (speechGate?.invoke() == true) {
-            ReaderLog.d("SpeechEngine", "语音输入中，静音: ${text.take(20)}")
+            ReaderLog.w("SpeechEngine", "★ speak 被丢弃：语音输入中静音: ${text.take(20)}")
             return
         }
 
@@ -377,9 +545,53 @@ class SpeechEngine(
         )
 
         val queue = if (useChannelB) channelB else channelA
+
+        // ══════════════════════════════════════════════════════════
+        // 【★★ 本轮修复：队列卡死看门狗】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 【真机 P0】导航成功 20+ 次、`下一焦点: 菜单` 都打出来了，
+        // 但 `SpeechEngine` **一条日志都没有**，用户听到彻底安静。
+        //
+        // 【机制】`trySpeakNext` 有 `if (queue.isSpeaking) return` ——
+        // 而 `isSpeaking` = `current != null`，`current` 只在
+        // `pollNext()` 设置、`onCurrentDone()` 清空。
+        // 若某次播报后 **`onDone`/`onError` 从未到达**
+        // （部分引擎在 `ERROR_SYNTHESIS` 后**不回调**是已知行为，
+        //   真机日志里 3 次 `code=-5` 全来自触摸路径，
+        //   而导航路径**连错误都没有** —— 高度符合"丢回调"特征），
+        // 则 `current` 永久卡住 ⇒ 之后每次都因 `isSpeaking` 静默返回
+        // ⇒ **读屏永久静默，且没有任何日志**。
+        //
+        // 【修复】入队时检查「当前项已卡住多久」：
+        // 超过 [STUCK_QUEUE_MS] 就强制清空当前项并继续。
+        // 这是**防御性**的：正常路径永远不会触发（正常播报几百 ms 内完成），
+        // 但一旦回调丢失，读屏能**自愈**而不是永久哑掉。
+        //
+        // 【为什么阈值取 10 秒】最长的单条播报（长段落）通常 < 8s；
+        // 10s 既能兜住真正的卡死，又不会误杀正常长文本。
+        val stuck = queue.current()
+        if (stuck != null) {
+            val age = SystemClock.uptimeMillis() - queueCurrentSince
+            if (age > STUCK_QUEUE_MS) {
+                ReaderLog.e(
+                    TAG,
+                    "★ 队列卡死看门狗：当前项 id=${stuck.id} " +
+                            "'${stuck.text.take(16)}' 已 ${age}ms 未完成" +
+                            "（onDone/onError 很可能丢失）→ 强制清空并继续"
+                )
+                queue.onCurrentDone()
+                // 卡死时也重置失败计数（否则计数会误判引擎坏）
+                consecutiveSynthFails = 0
+            }
+        }
+
         val result = queue.enqueue(item)
 
-        if (result.deduped) return
+        if (result.deduped) {
+            ReaderLog.w(TAG, "★ speak 被丢弃：队列去重（'${text.take(12)}' 已在队列中）")
+            return
+        }
 
         // ★ 通知「开始朗读」（A5）—— 服务据此持有唤醒锁
         //   放在 enqueue 成功之后：被去重丢弃的项不算开始
@@ -410,16 +622,85 @@ class SpeechEngine(
         val tts = if (channel == CHANNEL_A) ttsA else ttsB
         val ready = if (channel == CHANNEL_A) readyA else readyB
 
-        if (!ready || tts == null) return
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮补诊断：这三个早退**原来全是静默的**】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 【真机 P0】导航成功 20+ 次，但**一次 SpeechEngine 日志都没有** ——
+        // `speak()` 被调了（`下一焦点: 菜单` 打出来了），
+        // 却没有任何 TTS 活动，也没错误。
+        //
+        // 本函数的三条早退都能造成这种"静默无声"：
+        //   ① `!ready`        —— 引擎未就绪
+        //   ② `tts == null`   —— 引擎实例为空
+        //   ③ `queue.isSpeaking` —— **当前项未清空**（卡住）
+        // 而它们**全都没有日志**。用户听到的是彻底安静。
+        //
+        // 【为什么 ③ 最可疑】`current` 只在 `pollNext()` 设置、
+        // `onCurrentDone()` 清空。若某次播报后 `onDone/onError` 没到达
+        // （引擎返回 -5 后**不回调**是某些实现的真实行为），
+        // `current` 会**永远卡住** ⇒ 之后每一次 `speak()` 都入队成功、
+        // 但 `trySpeakNext` 因 `isSpeaking` 直接返回 ⇒ **永久静默**。
+        //
+        // 这条日志是二分的唯一依据，必须打。
+        if (!ready || tts == null) {
+            ReaderLog.w(
+                TAG,
+                "trySpeakNext 早退：ready=$ready tts=${tts != null} " +
+                        "通道=${if (channel == CHANNEL_A) "A" else "B"}"
+            )
+            return
+        }
 
         // 已有正在播的项 → 不打断
-        if (queue.isSpeaking) return
+        //
+        // ══════════════════════════════════════════════════════════
+        // 【★★ 真机 P0 的疑似根因：这里会**永久阻塞**】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 【真机事实】导航成功 20+ 次（`下一焦点: 菜单` 都打出来了），
+        // 而 813 行日志里 **SpeechEngine 一条都没有**——
+        // 说明 `speak()` 进来了，但 `trySpeakNext` 在这里静默返回了。
+        //
+        // 【为什么会永久卡住】`queue.isSpeaking` = `current != null`，
+        // 而 `current` 只在 `pollNext()` 设置、`onCurrentDone()` 清空。
+        // `onCurrentDone()` 只由 TTS 回调（`onDone`/`onError`）触发。
+        // **若某次播报后回调从未到达**（引擎 `ERROR_SYNTHESIS` 后
+        // 不回调是已知行为），`current` 就永远不清 ——
+        // 之后每一次播报都在这一行被丢掉 ⇒ **读屏永久静默**。
+        //
+        // 【修复】这里也加看门狗：当前项超时未完成 ⇒ 强制清空继续。
+        // 这比"只在下次入队时清"更及时（入队本身就可能被这条路挡住）。
+        if (queue.isSpeaking) {
+            val cur = queue.current()
+            val age = SystemClock.uptimeMillis() - queueCurrentSince
+            if (age > STUCK_QUEUE_MS) {
+                ReaderLog.e(
+                    TAG,
+                    "★ 队列卡死看门狗（trySpeakNext）：当前项 id=${cur?.id} " +
+                            "'${cur?.text?.take(16)}' 已 ${age}ms 未完成 → 强制清空"
+                )
+                queue.onCurrentDone()
+                queueCurrentSince = SystemClock.uptimeMillis()
+                // 继续往下走（不再 return）——把新项播出来
+            } else {
+                ReaderLog.d(
+                    TAG,
+                    "trySpeakNext 早退：队列忙（当前项 id=${cur?.id} " +
+                            "'${cur?.text?.take(12)}'，已 ${age}ms）"
+                )
+                return
+            }
+        }
 
         val item = queue.pollNext() ?: run {
             // 队列空 → 检查是否该释放音频焦点
             checkAudioFocus()
             return
         }
+
+        // 记录「当前项开始时刻」—— 供卡死看门狗使用
+        queueCurrentSince = SystemClock.uptimeMillis()
 
         if (item.cancelled) {
             trySpeakNext(channel)

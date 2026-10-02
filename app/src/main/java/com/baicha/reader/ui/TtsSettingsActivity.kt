@@ -125,6 +125,14 @@ class TtsSettingsActivity : AppCompatActivity() {
 
     // ==================== 语音库列表 ====================
 
+    /**
+     * 是否处于「程序化恢复选中」阶段
+     *
+     * 【为什么需要】`Spinner.setSelection()` 会异步派发 `onItemSelected`，
+     * 若不区分，打开设置页就会把默认选择**持久化**（真机 P0 的起点）。
+     */
+    private var restoring = false
+
     private fun setupEngineSpinner() {
         engines = TtsEngineManager.getEngines(this)
 
@@ -135,6 +143,29 @@ class TtsSettingsActivity : AppCompatActivity() {
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinnerEngine.adapter = adapter
+
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮修复：设置页会在用户没做任何操作时**悄悄写入一个引擎选择**】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 【原来的顺序（错的）】
+        // ```kotlin
+        //   spinnerEngine.setSelection(idx)                    // ① 先设选中项
+        //   spinnerEngine.onItemSelectedListener = object ...  // ② 后装监听器
+        // ```
+        // Android 的 `Spinner.setSelection()` 之后会**异步派发一次**
+        // `onItemSelected`（即使位置没变也可能派发）——
+        // 于是用户**只是打开了设置页**，`onItemSelected` 就被触发，
+        // 把「第 0 项 = 系统默认」或某个引擎**持久化写进 prefs**。
+        //
+        // 【真机后果】用户从没选过引擎，prefs 里却有了
+        // `es.codefactory.vocalizertts`（因为它恰好排在某个位置），
+        // 而该引擎的中文语音是未安装的试用版 ⇒
+        // 每次合成都 `ERROR_SYNTHESIS(-5)` ⇒ **读屏完全不出声**。
+        //
+        // 【修复】用 `restoring` 标志把「程序化恢复选中」与
+        // 「用户主动选择」区分开 —— 前者**不写入** prefs。
+        restoring = true
 
         // 定位到已保存的引擎
         val saved = TtsEngineManager.getSavedEngine(this)
@@ -147,8 +178,20 @@ class TtsSettingsActivity : AppCompatActivity() {
 
         spinnerEngine.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                // ★ 程序化恢复阶段的选择**不持久化**（见上方注释）
+                if (restoring) {
+                    restoring = false
+                    Log.i(TAG, "engine spinner 初始化完成（不写入 prefs）")
+                    return
+                }
                 val pkg = if (position == 0) null else engines[position - 1].packageName
-                TtsEngineManager.saveEngine(this@TtsSettingsActivity, pkg ?: "")
+                // ★ `pkg ?: ""` 原来把「系统默认」存成**空串**；
+                //   现在存 null 语义（即 clearEngine），避免空串被当包名用
+                if (pkg == null) {
+                    TtsEngineManager.clearEngine(this@TtsSettingsActivity)
+                } else {
+                    TtsEngineManager.saveEngine(this@TtsSettingsActivity, pkg)
+                }
                 Log.i(TAG, "engine selected: ${pkg ?: "默认"}")
                 // 切换引擎后刷新语音列表
                 setupVoiceSpinner()

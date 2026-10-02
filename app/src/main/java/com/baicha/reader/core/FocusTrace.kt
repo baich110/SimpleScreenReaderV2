@@ -161,6 +161,17 @@ open class FocusTrace internal constructor(
          * 形如 `「Wi-Fi」(btn)` —— 文本 + 角色缩写，
          * 便于日志里一眼认出是哪个控件。
          */
+        /**
+         * 节点描述 —— **带类名**（真机排障必需）
+         *
+         * 【为什么要加类名】真机日志里全是 `「(无文本)」(?)` ——
+         * 光看这个**无法判断**那些被拒的节点到底是什么：
+         *   · 是 `FrameLayout` 之类的**容器**（本就不该聚焦，拒得对）
+         *   · 还是 `TextView` 之类的**内容节点**（拒错，是 bug）
+         * 两者的诊断方向完全相反。
+         *
+         * 加上短类名后，下次真机日志能**一眼分辨**，不用再猜一轮。
+         */
         fun describe(node: AccessibilityNodeInfo?): String {
             if (node == null) return "(null)"
             return try {
@@ -178,7 +189,14 @@ open class FocusTrace internal constructor(
                     NodeRoleHelper.ROLE_SCROLL_VIEW -> "scroll"
                     else -> "?"
                 }
-                "「$text」($role)"
+                // 短类名 —— 去掉包名前缀，只留类名（如 FrameLayout / TextView）
+                val cls = try {
+                    node.className?.toString()?.substringAfterLast('.')?.take(18).orEmpty()
+                } catch (e: Throwable) {
+                    ""
+                }
+                val clsPart = if (cls.isEmpty()) "" else "/$cls"
+                "「$text」($role$clsPart)"
             } catch (e: Throwable) {
                 "(描述失败)"
             }
