@@ -421,7 +421,37 @@ object NodePathCollector {
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** 待采集节点的**弱引用** —— 避免拖住节点对象不被回收 */
+    /**
+     * 待采集节点的**弱引用** —— 避免拖住节点对象不被回收
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮修复：补 @Volatile（本类其他字段都有，唯独漏了这个）】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 【跨线程事实】
+     *   · `request(node)` —— 在**无障碍线程**写（`onAccessibilityEvent` 里调用，
+     *     见 `AccessibilityEventHandler` / `FocusManager` 的路径记录钩子）
+     *   · `task` 的 `run()` —— 在**主线程**读（`Handler(Looper.getMainLooper())`）
+     *
+     * 【没有 @Volatile 的后果】主线程可能读到**陈旧的** `pendingNode`：
+     *   ① 用户快速滑到 A 再滑到 B，主线程若看到 A 的旧引用，
+     *      会把**A 的路径**当成当前焦点路径存起来 →
+     *      后续「恢复焦点」时按错误的路径找，**跳到上一个位置**；
+     *   ② 更极端时看到 null（尚未可见的写入）→ 直接 `return@Runnable`
+     *      跳过采集 → 焦点路径**丢失**，「恢复焦点」退化为「取第一个」。
+     *
+     * 【为什么是同类的疏漏】本类其他可变字段
+     * （`latest` / `onCollected` / `collectCount` / `skippedCount`）
+     * **全都标了 `@Volatile`** —— 说明作者知道这个类跨线程，
+     * 只是漏了这一个。属目标里点名的模式⑩「线程安全」。
+     *
+     * 【为什么用 @Volatile 而不是加锁】
+     *   这里的语义是「最新一次请求获胜」——`request()` 本身就是覆盖写，
+     *   `task` 只关心「当前最新是哪个」。`@Volatile` 保证可见性即可，
+     *   不需要复合操作的原子性（`removeCallbacks` + `postDelayed`
+     *   已在主线程 handler 上串行化）。
+     */
+    @Volatile
     private var pendingNode: java.lang.ref.WeakReference<android.view.accessibility.AccessibilityNodeInfo>? = null
 
     @Volatile
