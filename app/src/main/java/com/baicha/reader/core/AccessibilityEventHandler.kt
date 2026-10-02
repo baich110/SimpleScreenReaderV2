@@ -82,6 +82,9 @@ class AccessibilityEventHandler(
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /** 内容变化限流器（A2） */
+    private val contentChangeFilter = ContentChangeFilter()
+
     // ==================== 状态 ====================
 
     /** 最近一次焦点动作（供屏幕状态恢复的竞态判定）*/
@@ -352,13 +355,60 @@ class AccessibilityEventHandler(
 
             // ---------- 内容变化 ----------
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                // 不播报（太吵），但缓存要失效
+                // 缓存必须失效（结构/文本可能变了）
                 CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
+
+                // ★ 条件播报（A2）—— 原来是「完全不播」（太吵）
+                //
+                // 【改的什么】原实现直接丢弃，导致直播比分、下载进度、
+                //   计时器这类**只靠内容变化传递信息**的场景用户完全感知不到。
+                //
+                // 【怎么做到既不刷屏又不漏】双层过滤，对齐 TalkBack：
+                //   ① 语义层：只播文本/状态/内容描述变化，
+                //      结构变化（子树增删）交给焦点/窗口事件处理
+                //   ② 限流层：同节点 500ms 内只播一次，换节点立即放行
+                handleContentChanged(event)
             }
 
             else -> {
                 // 其他事件静默
             }
+        }
+    }
+
+    /**
+     * 窗口内容变化处理 —— 对标 TalkBack
+     * `EventTypeWindowContentChangedFeedbackRule`(431 行)
+     * 与 `WindowContentChangeAnnouncementFilter`(126 行)
+     *
+     * 【为什么值得为它单开一个方法】
+     *   这是**唯一一类既能提供关键信息、又能刷屏**的事件。
+     *   下载进度必须播，动画帧必须丢 —— 两者是同一个 eventType。
+     *   处理逻辑值得独立成方法并有名字。
+     */
+    private fun handleContentChanged(event: AccessibilityEvent) {
+        // ① 语义过滤：这类变化值得播吗
+        val kind = try {
+            ContentChangeKind.classify(event.contentChangeTypes)
+        } catch (e: Throwable) {
+            ContentChangeKind.NONE
+        }
+        if (!ContentChangeKind.isWorthAnnouncing(kind)) {
+            return
+        }
+
+        // ② 限流：同节点太频繁就丢
+        val node = event.source ?: return
+        val nodeKey = System.identityHashCode(node)
+        if (!contentChangeFilter.shouldAnnounce(nodeKey)) {
+            return
+        }
+
+        // ③ 合成 + 播报（不打断当前朗读）
+        val text = compose(node)
+        if (!text.isNullOrBlank()) {
+            log("内容变化: $text")
+            speech.speak(text, interrupt = false)
         }
     }
 
