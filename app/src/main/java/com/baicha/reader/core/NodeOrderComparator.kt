@@ -129,10 +129,40 @@ object NodeOrderComparator {
         }
 
         // ④ 父节点是列表 → 只有当自己也是列表时才排序
-        val parent = node.parent ?: return true
-        val parentRole = NodeRoleHelper.roleOf(parent)
-        val nodeRole = NodeRoleHelper.roleOf(node)
-        return parentRole != NodeRoleHelper.ROLE_LIST || nodeRole == NodeRoleHelper.ROLE_LIST
+        //
+        // ★★ 本轮修正（P2）：补上 `catch (IllegalStateException)`
+        //
+        // 【天坦原文】`d7/C1417r.java:293~300`：
+        // ```java
+        // try {
+        //     NodeInfo parent = nodeInfo.getParent();
+        //     int nodeType = EventUtils.getNodeType(parent);
+        //     AccessibilityNodeInfoUtils.g0(parent);
+        //     return nodeType != 8 || EventUtils.getNodeType(nodeInfo) == 8;
+        // } catch (IllegalStateException unused) {
+        //     return false;          // ← 节点已被回收时返回 false
+        // }
+        // ```
+        //
+        // 【为什么必须 catch】`AccessibilityNodeInfo.getParent()` 在节点
+        //   已被系统回收时会抛 `IllegalStateException`。读屏在高频滚动时
+        //   极易撞上（节点刚被 RecyclerView 回收）。
+        //   没有 catch ⇒ 异常向上冒泡 ⇒ 遍历中断，用户表现为「卡住/无反应」。
+        //
+        // 【注意语义】catch 里返回 **false**（不排序），而
+        //   `parent == null` 时天坦的 `getNodeType(null)` 返回 0，
+        //   `0 != 8` 为真 → 返回 **true**（要排序）。
+        //   两者不同，不能合并 —— 我原来写的 `?: return true` 对应的是
+        //   「parent 为 null」这条正常路径，是对的，保留。
+        return try {
+            val parent = node.parent ?: return true
+            val parentRole = NodeRoleHelper.roleOf(parent)
+            val nodeRole = NodeRoleHelper.roleOf(node)
+            parentRole != NodeRoleHelper.ROLE_LIST || nodeRole == NodeRoleHelper.ROLE_LIST
+        } catch (e: IllegalStateException) {
+            // 节点已被回收 —— 天坦返回 false
+            false
+        }
     }
 
     /** 排序总开关 —— 天坦 GlobalConfig.g0()，默认开 */
@@ -370,7 +400,19 @@ object NodeOrderComparator {
                     boundsMap[node] = rect
                 }
             } else {
-                if (NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_GRID) {
+                // ★★ 本轮修正（P2，第三处角色码对调）
+                //
+                // 【天坦原文】`d7/C1417r.java:406`：
+                //   `if (EventUtils.getNodeType(nodeInfo) == 8) {`
+                // 即判的是 **8 = LIST**，我写成了 `ROLE_GRID`（5）。
+                //
+                // 【为什么这处影响大】该分支负责「列表容器取其首个可见子节点
+                // 的边界」—— 列表被判成网格后：
+                //   · 真正的列表走不到该分支 → 边界不修正
+                //   · 网格反而走了列表逻辑
+                // 与 B-4（isRecyclerView 的 5/8 对调）是**同一个错误的第三次出现**，
+                // 说明当时移植这一族代码时系统性地把两个码看反了。
+                if (NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_LIST) {
                     rawBoundsMap[node] = Rect(rect)
                     for (i in 0 until node.childCount) {
                         val c = node.getChild(i) ?: continue

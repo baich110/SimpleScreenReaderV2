@@ -180,4 +180,87 @@ class P2FixesRegressionTest {
             )
         }
     }
+
+    // ==================== ⑤ analyzeLayout 角色码（第三处 5/8 对调）====================
+
+    /**
+     * ★★ `analyzeLayout` 里判的必须是 **ROLE_LIST(8)**，不是 ROLE_GRID(5)
+     *
+     * 天坦 `d7/C1417r.java:406`：`if (EventUtils.getNodeType(nodeInfo) == 8)`
+     * 该分支取「列表首个可见子节点的边界」。
+     *
+     * 这是同一族代码里 5/8 对调的**第三次出现**
+     * （另两处：`isRecyclerView` 分支行为对调、`needsSort` 曾用错），
+     * 说明当时移植这一族时系统性地把两个码看反了。
+     */
+    @Test
+    fun analyze_layout_uses_role_list_not_grid() {
+        val start = orderCode.indexOf("private fun analyzeLayout(")
+        org.junit.Assert.assertTrue("应存在 analyzeLayout", start > 0)
+        val body = orderCode.substring(start, minOf(orderCode.length, start + 4000))
+
+        assertTrue(
+            "analyzeLayout 应用 ROLE_LIST（天坦 nodeType == 8）：$body".take(300),
+            body.contains("NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_LIST")
+        )
+        assertFalse(
+            "不该用 ROLE_GRID（5）—— 那会与天坦语义相反",
+            body.contains("NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_GRID")
+        )
+    }
+
+    // ==================== ⑥ needsSort 的 catch ====================
+
+    /**
+     * ★★ `needsSort` 必须捕获 `IllegalStateException`
+     *
+     * 天坦 `d7/C1417r.java:298~300`：
+     *   `} catch (IllegalStateException unused) { return false; }`
+     *
+     * `getParent()` 在节点被回收时抛该异常 —— 高频滚动时极易撞上。
+     * 不捕获会让异常冒泡、遍历中断（用户表现为卡住/无反应）。
+     */
+    @Test
+    fun needs_sort_catches_illegal_state() {
+        val start = orderCode.indexOf("fun needsSort(")
+        val end = orderCode.indexOf("/** 排序总开关", start)
+        val body = orderCode.substring(start, if (end > start) end else start + 1500)
+
+        assertTrue(
+            "needsSort 必须捕获 IllegalStateException：$body".take(300),
+            body.contains("catch (e: IllegalStateException)")
+        )
+        assertTrue(
+            "catch 里应返回 false（天坦语义，与 parent==null 的 true 不同）",
+            body.contains("false")
+        )
+        assertTrue(
+            "parent == null 的快速路径应保留（返回 true）",
+            body.contains("?: return true")
+        )
+    }
+
+    // ==================== ⑦ resetOperationScope 三件套 ====================
+
+    /**
+     * ★★ `resetOperationScope` 必须清**三样**（对齐天坦 `clearCache`）
+     *
+     * 天坦 `w7/FocusFinder.java:188~193`：
+     *   `f39023h.clear()` + `f39017b = null` + `f39022g.clear()`
+     * 而它在 `M6/h.D()` 的 26 条退出路径上调用。
+     *
+     * 白茶原来只清基准 → 上轮补 pCache → 本轮补 seenChildren。
+     */
+    @Test
+    fun reset_operation_scope_clears_all_three() {
+        val sc = codeOf("src/main/java/com/baicha/reader/core/ShouldFocusNode.kt")
+        val start = sc.indexOf("fun resetOperationScope()")
+        val end = sc.indexOf("\n    }", start)
+        val body = sc.substring(start, if (end > start) end else start + 800)
+
+        assertTrue("应清基准（baselineInitialized）", body.contains("baselineInitialized = false"))
+        assertTrue("应清 pCache", body.contains("pCache.clear()"))
+        assertTrue("应清 seenChildren", body.contains("seenChildren.clear()"))
+    }
+
 }
