@@ -397,6 +397,15 @@ class AutoScrollManager(
     @Volatile
     var onScrollSettled: (() -> Unit)? = null
 
+    /**
+     * 取当前窗口根 —— 供 BFS 兜底使用
+     *
+     * 由服务注入（本类只持有 AccessibilityService，
+     * rootInActiveWindow 的获取逻辑放在服务里更合适）
+     */
+    @Volatile
+    var rootProvider: () -> AccessibilityNodeInfo? = { null }
+
     private val settleRunnable = Runnable {
         val moved = scrollDeltaX != 0 || scrollDeltaY != 0
         scrollDeltaX = 0
@@ -522,9 +531,32 @@ class AutoScrollManager(
             return true
         }
 
-        val scrollable = findScrollableAncestor(focusedNode) ?: run {
-            ReaderLog.d(TAG, "ensureVisible: no scrollable ancestor")
-            return false
+        // ★ 改进：优先用「最近的可滚动祖先」（快），
+        //   但如果没有祖先可滚动，用 BFS 找屏上最大的可滚动容器。
+        //
+        // 【为什么要两者结合】
+        //   向上找：快，适合「已在容器内」的常见场景
+        //   BFS：  慢但正确，适合嵌套滚动（横向列表套在纵向列表里）
+        //          —— 此时向上找会选中内层，用户想滚的是外层
+        val nearest = ScrollableNodeFinder.findScrollableAncestor(focusedNode)
+
+        val scrollable = if (nearest != null) {
+            nearest
+        } else {
+            // 向上找不到 → BFS 兜底
+            val root = rootProvider()
+            if (root == null) {
+                ReaderLog.d(TAG, "ensureVisible: 无 root，无法 BFS")
+                return false
+            }
+            ScrollableNodeFinder.search(
+                root = root,
+                forward = direction >= 0,
+                pagerWithLowPriority = true
+            ) ?: run {
+                ReaderLog.d(TAG, "ensureVisible: BFS 也未找到可滚动容器")
+                return false
+            }
         }
 
         // 触发滚动

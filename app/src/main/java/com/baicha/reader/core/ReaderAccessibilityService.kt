@@ -327,6 +327,8 @@ class ReaderAccessibilityService : AccessibilityService() {
         focus.onCancelScroll = { autoScroll.stop() }
         // ★ 滚动结束时显式结束「滚动中」状态（避免隐式依赖 TTL）
         autoScroll.onScrollSettled = { focus.onScrollEnd() }
+        // ★ 提供窗口根给 BFS 兜底（嵌套滚动场景）
+        autoScroll.rootProvider = { rootInActiveWindow }
 
         // ---- ★ 滚动焦点恢复回调 —— 对应天坦 M6/h 内部类 a ----
         //
