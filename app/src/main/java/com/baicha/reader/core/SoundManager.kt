@@ -165,6 +165,27 @@ class SoundManager(context: Context) {
 
     // ==================== 控制 ====================
 
+    /**
+     * 进度音效 —— 对应天坦 `z6/C4421m.java:1134`
+     *
+     * ```java
+     * earcon_rate = 2^((percent / 50) - 1)
+     * ```
+     *
+     * 0% → 0.5×音高，50% → 1.0×，100% → 2.0×
+     *
+     * 【为什么要音效而不只念数字】
+     *   视障用户调音量/亮度时，语音要等播报完才知道位置；
+     *   音高是即时的 —— 手指一滑就听出方向与位置。
+     *   用指数映射（而非线性）是因为人耳对音高感知是对数的。
+     *
+     * 音高计算委托给 `ProgressSpeech.pitchRate()`，
+     * 保证与单测覆盖的公式是同一份实现。
+     */
+    fun progressEarcon(percent: Float) {
+        play(R.raw.tick_apple, rate = ProgressSpeech.pitchRate(percent))
+    }
+
     fun setVolumeMultiple(multiple: Float) {
         volumeMultiple = multiple.coerceIn(0f, 3f)
     }

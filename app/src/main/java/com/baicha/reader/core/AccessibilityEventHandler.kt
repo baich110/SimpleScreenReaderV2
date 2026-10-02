@@ -565,6 +565,40 @@ class AccessibilityEventHandler(
             sound.focus()
             haptic.focus()
         }
+        // ★ 进度音效 —— 对应天坦 `z6/C4421m.java:1134`
+        //
+        // 【为什么叠在焦点音效之后】
+        //   焦点音效告诉用户「焦点到了」，进度音效告诉「到哪个位置」。
+        //   两者语义不同，叠加不冲突；且进度音高会覆盖
+        //   焦点音效的默认 rate —— 所以只在有进度时额外播一次。
+        //
+        // 【效果】调音量/亮度时，焦点每落一次就有一声音高，
+        //   用户不必等语音念完就能感知当前值的位置。
+        playProgressEarcon(node)
+    }
+
+    /**
+     * 若有进度信息，播一声对应音高的反馈。
+     *
+     * 音高公式由 `ProgressSpeech.pitchRate()` 提供 ——
+     * 与单测覆盖的是同一份实现，避免公式在两处漂移。
+     */
+    private fun playProgressEarcon(node: AccessibilityNodeInfo) {
+        val info = try {
+            node.rangeInfo
+        } catch (e: Throwable) {
+            null
+        } ?: return
+
+        // 复用合成器里的同一套百分比计算（含 PERCENT 三路分派）
+        val percent = ProgressSpeech.percentOf(
+            rangeType = info.type,
+            current = info.current,
+            min = info.min,
+            max = info.max
+        ) ?: return
+
+        sound.progressEarcon(percent)
     }
 
     /** 天坦 AbstractC3688i.j(node) */
