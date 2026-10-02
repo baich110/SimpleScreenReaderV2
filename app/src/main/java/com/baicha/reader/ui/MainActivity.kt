@@ -40,41 +40,99 @@ class MainActivity : AppCompatActivity() {
         scrollLog = findViewById(R.id.scrollLog)
         btnLogFilter = findViewById(R.id.btnLogFilter)
 
-        findViewById<Button>(R.id.btnSettings).setOnClickListener {
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮修复：每个可交互元素都必须有 addAccessibilityAction】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 项目铁律（见 MEMORY.md / 本项目无障碍约定）：
+        //   「所有可交互元素用 ViewCompat.addAccessibilityAction 提供操作选项 ——
+        //    读屏用户左右滑浏览元素、单指上下滑浏览**操作项**、双击执行」
+        //
+        // 【修复前】本文件 6 个按钮里**只有 btnLogFilter 挂了无障碍动作**，
+        // 其余 5 个都没有。后果是读屏用户滑到那些按钮时，
+        // **单指上下滑听不到任何操作项**，只能靠双击盲试 ——
+        // 这本就是「读屏是唯一途径」的用户最难接受的体验。
+        //
+        // 对 Button 而言系统会自动提供一个「点击」动作，所以功能上能用；
+        // 但**缺少的是"这个按钮是干什么的"这层说明** ——
+        // 例如「清空」按钮，读屏只念「清空，按钮」，
+        // 用户不知道清空的是日志、也不知道清空后筛选会不会一起重置。
+        // 下面的动作标签正是补这层信息。
+
+        val btnSettings = findViewById<Button>(R.id.btnSettings)
+        btnSettings.setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+        ViewCompat.addAccessibilityAction(
+            btnSettings, getString(R.string.a11y_open_settings)
+        ) { _, _ ->
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            true
         }
 
         // 语音设置入口
-        findViewById<Button>(R.id.btnTtsSettings).setOnClickListener {
+        val btnTtsSettings = findViewById<Button>(R.id.btnTtsSettings)
+        btnTtsSettings.setOnClickListener {
             startActivity(Intent(this, TtsSettingsActivity::class.java))
         }
+        ViewCompat.addAccessibilityAction(
+            btnTtsSettings, getString(R.string.a11y_tts_settings)
+        ) { _, _ ->
+            startActivity(Intent(this, TtsSettingsActivity::class.java))
+            true
+        }
+
         // 手势配置（A7/D2）—— 让「手势可配置」真正落地
-        findViewById<Button>(R.id.btnGestureSettings).setOnClickListener {
+        val btnGestureSettings = findViewById<Button>(R.id.btnGestureSettings)
+        btnGestureSettings.setOnClickListener {
             startActivity(Intent(this, GestureSettingsActivity::class.java))
         }
-
-        findViewById<Button>(R.id.btnTest).setOnClickListener {
-            ReaderAccessibilityService.instance?.speakTest("测试朗读，白茶读屏")
+        ViewCompat.addAccessibilityAction(
+            btnGestureSettings, getString(R.string.a11y_gesture_settings)
+        ) { _, _ ->
+            startActivity(Intent(this, GestureSettingsActivity::class.java))
+            true
         }
 
-        findViewById<Button>(R.id.btnClear).setOnClickListener {
-            // 清空必须同时重置限流器，否则同一秒内同类日志会被当成
-            // 「已经输出过」而静默吞掉，用户面对空白面板以为读屏卡死
-            ReaderLog.clear()
-            ReaderLog.clearBuffers()
-            tvLog.text = ""
+        val btnTest = findViewById<Button>(R.id.btnTest)
+        btnTest.setOnClickListener { doTestSpeech() }
+        ViewCompat.addAccessibilityAction(
+            btnTest, getString(R.string.a11y_test_speech)
+        ) { _, _ ->
+            doTestSpeech()
+            true
+        }
+
+        val btnClear = findViewById<Button>(R.id.btnClear)
+        btnClear.setOnClickListener { doClearLog() }
+        ViewCompat.addAccessibilityAction(
+            btnClear, getString(R.string.a11y_clear_log)
+        ) { _, _ ->
+            doClearLog()
+            true
         }
 
         // 日志筛选（读屏用户靠它把日志收窄到一类）
         btnLogFilter.setOnClickListener { showFilterDialog() }
-        // 读屏用户单指上下滑浏览操作项 —— 与项目无障碍铁律一致
+        // 读屏用户单指上下滑浏览操作项 —— 与项目无障碍铁律一致。
+        //
+        // 【第 2 个动作：取消筛选】
+        // 原来有一个 `clearFilter()` 方法，注释写着「取消筛选（按钮长按）」，
+        // 但**全项目没有任何调用点**（死代码）——
+        // 因为没人给按钮装长按监听。现在把它挂成第 2 个无障碍动作，
+        // 读屏用户滑一下就能听到「取消筛选」并双击执行。
         ViewCompat.addAccessibilityAction(
             btnLogFilter,
             getString(R.string.log_filter_label) + getString(R.string.log_filter_none)
         ) { _, _ ->
-            activeFilter = emptySet()
-            applyFilter()
-            announce(getString(R.string.log_filter_cleared))
+            clearFilter()
+            true
+        }
+        ViewCompat.addAccessibilityAction(
+            btnLogFilter,
+            getString(R.string.log_filter_cleared)
+        ) { _, _ ->
+            clearFilter()
             true
         }
         updateFilterButton()
@@ -152,7 +210,46 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    /** 取消筛选（按钮长按） */
+    /**
+     * 测试朗读 —— 供按钮点击与无障碍动作共用
+     *
+     * 【为什么抽成方法】原来这段逻辑内联在 `setOnClickListener` 里，
+     * 加了无障碍动作后若再抄一遍，两处会各自演化（本项目已多次
+     * 因「同一逻辑两份实现」出问题）。抽出来保证单一来源。
+     */
+    private fun doTestSpeech() {
+        val svc = ReaderAccessibilityService.instance
+        if (svc == null) {
+            // ★ 不静默失败：服务没开时要说明原因
+            announce(getString(R.string.status_stopped))
+            return
+        }
+        svc.speakTest(getString(R.string.test_speech_text))
+    }
+
+    /**
+     * 清空日志 —— 供按钮点击与无障碍动作共用
+     *
+     * 清空必须同时重置限流器，否则同一秒内同类日志会被当成
+     * 「已经输出过」而静默吞掉，用户面对空白面板以为读屏卡死。
+     */
+    private fun doClearLog() {
+        ReaderLog.clear()
+        ReaderLog.clearBuffers()
+        tvLog.text = ""
+        // ★ 不静默失败：告诉读屏用户「清空已完成」，
+        //   否则他听到的是「一片安静」，无法区分
+        //   「清空了」与「按钮没生效」
+        announce(getString(R.string.log_cleared))
+    }
+
+    /**
+     * 取消筛选 —— 供无障碍动作调用
+     *
+     * 【补接线】本方法此前**是死代码**（注释写着「按钮长按」，
+     * 但没有任何地方装长按监听，全项目零调用点）。
+     * 现挂为 `btnLogFilter` 的第 2/3 个无障碍动作。
+     */
     private fun clearFilter() {
         activeFilter = emptySet()
         applyFilter()

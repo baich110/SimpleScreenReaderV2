@@ -11,6 +11,7 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import com.baicha.reader.R
 import com.baicha.reader.core.ReaderAccessibilityService
 import com.baicha.reader.core.TtsEngineManager
@@ -77,28 +78,48 @@ class TtsSettingsActivity : AppCompatActivity() {
         setupVoiceSpinner()
         setupSliders()
 
-        findViewById<Button>(R.id.btnRefreshEngines).setOnClickListener {
-            setupEngineSpinner()
-            Toast.makeText(this, "已刷新语音库列表", Toast.LENGTH_SHORT).show()
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮修复：补无障碍动作（本页 4 个按钮此前一个都没有）】
+        // ══════════════════════════════════════════════════════════
+        // 同时修掉一处**硬编码中文**（`Toast.makeText(this, "已刷新语音库列表")`）
+        // —— 硬编码文案无法本地化，且与 strings.xml 的同义文案会各自演化；
+        // 读屏念的是实际渲染文本，两处不一致时用户听到的和描述对不上。
+        val btnRefresh = findViewById<Button>(R.id.btnRefreshEngines)
+        btnRefresh.setOnClickListener { doRefreshEngines() }
+        ViewCompat.addAccessibilityAction(
+            btnRefresh, getString(R.string.a11y_refresh_engines)
+        ) { _, _ ->
+            doRefreshEngines()
+            true
         }
 
-        findViewById<Button>(R.id.btnEngineSettings).setOnClickListener {
+        val btnEngineSettings = findViewById<Button>(R.id.btnEngineSettings)
+        btnEngineSettings.setOnClickListener {
             TtsEngineManager.openSystemTtsSettings(this)
         }
-
-        findViewById<Button>(R.id.btnTestSpeak).setOnClickListener {
-            previewTts?.speakPreview(getString(R.string.tts_test_text))
+        ViewCompat.addAccessibilityAction(
+            btnEngineSettings, getString(R.string.a11y_engine_settings)
+        ) { _, _ ->
+            TtsEngineManager.openSystemTtsSettings(this)
+            true
         }
 
-        findViewById<Button>(R.id.btnReset).setOnClickListener {
-            TtsEngineManager.saveRate(this, TtsEngineManager.DEFAULT_RATE)
-            TtsEngineManager.savePitch(this, TtsEngineManager.DEFAULT_PITCH)
-            TtsEngineManager.saveVolume(this, TtsEngineManager.DEFAULT_VOLUME)
-            TtsEngineManager.saveLanguage(this, "")
-            TtsEngineManager.saveVoiceName(this, null)
-            reloadSliders()
-            applyToService()
-            Toast.makeText(this, "已恢复默认", Toast.LENGTH_SHORT).show()
+        val btnTestSpeak = findViewById<Button>(R.id.btnTestSpeak)
+        btnTestSpeak.setOnClickListener { doTestSpeak() }
+        ViewCompat.addAccessibilityAction(
+            btnTestSpeak, getString(R.string.a11y_test_speak)
+        ) { _, _ ->
+            doTestSpeak()
+            true
+        }
+
+        val btnReset = findViewById<Button>(R.id.btnReset)
+        btnReset.setOnClickListener { doResetTts() }
+        ViewCompat.addAccessibilityAction(
+            btnReset, getString(R.string.a11y_reset_tts)
+        ) { _, _ ->
+            doResetTts()
+            true
         }
     }
 
@@ -248,6 +269,53 @@ class TtsSettingsActivity : AppCompatActivity() {
 
     private fun progressToPitch(p: Int): Float =
         TtsEngineManager.PITCH_MIN + (p / 100f) * (TtsEngineManager.PITCH_MAX - TtsEngineManager.PITCH_MIN)
+
+    // ==================== 按钮动作（点击与无障碍动作共用）====================
+    //
+    // 【为什么抽成方法而不是内联两遍】
+    // 每个按钮现在有两处触发点（点击监听 + 无障碍动作）。
+    // 若各自内联一份，两处会逐渐演化出差异 ——
+    // 本项目已多次因「同一逻辑两份实现」出问题
+    // （如 handleMediaGesture 按 gestureId 与映射表两份真相）。
+    // 抽出来保证**单一来源**。
+
+    /**
+     * 刷新语音库列表
+     *
+     * 【顺带修复】原来的提示语是**硬编码中文**
+     * （`Toast.makeText(this, "已刷新语音库列表", ...)`），
+     * 已改为 `@string/tts_engines_refreshed`。
+     */
+    private fun doRefreshEngines() {
+        setupEngineSpinner()
+        Toast.makeText(this, getString(R.string.tts_engines_refreshed), Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * 试听 —— 用当前设置念一句
+     *
+     * ★ 不静默失败：TTS 未就绪时要说明，而不是「按了没反应」。
+     */
+    private fun doTestSpeak() {
+        val tts = previewTts
+        if (tts == null) {
+            Toast.makeText(this, getString(R.string.tts_not_ready), Toast.LENGTH_SHORT).show()
+            return
+        }
+        tts.speakPreview(getString(R.string.tts_test_text))
+    }
+
+    /** 恢复语音设置默认值 */
+    private fun doResetTts() {
+        TtsEngineManager.saveRate(this, TtsEngineManager.DEFAULT_RATE)
+        TtsEngineManager.savePitch(this, TtsEngineManager.DEFAULT_PITCH)
+        TtsEngineManager.saveVolume(this, TtsEngineManager.DEFAULT_VOLUME)
+        TtsEngineManager.saveLanguage(this, "")
+        TtsEngineManager.saveVoiceName(this, null)
+        reloadSliders()
+        applyToService()
+        Toast.makeText(this, getString(R.string.tts_reset_done), Toast.LENGTH_SHORT).show()
+    }
 
     /** 把设置同步到正在运行的服务 */
     private fun applyToService() {

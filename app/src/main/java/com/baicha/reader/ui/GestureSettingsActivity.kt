@@ -10,6 +10,7 @@ import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import com.baicha.reader.R
 import com.baicha.reader.core.GestureAction
 import com.baicha.reader.core.GestureStore
@@ -53,11 +54,32 @@ class GestureSettingsActivity : AppCompatActivity() {
         GestureStore.load(this)
 
         listGestures = findViewById(R.id.listGestures)
-        findViewById<Button>(R.id.btnResetAll).setOnClickListener {
+
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮修复：补无障碍动作】
+        // ══════════════════════════════════════════════════════════
+        // 项目铁律：所有可交互元素都要有 addAccessibilityAction ——
+        // 读屏用户单指上下滑浏览操作项。这两个按钮此前**一个动作都没有**，
+        // 读屏只能念出按钮文字，用户不知道点了会发生什么。
+        //
+        // 对「恢复默认」尤其重要：它是**破坏性操作**，
+        // 用户必须先听到「会把所有手势改回出厂设置」才敢点。
+        val btnResetAll = findViewById<Button>(R.id.btnResetAll)
+        btnResetAll.setOnClickListener { confirmResetAll() }
+        ViewCompat.addAccessibilityAction(
+            btnResetAll, getString(R.string.a11y_reset_all_gestures)
+        ) { _, _ ->
             confirmResetAll()
+            true
         }
-        findViewById<Button>(R.id.btnShowConflicts).setOnClickListener {
+
+        val btnShowConflicts = findViewById<Button>(R.id.btnShowConflicts)
+        btnShowConflicts.setOnClickListener { showConflicts() }
+        ViewCompat.addAccessibilityAction(
+            btnShowConflicts, getString(R.string.a11y_show_conflicts)
+        ) { _, _ ->
             showConflicts()
+            true
         }
 
         gestureIds = GestureMapOrdering.displayOrder()
