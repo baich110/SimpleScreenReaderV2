@@ -411,6 +411,9 @@ object TraversalStrategyFactory {
     const val TYPE_LIST = 16
     const val TYPE_ROW_COLUMN = 31
 
+    /** 空间查找（按几何方向找最近节点）—— 本项目新增，对应 TalkBack DirectionalTraversalStrategy */
+    const val TYPE_SPATIAL = 100
+
     fun create(
         strategyType: Int,
         root: AccessibilityNodeInfo?,
@@ -420,7 +423,44 @@ object TraversalStrategyFactory {
             TYPE_GRID, TYPE_ROW_COLUMN -> GridTraversalStrategy(root, filter)
             TYPE_LIST -> ListTraversalStrategy(root, filter)
             TYPE_CACHED -> CachedTraversalStrategy(root, filter)
+            TYPE_SPATIAL -> SpatialTraversalAdapter(root, filter)
             else -> DefaultTraversalStrategy(root, filter)
         }
     }
+}
+
+
+/**
+ * 空间遍历策略适配器
+ *
+ * 让 [SpatialTraversalStrategy] 也能通过 [TraversalStrategy] 接口使用，
+ * 这样调用方可以统一走「策略 + FocusSearch」的流程。
+ */
+class SpatialTraversalAdapter(
+    private val root: AccessibilityNodeInfo?,
+    private val filter: (AccessibilityNodeInfo) -> Boolean
+) : TraversalStrategy {
+
+    private val spatial = SpatialTraversalStrategy(root, filter)
+
+    /** 记住上次的方向，供 next() 使用（接口只传节点不传方向语义） */
+    private var lastDirection = TraversalDirection.FORWARD
+
+    override fun next(node: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
+        lastDirection = direction
+        // 空间方向 → 几何查找
+        if (TraversalDirection.isSpatial(direction)) {
+            return spatial.findFocusInDirection(node, direction)
+        }
+        // 逻辑方向 → 退回默认遍历（空间策略不处理逻辑顺序）
+        return null
+    }
+
+    override fun start(root: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? =
+        spatial.start(root, direction)
+
+    override fun release() = spatial.release()
+
+    /** 可聚焦节点数（诊断） */
+    fun nodeCount(): Int = spatial.nodeCount()
 }

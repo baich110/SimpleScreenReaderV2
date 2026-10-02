@@ -451,6 +451,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             // ---------- 4194304: 窗口集合变化 ----------
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
                 nodeCache.invalidateAll()
+                NodeBoundsCalculator.clear()
             }
 
             // ---------- 通知 ----------
@@ -475,6 +476,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                 // 不播报（太吵），但缓存要失效
                 nodeCache.invalidateAll()
+                NodeBoundsCalculator.clear()
             }
 
             // ---------- 16384: 文本按粒度遍历（读屏软件的"按字/词/行"回调）----------
@@ -550,6 +552,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         dispatcher.resetFocusHash()
         focus.onWindowChanged()
         nodeCache.invalidateAll()
+        NodeBoundsCalculator.clear()
 
         // 播报页面标题
         val title = event.text?.joinToString("")?.trim().orEmpty()
@@ -570,6 +573,8 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         // ★ 滚动后节点可见性变了 → 只失效判定/文本缓存（结构未变，子节点列表可留）
         nodeCache.invalidateFocus()
+        // 滚动后位置变了，有效边界必须重算
+        NodeBoundsCalculator.clear()
 
         val node = event.source
         val nodeKey = node?.hashCode() ?: -1

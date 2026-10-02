@@ -50,13 +50,17 @@ class FocusManager(
     companion object {
         private const val TAG = "FocusManager"
 
-        /** 方向常量（避免 enum 分配） */
-        const val DIR_NEXT = 1
-        const val DIR_PREVIOUS = 2
-        const val DIR_UP = 3
-        const val DIR_DOWN = 4
-        const val DIR_LEFT = 5
-        const val DIR_RIGHT = 6
+        /**
+         * 方向常量 —— 数值对齐 TalkBack TraversalStrategy.SearchDirection
+         *
+         * 保留 NEXT/PREVIOUS 别名以兼容既有调用点。
+         */
+        const val DIR_NEXT = TraversalDirection.FORWARD
+        const val DIR_PREVIOUS = TraversalDirection.BACKWARD
+        const val DIR_UP = TraversalDirection.UP
+        const val DIR_DOWN = TraversalDirection.DOWN
+        const val DIR_LEFT = TraversalDirection.LEFT
+        const val DIR_RIGHT = TraversalDirection.RIGHT
 
         /** 基础防抖窗口 —— 天坦 110ms */
         const val BASE_DEBOUNCE_MS = 110L
