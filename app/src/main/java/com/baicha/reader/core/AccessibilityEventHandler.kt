@@ -157,9 +157,17 @@ class AccessibilityEventHandler(
 
         if (node == null) return
 
+        // ★★ 性能修复：**不在热路径采集 NodePath**
+        //
+        // 真机 P0：每次触摸调两次 NodePath.of()，每次 ≈240 次跨进程
+        // getChild()，堵塞无障碍交互线程 → 焦点事件堆积 → 用户
+        // 「左右滑动浏览不到焦点」。
+        //
+        // 改为：热路径只记廉价字段（指纹/窗口/角色，均不需遍历父链），
+        // 路径由 NodePathCollector 在后台防抖采集，恢复时再取。
         focusHistory.record(
             FocusActionRecord(
-                nodePath = NodePath.of(node),
+                nodePath = null,   // ← 延迟填充，见 recordPath()
                 windowId = try {
                     node.windowId
                 } catch (e: Throwable) {
@@ -180,6 +188,16 @@ class AccessibilityEventHandler(
                 textFingerprint = NodePath.fingerprintOf(node)
             )
         )
+    }
+
+    /**
+     * 补填最近一条记录的路径 —— 由 [NodePathCollector] 采集完成后调用。
+     *
+     * 【为什么要补填而不是当场采】见 recordFocusAction 的注释：
+     * 当场采集会在触摸热路径引入数百次 IPC。
+     */
+    fun recordPath(path: NodePath) {
+        focusHistory.attachPathToLatest(path)
     }
 
     /** 窗口变化时重置内部状态 */

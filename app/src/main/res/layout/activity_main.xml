@@ -69,21 +69,28 @@
             android:text="@string/btn_clear_log" />
     </LinearLayout>
 
+    <!--
+        saveEnabled=false 是必须的：日志文本会持续增长，若参与 onSaveInstanceState，
+        会被塞进 Bundle 经 Binder 传给 system_server，超过 1MB 上限即抛
+        TransactionTooLargeException 并杀进程（2026-10-03 真机崩溃：3208220 bytes）。
+        日志是瞬时内容，无需跨进程恢复。
+    -->
     <ScrollView
         android:id="@+id/scrollLog"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
         android:background="#11000000"
-        android:padding="8dp">
-
+        android:padding="8dp"
+        android:saveEnabled="false">
         <TextView
             android:id="@+id/tvLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textSize="12sp"
             android:fontFamily="monospace"
-            android:textIsSelectable="true" />
+            android:textIsSelectable="true"
+            android:saveEnabled="false" />
     </ScrollView>
 
 </LinearLayout>

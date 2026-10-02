@@ -355,3 +355,160 @@ object NodeTree {
         return PathSegment.UNDEFINED_INDEX
     }
 }
+
+/**
+ * 路径采集器 —— **解决「每次焦点都走几百次 IPC」的性能缺陷**
+ *
+ * ══════════════════════════════════════════════════════════
+ * 【这个类解决的真机 P0 问题】
+ * ══════════════════════════════════════════════════════════
+ *
+ * 真机日志（01:44:47 一秒内）：
+ * ```
+ * 触摸: 进度条        ← 用户碰一下
+ * 焦点清除
+ * 无障碍焦点: 进度条
+ * 焦点清除 焦点清除    ← 疯狂抖动
+ * 无障碍焦点: 提交吗？
+ * ```
+ * 用户反馈「左右滑动完全浏览不到焦点」。
+ *
+ * **根因**：`NodePath.of(node)` 被同步调用在 `applyFocus()` 里，
+ * 而每次触摸会触发**两次**采集（A0 的 onFocusApplied + A6 的
+ * recordFocusAction）。每次采集的代价：
+ *
+ * ```
+ * 深度 20 层 × (indexOfInParent 扫描兄弟 + 2×siblingFingerprint)
+ *   ≈ 240 次 getChild()
+ * ```
+ * **而 `getChild()` 是跨进程 IPC**（走 AccessibilityInteractionClient
+ * → 系统服务 → 目标 App）。240 次 IPC ≈ 数十到数百毫秒，
+ * 且发生在**无障碍交互线程**上 —— 线程被堵住后：
+ *   · 系统派发的焦点事件排队堆积
+ *   · 用户滑动时事件还没处理完，表现为「焦点乱跳 / 滑不到」
+ *
+ * ══════════════════════════════════════════════════════════
+ * 【修法：把「昂贵采集」从热路径移走】
+ * ══════════════════════════════════════════════════════════
+ *
+ * 关键观察：**路径只在「恢复焦点」时才需要** ——
+ * 即息屏亮屏/切窗口那种低频场景。而它现在是在**每次触摸**时采集。
+ *
+ * 所以：
+ *   ① 热路径只记**廉价信息**（文本指纹、窗口 ID、时间、角色）——
+ *      这些不需要遍历父链，零额外 IPC
+ *   ② 路径采集**延后到后台线程**，且做**防抖**（只采最后一次）
+ *   ③ 采集时机的语义不变：「最近一次聚焦的节点」——
+ *      只是把「什么时候算」从「同步立即」改为「稍后异步」
+ *
+ * 这与 TalkBack 的做法一致：它的 `NodePathDescription.obtain()`
+ * 不在触摸处理里调用，而是在**焦点动作记录**的流程里
+ * （`AccessibilityFocusActionHistory.onAccessibilityFocusAction()`），
+ * 由 pipeline 的独立阶段处理。
+ */
+object NodePathCollector {
+
+    /**
+     * 延迟多久采集。
+     *
+     * 【为什么是 300ms】
+     *   防抖窗口：用户连续触摸/滑动时，只在停下来后采一次。
+     *   300ms 与 TalkBack 的 `TIMEOUT_TOLERANCE_MS` 同量级，
+     *   短于它会让采集次数仍然过多，长于它会在
+     *   「触摸后立刻息屏」时来不及采集。
+     */
+    const val DEBOUNCE_MS = 300L
+
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** 待采集节点的**弱引用** —— 避免拖住节点对象不被回收 */
+    private var pendingNode: java.lang.ref.WeakReference<android.view.accessibility.AccessibilityNodeInfo>? = null
+
+    @Volatile
+    var latest: NodePath? = null
+        private set
+
+    /**
+     * 采集完成回调 —— 由服务注入，把路径分发给消费者
+     * （全局 lastFocusPath + A6 的焦点历史记录）。
+     */
+    @Volatile
+    var onCollected: ((NodePath) -> Unit)? = null
+
+    /** 采集次数（诊断用，验证确实减少了） */
+    @Volatile
+    var collectCount = 0L
+        private set
+
+    /** 跳过次数（被防抖丢弃） */
+    @Volatile
+    var skippedCount = 0L
+        private set
+
+    private val task = Runnable {
+        val node = pendingNode?.get() ?: return@Runnable
+        pendingNode = null
+        try {
+            // 节点可能已失效（被回收）→ refresh 判活
+            if (!node.refresh()) {
+                ReaderLog.d(TAG, "路径采集：节点已失效，跳过")
+                return@Runnable
+            }
+            val path = NodePath.of(node)
+            if (path != null) {
+                latest = path
+                collectCount++
+                onCollected?.invoke(path)
+                ReaderLog.d(TAG, "路径采集：${path}（累计 $collectCount）")
+            }
+        } catch (e: Throwable) {
+            ReaderLog.w(TAG, "路径采集失败：${e.message}")
+        }
+    }
+
+    /**
+     * 请求采集 —— **热路径可安全调用**（只做赋值 + postDelayed）。
+     *
+     * 【为什么热路径安全】不做任何节点遍历，只有一次引用赋值与
+     * 一次 postDelayed —— 微秒级。
+     */
+    fun request(node: android.view.accessibility.AccessibilityNodeInfo?) {
+        if (node == null) return
+        skippedCount++
+        pendingNode = java.lang.ref.WeakReference(node)
+        handler.removeCallbacks(task)
+        handler.postDelayed(task, DEBOUNCE_MS)
+    }
+
+    /**
+     * 立即采集（**仅用于低频场景**：恢复焦点前的最后一次确认）。
+     *
+     * ⚠️ 不要在触摸/导航热路径调用 —— 会引入数百次 IPC。
+     */
+    fun collectNow(node: android.view.accessibility.AccessibilityNodeInfo?): NodePath? {
+        if (node == null) return null
+        return try {
+            NodePath.of(node).also { if (it != null) latest = it }
+        } catch (e: Throwable) {
+            null
+        }
+    }
+
+    /** 刷新时立即采一次（低频：息屏/窗口变化） */
+    fun flush() {
+        handler.removeCallbacks(task)
+        task.run()
+    }
+
+    fun reset() {
+        handler.removeCallbacks(task)
+        pendingNode = null
+        latest = null
+        collectCount = 0
+        skippedCount = 0
+    }
+
+    fun stats(): String = "路径采集 $collectCount 次 / 防抖跳过 $skippedCount 次"
+
+    private const val TAG = "NodePathCollector"
+}

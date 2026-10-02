@@ -544,9 +544,21 @@ class ReaderAccessibilityService : AccessibilityService() {
         //
         // 修复的真机问题：原来 restoreInitialFocus 无条件取第一个节点，
         // 导致息屏亮屏/切换 App 后焦点跳到页面顶部。
+        // ★★ 性能修复（真机 P0）
+        //
+        // 原来在这里同步调用 NodePath.of() —— 而 applyFocus 由
+        // 每次触摸触发，于是每次触摸都做数百次跨进程 getChild()，
+        // 堵塞无障碍交互线程，导致焦点事件堆积、用户滑不到焦点。
+        //
+        // 改为 NodePathCollector 延后 + 防抖采集：
+        // 热路径只有一次引用赋值 + postDelayed（微秒级）。
         focus.onFocusApplied = { node ->
-            val path = NodePath.of(node)
-            if (path != null) lastFocusPath = path
+            NodePathCollector.request(node)
+        }
+        NodePathCollector.onCollected = { path ->
+            lastFocusPath = path
+            // 同时补填 A6 的历史记录（让「本窗口上次焦点在哪」可用）
+            eventHandler.recordPath(path)
         }
 
         // ★ 滚动定位委托（跳到顶部/底部）—— P1-1
@@ -995,9 +1007,15 @@ class ReaderAccessibilityService : AccessibilityService() {
             haptic.boundary()
             return false
         }
-        // 焦点已设上 → 补记带节点信息的完整历史（A6）
+        // 焦点历史：只记时间戳+来源
+        //
+        // 【为什么不再传 node】传 node 会让 recordFocusAction 走
+        // 「记录富信息」路径；虽然本轮已把 NodePath 采集改为延迟，
+        // 但这里仍传 node 会造成**同一节点被记录两次**
+        // （applyFocus 内部已触发采集与记录）。
+        // 保持「每次焦点变化一条记录」的语义。
         eventHandler.recordFocusAction(
-            ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION, node
+            ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION, node = null
         )
         speakNode(node, if (forward) "下一焦点" else "上一焦点")
         autoScroll.ensureVisible(node, if (forward) 1 else 2)

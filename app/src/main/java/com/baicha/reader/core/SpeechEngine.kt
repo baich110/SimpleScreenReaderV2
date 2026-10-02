@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.os.SystemClock
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -49,6 +50,15 @@ class SpeechEngine(
 ) {
 
     companion object {
+        /**
+         * 相同文本的最短重播间隔。
+         *
+         * 【为什么 120ms】短于人的感知阈值（约 150ms），
+         * 不会吞掉用户主动要求的重复朗读；
+         * 又足以挡住焦点抖动产生的每秒十几次洪流。
+         */
+        const val REPEAT_GUARD_MS = 120L
+
         private const val TAG = "SpeechEngine"
     }
 
@@ -115,6 +125,21 @@ class SpeechEngine(
      *   与 speechGate 放在同一层的理由相同。
      */
     var onSpeakingStateChanged: ((speaking: Boolean) -> Unit)? = null
+
+    // ==================== 高频重复播报守卫 ====================
+
+    /** 上次播报的文本 */
+    @Volatile
+    private var lastSpokenText: String? = null
+
+    /** 上次播报时间 */
+    @Volatile
+    private var lastSpokenTime: Long = 0L
+
+    /** 被守卫拦截的次数（诊断用） */
+    @Volatile
+    var repeatGuardCount = 0L
+        private set
 
     // ==================== 语音参数 ====================
 
@@ -271,6 +296,32 @@ class SpeechEngine(
         if (!enabled) return
         if (text.isEmpty()) return
 
+        // ★★ 高频重复播报守卫 —— 真机 P0 的第三道防线
+        //
+        // 【真机现象】焦点抖动时一秒内十几次播报同一个文本
+        //   （日志：「进度条」「提交吗？」反复出现），
+        //   引擎被反复 FLUSH → 全部返回 ERROR_SYNTHESIS(-5)
+        //   → 用户「完全没有声音」。
+        //
+        // 【为什么在这里而不是队列里】
+        //   队列的 DEDUPE 需要调用方显式传 FLAG_DEDUPE 才生效，
+        //   而焦点路径没有传。这道守卫是**引擎级**的最后防线：
+        //   无论谁调用、带什么 flag，相同文本在极短时间内
+        //   不会重复送入 TTS。
+        //
+        // 【为什么是 120ms】
+        //   短于人的感知阈值（约 150ms），不会吞掉用户想听的重复内容
+        //   （如连按两次要求重读）；但又足以挡住抖动产生的洪流。
+        //   不做「完全禁止重复」——那会让用户无法故意重听。
+        val guardNow = SystemClock.uptimeMillis()
+        if (lastSpokenText == text && guardNow - lastSpokenTime < REPEAT_GUARD_MS) {
+            repeatGuardCount++
+            ReaderLog.d(TAG, "重复播报被守卫拦截: ${text.take(12)}")
+            return
+        }
+        lastSpokenText = text
+        lastSpokenTime = guardNow
+
         // ★ 语音输入静音闸门（天坦行为：录音中不出声）
         if (speechGate?.invoke() == true) {
             ReaderLog.d("SpeechEngine", "语音输入中，静音: ${text.take(20)}")
@@ -353,7 +404,30 @@ class SpeechEngine(
 
         try {
             val utteranceId = "baicha_${item.id}"
-            tts.speak(item.text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+
+            // ★★ TTS 修复：按 item 的语义选择 QUEUE_FLUSH / QUEUE_ADD
+            //
+            // 【真机问题】原来**无条件用 QUEUE_FLUSH** ——
+            //   即「每条播报都打断上一条」。真机日志显示
+            //   `TTS 播报出错: baicha_NN code=-5`（ERROR_SYNTHESIS）
+            //   连续出现。
+            //
+            // 【为什么 -5】QUEUE_FLUSH 会丢弃正在合成的内容。
+            //   当播报调用频率很高（焦点抖动时一秒十几次），
+            //   引擎被反复清空，来不及合成任何一条 →
+            //   返回 ERROR_SYNTHESIS(-5)。
+            //   用户表现为「完全没声音」。
+            //
+            // 【正确语义】`queueMode == 0` 表示打断（FLUSH），
+            //   `queueMode == 1` 表示排队（ADD）——
+            //   这是 SpeechItem 构造时就定好的（见 SpeechQueue）。
+            //   原来忽略了 queueMode，把「排队」也当成了「打断」。
+            val mode = if (item.queueMode == 0) {
+                TextToSpeech.QUEUE_FLUSH
+            } else {
+                TextToSpeech.QUEUE_ADD
+            }
+            tts.speak(item.text, mode, null, utteranceId)
             onStateChanged?.invoke()
         } catch (e: Exception) {
             ReaderLog.e(TAG, "播报失败: ${e.message}")

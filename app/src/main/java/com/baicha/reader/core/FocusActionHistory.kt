@@ -162,6 +162,22 @@ class FocusActionHistory(
         }
     }
 
+    /**
+     * 给最近一条记录补填路径 —— 供延迟采集使用。
+     *
+     * 【为什么需要】`NodePath.of()` 会遍历父链做数百次跨进程
+     * `getChild()`，不能在触摸热路径调用（真机 P0 的根因）。
+     * 故记录时 nodePath 为 null，采集完成后补填。
+     *
+     * 【为什么只填最近一条】采集有防抖 —— 补填时「最近一条」
+     * 就是发起采集时的那条（期间若有新记录，防抖会重新计时）。
+     */
+    fun attachPathToLatest(path: NodePath) {
+        val latest = records.firstOrNull() ?: return
+        records.removeFirst()
+        records.addFirst(latest.copy(nodePath = path))
+    }
+
     /** 最近一次焦点动作 —— 对标 `getLastFocusActionRecord()`（`:268`） */
     fun last(): FocusActionRecord? = records.firstOrNull()
 
