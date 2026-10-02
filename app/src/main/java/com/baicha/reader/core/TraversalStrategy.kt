@@ -181,6 +181,111 @@ class ListTraversalStrategy(
 }
 
 /**
+ * 带缓存的遍历策略 —— 对应天坦 d7/C1406a
+ *
+ * 【天坦 C1406a 的设计】
+ *   构造时传入 root + 缓存对象 N，遍历时复用缓存的索引，
+ *   避免在大列表上重复遍历。
+ *
+ * 【本实现的差异（更高性能）】
+ *   天坦的缓存是「索引缓存」，仍然要逐节点比较。
+ *   本实现改为「**整条可聚焦节点序列的缓存**」：
+ *   首次遍历时把整棵树的访问顺序展开成一个数组，
+ *   后续 next/previous 变成 O(1) 数组索引查找。
+ *
+ *   代价：需要一次性遍历全树（首次慢）。
+ *   收益：之后每次移动都是 O(1)，大列表滚动时优势明显。
+ *
+ *   适合场景：节点数 > 50 的界面（列表、设置页）。
+ *   不适合：节点数很少的简单界面（遍历开销 > 收益）。
+ */
+class CachedTraversalStrategy(
+    private val root: AccessibilityNodeInfo?,
+    private val filter: (AccessibilityNodeInfo) -> Boolean
+) : TraversalStrategy {
+
+    companion object {
+        /** 低于此节点数时不用缓存策略（遍历开销不划算） */
+        const val MIN_NODES_FOR_CACHE = 50
+
+        /** 展开上限，防止超大页面爆内存 */
+        private const val MAX_FLATTEN = 2000
+    }
+
+    /** 展开后的线性序列 */
+    private var flattened: ArrayList<AccessibilityNodeInfo>? = null
+
+    /** 每个节点在序列中的索引（identity 语义） */
+    private val indexMap = java.util.IdentityHashMap<AccessibilityNodeInfo, Int>()
+
+    /** 是否已构建 */
+    private var built = false
+
+    private val fallback = DefaultTraversalStrategy(root, filter)
+
+    private fun ensureBuilt() {
+        if (built) return
+        built = true
+        val list = ArrayList<AccessibilityNodeInfo>(128)
+        val top = root ?: return
+        flatten(top, list, 0)
+        flattened = list
+        for (i in list.indices) {
+            indexMap[list[i]] = i
+        }
+    }
+
+    /** 深度优先展开，只收集可聚焦节点 */
+    private fun flatten(node: AccessibilityNodeInfo, out: ArrayList<AccessibilityNodeInfo>, depth: Int) {
+        if (depth > 40 || out.size >= MAX_FLATTEN) return
+        if (filter(node)) {
+            out.add(node)
+        }
+        val count = node.childCount
+        for (i in 0 until count) {
+            val child = node.getChild(i) ?: continue
+            flatten(child, out, depth + 1)
+            if (out.size >= MAX_FLATTEN) return
+        }
+    }
+
+    override fun next(node: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
+        ensureBuilt()
+        val list = flattened
+        if (list == null || list.size < MIN_NODES_FOR_CACHE) {
+            // 节点少 → 退回默认策略
+            return fallback.next(node, direction)
+        }
+        val idx = indexMap[node] ?: return fallback.next(node, direction)
+        val target = if (direction == TraversalStrategy.DIRECTION_NEXT) idx + 1 else idx - 1
+        return list.getOrNull(target)
+    }
+
+    override fun start(root: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
+        ensureBuilt()
+        val list = flattened ?: return null
+        return if (direction == TraversalStrategy.DIRECTION_NEXT) {
+            list.firstOrNull()
+        } else {
+            list.lastOrNull()
+        }
+    }
+
+    override fun release() {
+        flattened = null
+        indexMap.clear()
+        built = false
+        fallback.release()
+    }
+
+    /** 当前缓存的节点数（诊断用） */
+    fun cachedSize(): Int {
+        ensureBuilt()
+        return flattened?.size ?: 0
+    }
+}
+
+/**
  * 网格/行列遍历策略 —— 支持上下左右四个方向
  *
  * 对应天坦的 ROW_AND_COLUM_TRAVERSAL 导航（typeCode 31）
@@ -306,7 +411,7 @@ object TraversalStrategyFactory {
         return when (strategyType) {
             TYPE_GRID, TYPE_ROW_COLUMN -> GridTraversalStrategy(root, filter)
             TYPE_LIST -> ListTraversalStrategy(root, filter)
-            // TYPE_CACHED 暂用默认实现（缓存优化在功能层按需加）
+            TYPE_CACHED -> CachedTraversalStrategy(root, filter)
             else -> DefaultTraversalStrategy(root, filter)
         }
     }

@@ -432,6 +432,36 @@ class ReaderAccessibilityService : AccessibilityService() {
                 nodeCache.invalidateAll()
             }
 
+            // ---------- 16384: 文本按粒度遍历（读屏软件的"按字/词/行"回调）----------
+            AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY -> {
+                val text = event.text?.joinToString("")?.trim().orEmpty()
+                if (text.isNotEmpty()) {
+                    log("粒度遍历: $text")
+                    speech.speak(text, interrupt = true)
+                }
+            }
+
+            // ---------- 131072: 拖拽（TYPE_VIEW_DRAGGED 在公开 SDK 中不可见，用数值）----------
+            131072 -> {
+                val node = event.source
+                val text = composeNode(node)
+                if (!text.isNullOrBlank()) {
+                    log("拖拽: $text")
+                    speech.speak(text, interrupt = true)
+                    haptic.focus()
+                }
+            }
+
+            // ---------- 262144: 上下文点击（长按菜单）----------
+            AccessibilityEvent.TYPE_VIEW_CONTEXT_CLICKED -> {
+                val node = event.source
+                val text = composeNode(node)
+                log("上下文点击: ${text ?: "(无内容)"}")
+                sound.longClicked()
+                haptic.longPress()
+                if (!text.isNullOrBlank()) speech.speak(text, interrupt = true)
+            }
+
             else -> {
                 // 其他事件静默
             }
