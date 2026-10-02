@@ -62,6 +62,9 @@ class ReaderAccessibilityService : AccessibilityService() {
         /** 启动播报 */
         private const val MSG_READY = "白茶读屏已启动"
 
+        /** 无标签元素的兜底播报文本 */
+        private const val UNTAGGED = "未加标签"
+
         val eventLog = ArrayDeque<String>(MAX_LOG)
 
         @Volatile
@@ -133,12 +136,21 @@ class ReaderAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** 去重：上次朗读的节点哈希 */
-    private var lastSpokenHash = -1
+    /**
+     * 去重：上次朗读的节点**身份**
+     *
+     * 【修正】原来用 `node.hashCode()`（内容 hash）。
+     * AccessibilityNodeInfo.hashCode() 基于内容（text/desc/bounds/className），
+     * 导致内容相同的不同节点（两个"确定"按钮、格式雷同的列表项）被误判为重复，
+     * 第二个直接不朗读 —— 这是「焦点在动但不朗读」的原因之一。
+     *
+     * 改用 System.identityHashCode（对象身份），与天坦 HashSet<o0.w> 的语义一致。
+     */
+    private var lastSpokenIdentity = -1
     private var lastSpeakTime = 0L
 
-    /** 触摸探索：上次悬停节点 */
-    private var lastHoverHash = -1
+    /** 触摸探索：上次悬停节点的身份 */
+    private var lastHoverIdentity = -1
 
     /** 屏幕状态（带缓存，避免每次都查 PowerManager） */
     @Volatile
@@ -369,15 +381,18 @@ class ReaderAccessibilityService : AccessibilityService() {
             // ---------- 32: 窗口状态变化 ----------
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> handleWindowChanged(event)
 
-            // ---------- 64 / 32768: 无障碍焦点（值同为 32768）----------
+            // ---------- 32768: 无障碍焦点 ----------
+            // 【修正】原注释写「64 / 32768，值同为 32768」是错的：
+            //   32768 = TYPE_VIEW_ACCESSIBILITY_FOCUSED
+            //   64    = TYPE_VIEW_HOVER_EXIT（另一个分支处理）
             AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED -> {
                 val text = composeNode(event.source)
                 log("无障碍焦点: ${text ?: "(无内容)"}")
                 if (!text.isNullOrBlank()) {
-                    val hash = event.source?.hashCode() ?: -1
+                    val identity = event.source?.let { System.identityHashCode(it) } ?: -1
                     val now = SystemClock.uptimeMillis()
-                    if (hash != lastSpokenHash || now - lastSpeakTime > 300) {
-                        lastSpokenHash = hash
+                    if (identity != lastSpokenIdentity || now - lastSpeakTime > 300) {
+                        lastSpokenIdentity = identity
                         lastSpeakTime = now
                         speech.speak(text, interrupt = true)
                         playFocusSound(event.source)
@@ -530,8 +545,8 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
 
         // 重置全部状态
-        lastSpokenHash = -1
-        lastHoverHash = -1
+        lastSpokenIdentity = -1
+        lastHoverIdentity = -1
         dispatcher.resetFocusHash()
         focus.onWindowChanged()
         nodeCache.invalidateAll()
@@ -595,10 +610,11 @@ class ReaderAccessibilityService : AccessibilityService() {
      * 触摸探索播报 —— 天坦 M6/A.C()
      */
     private fun speakHover(node: AccessibilityNodeInfo) {
-        val hash = node.hashCode()
+        // 【修正】同 speakNode：改用身份比较
+        val identity = System.identityHashCode(node)
         val now = SystemClock.uptimeMillis()
 
-        if (hash == lastHoverHash && now - lastSpeakTime < 250) return
+        if (identity == lastHoverIdentity && now - lastSpeakTime < 250) return
 
         val text = composeNode(node, includeRole = true)
         val roleName = if (text.isNullOrBlank()) {
@@ -606,14 +622,17 @@ class ReaderAccessibilityService : AccessibilityService() {
         } else null
 
         if (text.isNullOrBlank() && roleName == null) {
-            lastHoverHash = hash
+            lastHoverIdentity = identity
             lastSpeakTime = now
-            log("触摸: (无内容)")
+            // 【修正】原来静默 —— 触摸到无标签元素时完全没有反馈。
+            log("触摸: (无标签) → 兜底播报")
+            speech.speak(UNTAGGED, interrupt = true)
             focus.focusForTouch(node)
+            playFocusSound(node)
             return
         }
 
-        lastHoverHash = hash
+        lastHoverIdentity = identity
         lastSpeakTime = now
 
         val spoken = text ?: roleName!!
@@ -629,25 +648,32 @@ class ReaderAccessibilityService : AccessibilityService() {
     private fun speakNode(node: AccessibilityNodeInfo?, tag: String) {
         if (node == null) return
 
-        val hash = node.hashCode()
+        // 【修正】身份比较，不用内容 hash
+        val identity = System.identityHashCode(node)
         val now = SystemClock.uptimeMillis()
-        if (hash == lastSpokenHash && now - lastSpeakTime < 300) return
+        if (identity == lastSpokenIdentity && now - lastSpeakTime < 300) return
 
         val text = composeNode(node, includeRole = true) ?: run {
             val role = SpeechCompositor.roleName(NodeRoleHelper.roleOf(node), node)
             if (role != null) {
-                lastSpokenHash = hash
+                lastSpokenIdentity = identity
                 lastSpeakTime = now
                 log("$tag: $role")
                 speech.speak(role, interrupt = true)
                 playFocusSound(node)
             } else {
-                log("$tag: (无内容)")
+                // 【修正】原来这里是静默 return —— 焦点在动却完全没有声音，用户以为读屏坏了。
+                // 天坦行为：至少有兜底内容。这里播「未加标签」提示，让用户知道焦点确实移动了。
+                lastSpokenIdentity = identity
+                lastSpeakTime = now
+                log("$tag: (无标签) → 兜底播报")
+                speech.speak(UNTAGGED, interrupt = true)
+                playFocusSound(node)
             }
             return
         }
 
-        lastSpokenHash = hash
+        lastSpokenIdentity = identity
         lastSpeakTime = now
         log("$tag: $text")
         speech.speak(text, interrupt = true)

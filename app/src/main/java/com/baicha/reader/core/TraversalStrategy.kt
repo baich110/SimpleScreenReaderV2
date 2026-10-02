@@ -218,6 +218,9 @@ class CachedTraversalStrategy(
     /** 每个节点在序列中的索引（identity 语义） */
     private val indexMap = java.util.IdentityHashMap<AccessibilityNodeInfo, Int>()
 
+    /** 已加入序列的节点（防重复/防环） */
+    private val added = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>()
+
     /** 是否已构建 */
     private var built = false
 
@@ -238,6 +241,10 @@ class CachedTraversalStrategy(
     /** 深度优先展开，只收集可聚焦节点 */
     private fun flatten(node: AccessibilityNodeInfo, out: ArrayList<AccessibilityNodeInfo>, depth: Int) {
         if (depth > 40 || out.size >= MAX_FLATTEN) return
+        // 【修正】原实现没去重：树中出现重复引用或环时同一节点会被加入两次，
+        // indexMap 后写覆盖前写 → 索引错位 → 焦点跳错位置。
+        if (added.containsKey(node)) return
+        added[node] = true
         if (filter(node)) {
             out.add(node)
         }
@@ -274,6 +281,7 @@ class CachedTraversalStrategy(
     override fun release() {
         flattened = null
         indexMap.clear()
+        added.clear()
         built = false
         fallback.release()
     }

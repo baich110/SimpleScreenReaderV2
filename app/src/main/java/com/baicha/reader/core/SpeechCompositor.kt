@@ -70,6 +70,9 @@ object SpeechCompositor {
     /** 拼接分隔符（中文顿号） */
     private const val SEPARATOR = "，"
 
+    /** 子节点文本收集上限（超过则只收前 N 个，不放弃） */
+    const val MAX_CHILD_SCAN = 8
+
     /** 界面元素与后续内容之间的停顿符 */
     private const val PAUSE_MARK = "，"
 
@@ -96,7 +99,13 @@ object SpeechCompositor {
         granularity: GranularityNavigator.Level = GranularityNavigator.currentLevel
     ): String? {
         if (node == null) return null
-        if (!isVisible(node)) return null
+        // 【修正】不再在此处判可见性。
+        //
+        // 天坦的合成器（z6/C4421m）只负责「把节点转成可读文本」，从不判可见性；
+        // 可见性是 ShouldFocusNode（w7/C3678d.r()）的职责，焦点能设上就说明已通过判定。
+        //
+        // 实测问题：滚动中/动画中/自绘 UI 的 isVisibleToUser 会返回 false，
+        // 导致「焦点在动但不朗读」。这里再判一次属于职责重叠且有害。
 
         val roleCode = if (role >= 0) role else NodeRoleHelper.roleOf(node)
 
@@ -209,11 +218,15 @@ object SpeechCompositor {
     private fun collectChildText(node: AccessibilityNodeInfo): String? {
         val count = node.childCount
         if (count == 0) return null
-        if (count > 8) return null   // 子节点过多 → 交给逐节点浏览，不合并
+
+        // 【修正】原来是「超过 8 个就全放弃」，导致列表项/卡片（头像+标题+摘要+
+        // 时间+角标…经常 > 8）直接读不出内容。
+        // 天坦的做法是「有上限地收集」：最多收 8 个，而不是放弃。
+        val limit = if (count > MAX_CHILD_SCAN) MAX_CHILD_SCAN else count
 
         val parts = ArrayList<String>(4)
         val seen = HashSet<String>(4)
-        for (i in 0 until count) {
+        for (i in 0 until limit) {
             val child = node.getChild(i) ?: continue
             if (!isVisible(child)) continue
             val t = child.text?.toString()?.trim()

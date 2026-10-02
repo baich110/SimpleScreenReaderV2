@@ -33,9 +33,23 @@ class EventDispatcher(
 
     // ==================== 配置（由服务注入）====================
 
-    /** 自己的包名 —— 防止播报自己 */
+    /** 自己的包名 */
     @Volatile
     var selfPackageName: String = "com.baicha.reader"
+
+    /**
+     * 是否过滤掉「自己 App」的无障碍焦点事件
+     *
+     * 【修正】原来无条件过滤（`pkg == selfPackageName` 就丢），
+     * 导致读屏自己的设置界面（MainActivity / TtsSettingsActivity）读不出来。
+     *
+     * 天坦的对应规则（AccessibilityEventDispatcher 规则 11）带 **flag 21** 开关，
+     * 默认不开 → 不过滤。这里对齐：默认 false。
+     *
+     * 何时需要打开：当读屏自己的界面出现「播报自己播报的内容」死循环时才开。
+     */
+    @Volatile
+    var filterSelfPackageEvents: Boolean = false
 
     /** 屏幕是否亮着 */
     @Volatile
@@ -243,8 +257,12 @@ class EventDispatcher(
             }
         }
 
-        // ---------- 规则 9：无障碍焦点 + 自己包名 ----------
-        if (type == TYPE_VIEW_ACCESSIBILITY_FOCUSED && pkg == selfPackageName) {
+        // ---------- 规则 9：无障碍焦点 + 自己包名（受开关控制）----------
+        // 【修正】默认不过滤，否则读屏自己的设置界面无法朗读（对齐天坦 flag 21 默认关闭）
+        if (filterSelfPackageEvents &&
+            type == TYPE_VIEW_ACCESSIBILITY_FOCUSED &&
+            pkg == selfPackageName
+        ) {
             return true
         }
 

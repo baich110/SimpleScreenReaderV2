@@ -59,10 +59,20 @@ class FocusManager(
         const val DIR_RIGHT = 6
 
         /** 基础防抖窗口 —— 天坦 110ms */
-        private const val BASE_DEBOUNCE_MS = 110L
+        const val BASE_DEBOUNCE_MS = 110L
 
-        /** 连续导航时的放宽上限 */
-        private const val MAX_DEBOUNCE_MS = 60L
+        /**
+         * 连续同向导航时的**放宽上限**
+         *
+         * 【修正】原常量名 MAX_DEBOUNCE_MS=60 配合 coerceAtLeast 实际是「收紧到 60ms」，
+         * 与注释「放宽」相反，且名字也是反的。
+         *
+         * 现在明确语义：**连续快速同向滑动时放宽窗口**，让快速浏览不被误吞。
+         */
+        const val MAX_DEBOUNCE_MS = 200L
+
+        /** 连续导航时每次放宽的步长 */
+        const val DEBOUNCE_STEP_MS = 15L
 
         /** 滚动状态有效期 */
         private const val SCROLL_STATE_TTL_MS = 300L
@@ -203,7 +213,9 @@ class FocusManager(
     private fun cacheFocus(node: AccessibilityNodeInfo) {
         if (focusNode == node) return
         anchorNode = focusNode
-        focusNode?.let { node.getBoundsInScreen(anchorBounds) }
+        // 【修正】原来写成 node.getBoundsInScreen(...)，用的是新节点参数。
+        // anchorBounds 语义是「上一个焦点的边界」，必须取旧焦点。
+        focusNode?.let { it.getBoundsInScreen(anchorBounds) }
         focusNode = node
     }
 
@@ -238,12 +250,15 @@ class FocusManager(
         // ★ ② 自适应防抖
         val now = SystemClock.uptimeMillis()
         if (direction == lastDirection) {
-            val window = (BASE_DEBOUNCE_MS - navStreak * 10).coerceAtLeast(MAX_DEBOUNCE_MS)
+            // 【修正】连续同向导航 → 逐步**放宽**窗口（原来写反了，是收紧）
+            val window = (BASE_DEBOUNCE_MS + navStreak * DEBOUNCE_STEP_MS)
+                .coerceAtMost(MAX_DEBOUNCE_MS)
             if (now - lastNavTime < window) {
                 return null
             }
             navStreak++
         } else {
+            // 换方向 → 立即放行，重置连续计数
             navStreak = 0
         }
         lastNavTime = now
@@ -278,22 +293,35 @@ class FocusManager(
         }
 
         if (target != null && target != current) {
-            // ★ ⑤ 可达性判定（天坦 p()）
-            val reachable = ensureReachable(current, target, direction, strategyType, root)
-            if (!reachable) {
-                ReaderLog.d(TAG, "目标不可达 → 尝试父节点")
+            // ★ ⑤ 可达性判定（天坦 M6.h.p()）
+            //
+            // 【修正】原实现算完布尔值就丢掉，等于没实现 —— 目标不可达时不会退到父节点，
+            // 导致「焦点丢失」。现在改成返回「实际应该聚焦的节点」。
+            val actual = resolveReachable(target)
+            if (actual !== target) {
+                ReaderLog.d(TAG, "目标不可达 → 退到父节点 ${desc(actual)}")
             }
-            return if (applyFocus(target)) target else null
+            return if (applyFocus(actual)) actual else null
         }
 
-        // 走到头 → 循环
+        // 走到头 → 循环（回到另一端）
+        //
+        // 【修正】加「已尝试节点」身份集合，避免策略差异导致的反复横跳。
         val wrap = if (forward) findFirstFocusable(root, strategyType)
         else findLastFocusable(root, strategyType)
-        if (wrap != null && wrap != current) {
+        if (wrap != null && wrap !== current && !isSameAsAny(wrap, current, target)) {
             return if (applyFocus(wrap)) wrap else null
         }
 
         return null
+    }
+
+    /** 判断节点是否与给定节点之一相同（身份比较） */
+    private fun isSameAsAny(node: AccessibilityNodeInfo, vararg others: AccessibilityNodeInfo?): Boolean {
+        for (o in others) {
+            if (o != null && node === o) return true
+        }
+        return false
     }
 
     /**
@@ -323,29 +351,24 @@ class FocusManager(
     /**
      * 可达性判定 —— 对应天坦 M6.h.p()
      *
-     * 核心思想：
-     *   目标节点如果是「被容器挡住」的（不可直接聚焦可达），
-     *   就退到它的父节点再试。避免焦点卡住。
+     * 【天坦的行为】
+     *   目标节点如果「被容器挡住」（不可直接聚焦），就**退到父节点再试**。
+     *   这是避免「焦点卡住/丢失」的关键机制。
      *
-     * @return true = 可达
+     * @return 实际应该聚焦的节点（可能是 target 本身，也可能是它的父节点）
      */
-    private fun ensureReachable(
-        from: AccessibilityNodeInfo,
-        target: AccessibilityNodeInfo,
-        direction: Int,
-        strategyType: Int,
-        root: AccessibilityNodeInfo
-    ): Boolean {
-        // 目标本身可聚焦 → 直接可达
-        if (ShouldFocusNode.shouldFocus(target)) return true
+    private fun resolveReachable(target: AccessibilityNodeInfo): AccessibilityNodeInfo {
+        // ① 目标本身可聚焦 → 用它
+        if (ShouldFocusNode.shouldFocus(target)) return target
 
-        // 退到父节点
-        val parent = target.parent ?: return false
-        if (ShouldFocusNode.shouldFocus(parent)) {
-            // 父节点可达 → 跳到父节点
-            return true
+        // ② 退到父节点（天坦 p() 的父节点回退）
+        val parent = target.parent
+        if (parent != null && ShouldFocusNode.shouldFocus(parent)) {
+            return parent
         }
-        return false
+
+        // ③ 都不行 → 仍返回 target（由 applyFocus 决定成败，不静默丢弃）
+        return target
     }
 
     /**
@@ -410,7 +433,8 @@ class FocusManager(
 
         if (ok) {
             anchorNode = focusNode
-            focusNode?.let { node.getBoundsInScreen(anchorBounds) }
+            // 【修正】同 cacheFocus：必须取旧焦点的边界
+            focusNode?.let { it.getBoundsInScreen(anchorBounds) }
             focusNode = node
             focusGeneration++
         }

@@ -63,6 +63,25 @@ object ShouldFocusNode {
     private val tempRect2 = Rect()
 
     /**
+     * 边界基准 —— 对应天坦 f39008c
+     *
+     * 【天坦语义】
+     *   f39007b : 是否已初始化（null = 未初始化）
+     *   f39008c : 基准边界 —— 取自**本轮判定处理的第一个节点**
+     *
+     *   c(node) 检查 `node 的边界 == f39008c`，用于识别
+     *   「节点与基准同大小」的情况（通常是根容器或整屏节点）。
+     *
+     *   初始化时机：r() 里首次遇到可见节点时，用
+     *   `AbstractC3688i.h(node).a(f39008c)` 取该节点的**内容边界**写入。
+     *   清理时机：d() 里置 null（每次 e() 结束后调用）。
+     */
+    private val baselineBounds = Rect()
+
+    /** 基准是否已初始化 —— 对应天坦 f39007b */
+    private var baselineInitialized = false
+
+    /**
      * 清空调用内状态 —— 窗口切换时由 FocusController 调用
      *
      * 【修正】去掉了跨调用的 cache（内容 hash 做 key 且无失效机制 = 读到过期结果）。
@@ -71,6 +90,8 @@ object ShouldFocusNode {
     fun clear() {
         tempRect.setEmpty()
         tempRect2.setEmpty()
+        baselineBounds.setEmpty()
+        baselineInitialized = false
     }
 
     /**
@@ -107,7 +128,7 @@ object ShouldFocusNode {
      * 天坦用静态 f39008c 存「上一次处理的节点边界」，
      * 语义是「同一个节点被重复处理」。这里用调用栈内的 prevBounds 表达。
      */
-    private fun r(node: AccessibilityNodeInfo, z9: Boolean, depth: Int, prevBounds: Rect? = null): Boolean {
+    private fun r(node: AccessibilityNodeInfo, z9: Boolean, depth: Int): Boolean {
         if (depth > MAX_DEPTH) return false
 
         // ② WebView 检查
@@ -119,10 +140,18 @@ object ShouldFocusNode {
         // ③ 可见性
         if (!node.isVisibleToUser) return false
 
-        // ④ （原「初始化边界缓存」已移除，见 clear() 注释）
+        // ④ 初始化边界基准 —— 对应天坦 f39007b / f39008c
+        //
+        // 【修正】原实现把 prevBounds 参数化，但顶层调用永远传 null →
+        // 第⑤步（微信特判）永远执行不到，是死代码。
+        // 天坦的实际语义是「静态基准字段，取本轮第一个可见节点的边界」，跨调用生效。
+        if (!baselineInitialized) {
+            node.getBoundsInScreen(baselineBounds)
+            baselineInitialized = true
+        }
 
-        // ⑤ 同一节点重复处理 且 有子节点
-        if (prevBounds != null && isSameBounds(node, prevBounds) && node.childCount > 0) {
+        // ⑤ 与基准边界相同 且 有子节点
+        if (baselineInitialized && isSameBounds(node, baselineBounds) && node.childCount > 0) {
             if (WECHAT == node.packageName?.toString()) {
                 val text = node.text?.toString()
                 if (text == "图像" || text == "浮窗") return true
@@ -237,7 +266,6 @@ object ShouldFocusNode {
         // 【修正】天坦用 HashSet<o0.w>（identity）。这里也必须 identity，
         // 否则内容相同的兄弟节点会被误判为重复 → 返回 false（漏判）。
         val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>()
-        val parentBounds = Rect(tempRect)
         for (idx in 0 until count) {
             val child = node.getChild(idx) ?: continue
             if (seen.containsKey(child)) return false
@@ -246,8 +274,7 @@ object ShouldFocusNode {
                 if (child.childCount > 0) return true
                 child.getBoundsInScreen(tempRect2)
                 if (tempRect2 == tempRect) return true
-                // ★ 传入父节点边界作为「重复处理」基准
-                if (r(child, false, 0, parentBounds)) return true
+                if (r(child, false, 0)) return true
             }
         }
         return false

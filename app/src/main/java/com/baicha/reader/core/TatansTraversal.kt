@@ -354,7 +354,7 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
         val count = parent.childCount
         for (i in 0 until count) {
             val child = parent.getChild(i) ?: continue
-            if (child == node) return i
+            if (child === node) return i
         }
         return -1
     }
@@ -518,7 +518,10 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
         var result = -1
 
         try {
-            val hash = parent.hashCode()
+            // 【修正】原来用 parent.hashCode()（内容 hash）。
+            // 内容相同的不同父节点会命中错误缓存 → 索引错位 → 焦点跳错位置。
+            // 改用对象身份。
+            val hash = System.identityHashCode(parent)
             if (hash != -1 && hash == cacheParentHash && count == cacheChildCount) {
                 val center = cacheChildIndex
                 var offset = 0
@@ -529,7 +532,7 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
 
                     if (lo >= 0) {
                         val c = parent.getChild(lo)
-                        if (c == child) {
+                        if (c === child) {
                             result = lo
                             cacheChildIndex = lo
                             return lo
@@ -537,7 +540,7 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
                     }
                     if (offset != 0 && hi < count) {
                         val c = parent.getChild(hi)
-                        if (c == child) {
+                        if (c === child) {
                             result = hi
                             cacheChildIndex = hi
                             return hi
@@ -552,9 +555,10 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
 
         for (i in 0 until count) {
             val c = parent.getChild(i) ?: continue
-            if (c == child) {
+            // 【修正】身份比较，对齐天坦 o0.w 的语义
+            if (c === child) {
                 try {
-                    cacheParentHash = parent.hashCode()
+                    cacheParentHash = System.identityHashCode(parent)
                 } catch (e: Exception) {
                     cacheParentHash = -1
                 }
@@ -585,7 +589,7 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
             val count = child.childCount
             for (j in 0 until count) {
                 val sub = child.getChild(j) ?: continue
-                if (sub == node) return i
+                if (sub === node) return i
             }
         }
         lastSearchFailed = true
