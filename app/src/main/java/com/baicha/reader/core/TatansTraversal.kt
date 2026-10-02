@@ -96,6 +96,18 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
 
         private const val TAG = "TatansTraversal"
 
+        /**
+         * 节点副本工厂 —— **仅供测试注入**
+         *
+         * `AccessibilityNodeInfo.obtain(node)` 是静态方法，在 JVM 单测里
+         * 被 `isReturnDefaultValues` 替换成返回 null，导致遍历一走到
+         * 「返回结果」就 NPE，整个遍历层无法测试。
+         *
+         * 生产环境恒为 null（走原始静态调用），行为零变化。
+         */
+        @JvmStatic
+        internal var obtainOverride: ((AccessibilityNodeInfo) -> AccessibilityNodeInfo?)? = null
+
         /** 索引缓存（天坦 f23911m/f23912n/f23913o） */
         private var cacheParentHash = -1
         private var cacheChildIndex = -1
@@ -846,8 +858,23 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
         }
     }
 
-    /** 天坦 AbstractC3693m.b0(node) = o0.w.v0(node) —— 取节点副本 */
-    private fun obtain(node: AccessibilityNodeInfo): AccessibilityNodeInfo =
-        AccessibilityNodeInfo.obtain(node)
+    /**
+     * 天坦 AbstractC3693m.b0(node) = o0.w.v0(node) —— 取节点副本
+     *
+     * 【抽成可注入钩子（本轮改动）】
+     *
+     * `AccessibilityNodeInfo.obtain(node)` 是**静态方法**，
+     * 在 JVM 单测里被 `isReturnDefaultValues` 替换成返回 null ——
+     * 于是遍历一走到「要返回结果」这一步就 NPE，整个遍历层无法测。
+     *
+     * 生产行为**完全不变**（默认实现就是原来的静态调用）；
+     * 测试可通过 [obtainOverride] 提供替身，从而让遍历逻辑第一次可被真实断言。
+     */
+    private fun obtain(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
+        obtainOverride?.let { hook ->
+            hook(node)?.let { return it }
+        }
+        return AccessibilityNodeInfo.obtain(node)
+    }
 
 }
