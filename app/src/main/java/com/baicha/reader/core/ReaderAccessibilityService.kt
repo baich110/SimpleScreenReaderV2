@@ -189,6 +189,9 @@ class ReaderAccessibilityService : AccessibilityService() {
         // ★ 初始化屏幕参数（排序算法依赖，天坦 C1423r.M(Context)）
         NodeOrderComparator.initFromContext(this)
 
+        // ★ 登记所有缓存的失效回调 —— 避免"忘了挂钩子"（见 CacheRegistry 注释）
+        registerCacheHandlers()
+
         // ★ 把缓存注入到热点路径（排序 + 可聚焦判定）
         NodeOrderComparator.cache = nodeCache
         ShouldFocusNode.cache = nodeCache
@@ -205,7 +208,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         navigation = NavigationManager().apply {
             onModeChanged = { mode ->
                 // 切换导航后清缓存（过滤器变了，判定结果不再有效）
-                nodeCache.invalidateAll()
+                CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
                 speech.speak(mode.label, interrupt = true)
                 haptic.focus()
                 log("导航 → ${mode.label}")
@@ -248,6 +251,39 @@ class ReaderAccessibilityService : AccessibilityService() {
             log("TTS 就绪")
             speech.speak(MSG_READY, interrupt = true)
             haptic.focus()
+        }
+    }
+
+    /**
+     * 登记缓存失效回调 —— 集中管理，避免遗漏
+     *
+     * 【为什么集中登记】
+     *   上一轮 TatansTraversal 的索引缓存就是因为「有人在别处手动 clear，
+     *   漏了它」而出的 bug。集中登记后，新增缓存只需加一行 register。
+     */
+    private fun registerCacheHandlers() {
+        // ---- 窗口/内容变化：全部清 ----
+        CacheRegistry.register(CacheRegistry.Level.WINDOW, "nodeCache") {
+            nodeCache.invalidateAll()
+        }
+        CacheRegistry.register(CacheRegistry.Level.WINDOW, "boundsCache") {
+            NodeBoundsCalculator.clear()
+        }
+        CacheRegistry.register(CacheRegistry.Level.WINDOW, "traversalIndex") {
+            TatansTraversal.invalidateIndexCache()
+        }
+
+        // ---- 滚动：只清可见性相关（结构没变）----
+        CacheRegistry.register(CacheRegistry.Level.SCROLL, "focusAndText") {
+            nodeCache.invalidateFocus()
+        }
+        CacheRegistry.register(CacheRegistry.Level.SCROLL, "boundsCache") {
+            NodeBoundsCalculator.clear()
+        }
+
+        // ---- 配置变化：屏幕参数重算 + 全部失效 ----
+        CacheRegistry.register(CacheRegistry.Level.CONFIG, "screenMetrics") {
+            NodeOrderComparator.initFromContext(this)
         }
     }
 
@@ -464,9 +500,7 @@ class ReaderAccessibilityService : AccessibilityService() {
 
             // ---------- 4194304: 窗口集合变化 ----------
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
-                nodeCache.invalidateAll()
-                NodeBoundsCalculator.clear()
-                TatansTraversal.invalidateIndexCache()
+                CacheRegistry.invalidate(CacheRegistry.Level.WINDOW)
             }
 
             // ---------- 通知 ----------
@@ -490,9 +524,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             // ---------- 内容变化 ----------
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                 // 不播报（太吵），但缓存要失效
-                nodeCache.invalidateAll()
-                NodeBoundsCalculator.clear()
-                TatansTraversal.invalidateIndexCache()
+                CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
             }
 
             // ---------- 16384: 文本按粒度遍历（读屏软件的"按字/词/行"回调）----------
@@ -567,9 +599,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         lastHoverIdentity = -1
         dispatcher.resetFocusHash()
         focus.onWindowChanged()
-        nodeCache.invalidateAll()
-        NodeBoundsCalculator.clear()
-        TatansTraversal.invalidateIndexCache()
+        CacheRegistry.invalidate(CacheRegistry.Level.WINDOW)
 
         // 播报页面标题
         val title = event.text?.joinToString("")?.trim().orEmpty()
@@ -588,10 +618,8 @@ class ReaderAccessibilityService : AccessibilityService() {
         if (now - lastScrollTime < SCROLL_THROTTLE_MS) return
         lastScrollTime = now
 
-        // ★ 滚动后节点可见性变了 → 只失效判定/文本缓存（结构未变，子节点列表可留）
-        nodeCache.invalidateFocus()
-        // 滚动后位置变了，有效边界必须重算
-        NodeBoundsCalculator.clear()
+        // ★ 滚动后节点可见性变了 → 只失效判定/文本/边界（结构未变）
+        CacheRegistry.invalidate(CacheRegistry.Level.SCROLL)
 
         val node = event.source
         val nodeKey = node?.hashCode() ?: -1
@@ -896,13 +924,8 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         ReaderLog.i("Service", "配置变化: orientation=${newConfig.orientation}")
 
-        // ① 重算屏幕参数（天坦 C1423r.f23902d.M(this)）
-        NodeOrderComparator.initFromContext(this)
-
-        // ② 全部缓存失效（布局变了）
-        nodeCache.invalidateAll()
-        NodeBoundsCalculator.clear()
-        TatansTraversal.invalidateIndexCache()
+        // ① 重算屏幕参数 + 全部缓存失效（布局变了）
+        CacheRegistry.invalidate(CacheRegistry.Level.CONFIG)
 
         // ③ 焦点状态重置
         focus.onWindowChanged()
