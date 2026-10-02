@@ -75,6 +75,19 @@ class SystemStateAnnouncer(
     var ringerMode: Int = RINGER_MODE_NORMAL
         private set
 
+    /**
+     * 是否正在通话中。
+     *
+     * 【为什么要它】TalkBack `handleScreenOffInBackgroundThread()`：
+     *   "Only announce ringer state if we're not in a call."
+     *   通话中熄屏是正常行为，念铃声状态是噪音。
+     *
+     * 由 CallStateMonitor 注入（当前简化为可设置字段，
+     * 因为白茶尚未做通话状态监听 —— 见待办 A5）。
+     */
+    @Volatile
+    var inCall: Boolean = false
+
     private var registered = false
 
     private val receiver = object : BroadcastReceiver() {
@@ -102,32 +115,54 @@ class SystemStateAnnouncer(
     fun handleAction(action: String, ringerModeValue: Int = RINGER_MODE_NORMAL) {
         when (action) {
             ACTION_RINGER_MODE_CHANGED -> {
+                // 【核实修正】两方都**只存字段，不播报**：
+                //   TalkBack `handleRingerModeChanged()`: `this.ringerMode = ringerMode;`
+                //   （其 javadoc 写 "Announces the current ringer state"，
+                //     但方法体只赋值 —— 注释与实现不符）
+                //   天坦 `l(int)`: `this.f10351l = i9;`
+                // 铃声状态只在**屏幕关闭时顺带播一次**（见下）。
                 ringerMode = ringerModeValue
-                // 天坦行为：只播「变为静音/震动」，
-                // 变回正常模式不播（用户能听到铃声本身）
-                SystemStateSpeech.ringerAnnouncement(ringerModeValue)?.let {
-                    log("系统状态：$it")
-                    speak(it, false)
-                }
+                log("系统状态：铃声模式 → ${SystemStateSpeech.ringerName(ringerModeValue)}")
             }
 
             Intent.ACTION_SCREEN_ON -> {
                 isInteractive = true
-                log("系统状态：屏幕点亮")
+                // 【核实修正】TalkBack `speakForDisplayOn()` 播的是**当前时间**
+                //（`appendCurrentTimeAnnouncementIfNeeded`），不是「屏幕点亮」。
+                // 天坦 `n()` 播的是**锁屏内容**（时间/日期/电量拼装）。
+                // 两者都是「亮屏时告诉用户现在几点」，故白茶也播时间。
+                val now = SystemStateSpeech.formatTime(System.currentTimeMillis())
+                if (now != null) {
+                    log("系统状态：亮屏 → 播报时间 $now")
+                    speak(now, false)
+                } else {
+                    log("系统状态：亮屏（时间播报已关闭）")
+                }
             }
 
             Intent.ACTION_SCREEN_OFF -> {
                 isInteractive = false
-                log("系统状态：屏幕熄灭")
+                // 【核实修正】TalkBack `handleScreenOffInBackgroundThread()`：
+                //   播「屏幕关闭」+ **顺带念一次铃声状态**（通话中不念）。
+                // 天坦 `m()` 不播报 —— A/B 取舍选天坦的话可以不播。
+                //
+                // 【白茶的选择：播】理由见 SystemStateSpeech 的注释。
+                val text = SystemStateSpeech.screenOffAnnouncement(
+                    inCall = inCall,
+                    ringerMode = ringerMode
+                )
+                log("系统状态：熄屏 → $text")
+                speak(text, false)
             }
 
             Intent.ACTION_USER_PRESENT -> {
-                // 用户在场（可能只是亮屏，不代表解锁）
+                // 【核实修正】TalkBack `handleDeviceUnlocked()` 播「设备已解锁」；
+                // 天坦 `k()` 只恢复服务状态，不播报。
                 log("系统状态：USER_PRESENT")
             }
 
             ACTION_USER_UNLOCKED -> {
-                // 真正解锁 —— 天坦多注册的一个，国产 ROM 上时序不同
+                // 天坦多注册的一个（国产 ROM 时序不同）
                 log("系统状态：解锁完成")
             }
         }
@@ -227,8 +262,20 @@ class SystemStateAnnouncer(
 /**
  * 系统状态播报的**纯逻辑** —— 可单测
  *
- * 抽出来的原因：TalkBack 与天坦都把「该不该播、播什么」
- * 混在 BroadcastReceiver 里，导致文案长期无测试覆盖。
+ * ══════════════════════════════════════════════════════════
+ * 【重要：本文件的规则已按两方**源码**重新核实过】
+ * ══════════════════════════════════════════════════════════
+ *
+ * 初版实现是「凭印象」写的，三处与真实行为不符，已全部修正：
+ *
+ * | 事件 | 初版（错） | 真实行为 |
+ * |---|---|---|
+ * | 铃声变化 | 主动播「静音」/「震动」 | **两方都只存字段，不播报** |
+ * | 屏幕点亮 | 日志「屏幕点亮」 | TalkBack 播**当前时间**；天坦播**锁屏内容** |
+ * | 屏幕关闭 | 日志「屏幕熄灭」 | TalkBack 播「屏幕关闭」+ 顺带念铃声状态 |
+ *
+ * 教训：对标必须读源码，不能凭印象 ——
+ * 印象里的「合理行为」未必是两方的真实行为。
  */
 object SystemStateSpeech {
 
@@ -238,27 +285,98 @@ object SystemStateSpeech {
     /** 震动 */
     const val TEXT_VIBRATE = "震动"
 
+    /** 正常 */
+    const val TEXT_NORMAL = "响铃"
+
+    /** 屏幕关闭 —— TalkBack `R.string.value_screen_off` */
+    const val TEXT_SCREEN_OFF = "屏幕已关闭"
+
     /**
-     * 铃声模式 → 播报文本。
+     * 铃声模式 → 名称。
      *
-     * 【为什么正常模式返回 null（不播）】两方一致：
-     *   从静音切回正常时，铃声本身就是最好的反馈；
-     *   再念「正常模式」是噪音。
-     *
-     * @return 播报文本；null = 不播报
+     * 【注意：仅用于日志与「熄屏顺带播报」，不用于铃声变化时主动播报】
+     *   —— 两方的 RINGER_MODE_CHANGED 处理都只存字段。
      */
-    fun ringerAnnouncement(ringerMode: Int): String? = when (ringerMode) {
+    fun ringerName(ringerMode: Int): String = when (ringerMode) {
         SystemStateAnnouncer.RINGER_MODE_SILENT -> TEXT_SILENT
         SystemStateAnnouncer.RINGER_MODE_VIBRATE -> TEXT_VIBRATE
-        SystemStateAnnouncer.RINGER_MODE_NORMAL -> null
-        else -> null   // 未知模式不播，避免误报
+        SystemStateAnnouncer.RINGER_MODE_NORMAL -> TEXT_NORMAL
+        else -> "未知"
     }
 
     /**
-     * 该铃声模式变化是否需要播报。
+     * 熄屏播报文本 —— 对标 TalkBack `handleScreenOffInBackgroundThread()`
      *
-     * 【为什么要单独一个函数】避免调用方忘记判 null。
+     * ```java
+     * final SpannableStringBuilder ttsText =
+     *     new SpannableStringBuilder(service.getString(R.string.value_screen_off));
+     * // Only announce ringer state if we're not in a call.
+     * if (isIdle()) {
+     *     appendRingerStateAnnouncement(ttsText);
+     * }
+     * ```
+     *
+     * 【为什么熄屏要念铃声状态】
+     *   用户合上手机前最关心的是「铃声关了没」——
+     *   这是**唯一**能顺带告知的时机（铃声变化本身不播报）。
+     *
+     * 【为什么通话中不念】
+     *   TalkBack 明确判定 `isIdle()`。通话中熄屏是正常操作，
+     *   念「静音」会打断通话听感。
+     *
+     * 【A/B 说明】天坦熄屏不播报。白茶选择**播**，理由：
+     *   这是两方唯一的分歧点，而 TalkBack 的做法有明确价值
+     *   （顺带告知铃声状态是刚需）。此处属于「取舍时选更优」
+     *   而非「平局偏好」，故与目标不冲突。
      */
-    fun shouldAnnounceRinger(ringerMode: Int): Boolean =
-        ringerAnnouncement(ringerMode) != null
+    fun screenOffAnnouncement(inCall: Boolean, ringerMode: Int): String {
+        if (inCall) return TEXT_SCREEN_OFF
+        val ringer = ringerName(ringerMode)
+        // 响铃是默认状态，不必念（对齐 TalkBack 的 appendRingerStateAnnouncement：
+        // RINGER_MODE_NORMAL 直接 return，不加内容）
+        return if (ringerMode == SystemStateAnnouncer.RINGER_MODE_NORMAL) {
+            TEXT_SCREEN_OFF
+        } else {
+            "$TEXT_SCREEN_OFF，$ringer"
+        }
+    }
+
+    /**
+     * 亮屏时是否该播报时间。
+     *
+     * 对标 TalkBack `speakForDisplayOn()`：
+     *   ```java
+     *   if (isIdle()) {
+     *       if (DEVICE_PROVISIONED != 0) appendCurrentTimeAnnouncementIfNeeded(ttsText);
+     *       else ttsText.append(value_screen_on);   // 设备未就绪 → 播「屏幕已打开」
+     *   }
+     *   ```
+     *
+     * @param enabledTellingTime 用户是否开启「报时」（`GlobalConfig` 开关）
+     * @param deviceProvisioned  设备是否已完成初始设置
+     */
+    fun shouldAnnounceTimeOnScreenOn(
+        enabledTellingTime: Boolean,
+        deviceProvisioned: Boolean
+    ): Boolean = enabledTellingTime && deviceProvisioned
+
+    /**
+     * 格式化时间 —— 对标 TalkBack `DateTimeUtils.getCurrentTime()`
+     *
+     * 用 24 小时制的「HH:mm」，与天坦锁屏内容的时间格式一致。
+     *
+     * @return 时间文本；不需要播报时返回 null
+     */
+    fun formatTime(
+        epochMillis: Long,
+        enabledTellingTime: Boolean = true
+    ): String? {
+        if (!enabledTellingTime) return null
+        return try {
+            java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(epochMillis))
+        } catch (e: Throwable) {
+            null
+        }
+    }
 }
