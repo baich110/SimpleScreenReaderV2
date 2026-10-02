@@ -281,10 +281,10 @@ class AccessibilityEventHandler(
                 handleNodeEvent(event, "选中", interrupt = true)
             }
 
-            // ---------- 8 / 4096: 滚动 ----------
+            // ---------- 4096: 滚动（8 = TYPE_VIEW_FOCUSED，在下面单独处理）----------
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> handleScroll(event)
 
-            // ---------- 16: 焦点 ----------
+            // ---------- 8: 焦点 ----------
             AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
                 speakNode(event.source, "焦点")
             }
@@ -325,7 +325,7 @@ class AccessibilityEventHandler(
                 log("焦点清除")
             }
 
-            // ---------- 128: 触摸探索 ----------
+            // ---------- 128: 悬停进入（TYPE_VIEW_HOVER_ENTER）----------
             AccessibilityEvent.TYPE_VIEW_HOVER_ENTER -> {
                 // ★ 天坦行为：触摸一碰先打断当前播报
                 speech.interruptChannelA()
@@ -336,7 +336,7 @@ class AccessibilityEventHandler(
                 // 离开不播报
             }
 
-            // ---------- 2048: 文本变化 ----------
+            // ---------- 2048: 内容变化（TYPE_WINDOW_CONTENT_CHANGED）----------
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
                 val node = event.source
                 val text = node?.text?.toString()?.trim().orEmpty()
@@ -400,7 +400,7 @@ class AccessibilityEventHandler(
                 CacheRegistry.invalidate(CacheRegistry.Level.WINDOW)
             }
 
-            // ---------- 16384: 粒度遍历 ----------
+            // ---------- 131072: 粒度遍历 ----------
             AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY -> {
                 // ★ 用 extractTraversedText 取「当前粒度单元」，而不是整段文本
                 //
@@ -420,17 +420,57 @@ class AccessibilityEventHandler(
                 }
             }
 
-            // ---------- 131072: 拖拽 ----------
-            131072 -> {
-                val text = compose(event.source)
-                if (!text.isNullOrBlank()) {
-                    log("拖拽: $text")
-                    speech.speak(text, interrupt = true)
-                    haptic.focus()
-                }
-            }
+            // ══════════════════════════════════════════════════════════
+            // 【★ 本轮删除：这里原本有一个「拖拽」分支，是**死代码 + 语义错误**】
+            // ══════════════════════════════════════════════════════════
+            //
+            // 原代码：
+            // ```kotlin
+            //   // ---------- 131072: <误标为「拖拽」> ----------
+            //   131072 -> {
+            //       val text = compose(event.source)
+            //       ...
+            //       log("拖拽: $text")
+            //       speech.speak(text, interrupt = true)
+            //       haptic.focus()
+            //   }
+            // ```
+            //
+            // 【问题一：131072 不是拖拽事件】Android 官方取值（AOSP
+            // `AccessibilityEvent`）：
+            // | 值 | 常量 |
+            // |---|---|
+            // | **131072** | `TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY` |
+            // | 262144 | `TYPE_GESTURE_DETECTION_START` |
+            // | 524288 | `TYPE_GESTURE_DETECTION_END` |
+            //
+            // Android **没有**「拖拽事件」这个事件类型 —— 拖拽能力是
+            // `AccessibilityNodeInfo.AccessibilityAction.ACTION_DRAG_START / DROP / CANCEL`
+            // （**动作**，不是事件）。
+            //
+            // 【问题二：它与上面的粒度遍历分支**值相同**】
+            // 上面第 404 行的分支用的就是
+            // `TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY`（= 131072）。
+            // Kotlin 的 `when` **只取第一个匹配**，所以这个分支
+            // **永远不可达** —— 而编译器**不会报错**，
+            // 单测也不会失败（因为没人能构造出走到这里的事件）。
+            //
+            // 【问题三：注释把人带偏】注释原文把它标成了「拖拽」，
+            // 后来人查排障会以为 131072 是拖拽事件。
+            //
+            // 【天坦的做法】`w7/AbstractC3659a.java:54`：
+            // ```java
+            //   return accessibilityEvent.getEventType() == 131072
+            //       && accessibilityEvent.getMovementGranularity() == 1;
+            // ```
+            // —— 131072 就是**粒度遍历**，且要判
+            // `getMovementGranularity() == 1`（按字）。
+            //
+            // 【处置】删除该分支（不是改成别的数字 —— 那会凭空发明语义）。
+            // 若将来确实需要拖拽能力，应按 `ACTION_DRAG_*` **动作**实现，
+            // 而不是伪造一个事件类型。
 
-            // ---------- 262144: 上下文点击 ----------
+            // ---------- 8388608: 上下文点击（TYPE_VIEW_CONTEXT_CLICKED）----------
             AccessibilityEvent.TYPE_VIEW_CONTEXT_CLICKED -> {
                 val text = compose(event.source)
                 log("上下文点击: ${text ?: "(无内容)"}")
