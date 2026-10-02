@@ -63,22 +63,35 @@ object ShouldFocusNode {
     private val tempRect2 = Rect()
 
     /**
-     * 边界基准 —— 对应天坦 f39008c
+     * 边界基准 —— 对应天坦 f39008c / f39007b
      *
-     * 【天坦语义】
-     *   f39007b : 是否已初始化（null = 未初始化）
-     *   f39008c : 基准边界 —— 取自**本轮判定处理的第一个节点**
+     * 【天坦语义（重要，容易搞错）】
+     *   f39007b : 句柄对象（null = 未初始化）
+     *   f39008c : 基准边界 —— 取自**本轮操作处理的第一个可见节点**
      *
      *   c(node) 检查 `node 的边界 == f39008c`，用于识别
      *   「节点与基准同大小」的情况（通常是根容器或整屏节点）。
      *
-     *   初始化时机：r() 里首次遇到可见节点时，用
-     *   `AbstractC3688i.h(node).a(f39008c)` 取该节点的**内容边界**写入。
-     *   清理时机：d() 里置 null（每次 e() 结束后调用）。
+     * 【生命周期 —— 天坦的关键设计】
+     *
+     *   初始化：r() 里首次遇到可见节点时写入。
+     *   清理：  `d()` 置 null，而 `d()` 在 **M6.h.D() 的每条退出路径**上
+     *           都会被调用（源码里共 26 处）。
+     *
+     *   也就是说基准的作用域是 **「一次导航操作」**，不是「一个窗口」。
+     *
+     * 【原实现的 bug】
+     *   本项目原先只在 `onWindowChanged()` 里清理 —— 作用域被拉长成「一个窗口」。
+     *   后果：基准一旦被某个节点写入，后续所有判定都拿它比较，
+     *   微信特判（"图像"/"浮窗"）的命中条件几乎永远不成立或永远成立。
+     *
+     * 【修正】
+     *   新增 `resetOperationScope()`，在每次 FocusManager.moveFocus() 结束后调用，
+     *   与天坦的 per-operation 作用域一致。
      */
     private val baselineBounds = Rect()
 
-    /** 基准是否已初始化 —— 对应天坦 f39007b */
+    /** 基准是否已初始化 —— 对应天坦 f39007b（null 判定） */
     private var baselineInitialized = false
 
     /**
@@ -87,10 +100,28 @@ object ShouldFocusNode {
      * 【修正】去掉了跨调用的 cache（内容 hash 做 key 且无失效机制 = 读到过期结果）。
      * 现在只保留一个「本次判定的递归深度护栏」，无需外部清理。
      */
+    /**
+     * 全量清理 —— 窗口/内容变化时调用（对应天坦 d()）
+     */
     fun clear() {
         tempRect.setEmpty()
         tempRect2.setEmpty()
         baselineBounds.setEmpty()
+        baselineInitialized = false
+    }
+
+    /**
+     * 重置「本次操作」的作用域 —— 每次导航结束后调用
+     *
+     * 对应天坦在 `M6.h.D()` 每条退出路径上调用 `C3678d.f39006a.d()`。
+     *
+     * 为什么必须按操作重置：
+     *   基准的作用是识别「当前正在处理的这个节点是否与基准同大小」。
+     *   跨操作保留基准会导致判定条件失真。
+     *
+     * 【性能】只重置基准，不动 tempRect（那两个是纯临时缓冲）。
+     */
+    fun resetOperationScope() {
         baselineInitialized = false
     }
 
@@ -263,9 +294,19 @@ object ShouldFocusNode {
         if (count > 3) return true
 
         node.getBoundsInScreen(tempRect)
-        // 【修正】天坦用 HashSet<o0.w>（identity）。这里也必须 identity，
+        // 【语义】天坦用 HashSet<o0.w>（identity）。这里也必须 identity，
         // 否则内容相同的兄弟节点会被误判为重复 → 返回 false（漏判）。
-        val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>()
+        //
+        // 【性能】天坦的 f39012g 是**静态复用**的 HashSet（每次 d() 清空）。
+        //   本项目原先每次调用 new 一个 IdentityHashMap → 判定热路径上的分配。
+        //   改为复用同一个实例：因为本方法是判定的一部分，每次进入
+        //   都先 clear()，语义与天坦一致，但省掉一次分配。
+        //
+        //   注意：复用的前提是「本方法不重入」。hasChildContent 内部会递归调用
+        //   r()，而 r() 又可能再次进入 hasChildContent —— 所以**不能复用**。
+        //   这里保持每次分配（正确性优先），但用 IdentityHashMap 而非 HashSet
+        //   以减少哈希冲突开销。
+        val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(4)
         for (idx in 0 until count) {
             val child = node.getChild(idx) ?: continue
             if (seen.containsKey(child)) return false

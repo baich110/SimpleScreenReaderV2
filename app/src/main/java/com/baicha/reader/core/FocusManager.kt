@@ -237,6 +237,21 @@ class FocusManager(
         strategyType: Int = TraversalStrategyFactory.TYPE_DEFAULT,
         filter: ((AccessibilityNodeInfo) -> Boolean)? = null
     ): AccessibilityNodeInfo? {
+        // ★ 对应天坦：C3678d.d() 在 M6.h.D() 每条退出路径上调用（26 处）
+        //   用 try/finally 一次覆盖全部退出路径，比 26 处手动调用更可靠
+        return try {
+            moveFocusInternal(direction, strategyType, filter)
+        } finally {
+            ShouldFocusNode.resetOperationScope()
+        }
+    }
+
+    /** 导航实现主体 */
+    private fun moveFocusInternal(
+        direction: Int,
+        strategyType: Int,
+        filter: ((AccessibilityNodeInfo) -> Boolean)?
+    ): AccessibilityNodeInfo? {
         // ★ ① 滚动中拦截（天坦行为）
         if (isScrolling && isScrollStateFresh()) {
             if (isSameScrollDirection(direction)) {
