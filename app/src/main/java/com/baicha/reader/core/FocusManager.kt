@@ -182,6 +182,19 @@ class FocusManager(
      */
     var scrollJump: ((top: Boolean) -> Boolean)? = null
 
+    /**
+     * 焦点成功设置后的回调 —— 用于采集节点路径。
+     *
+     * 【为什么用回调而不是让 FocusManager 自己持有路径】
+     *   与 granularityMover / scrollJump 同构：FocusManager 不持有
+     *   恢复状态，保持可测；路径的存储与使用由服务层负责。
+     *
+     * 【为什么在这里采集而不是在事件处理器里】
+     *   applyFocus 是「我们主动设焦点」的唯一出口 ——
+     *   在这里采集能保证每次主动聚焦都留下路径。
+     */
+    var onFocusApplied: ((node: AccessibilityNodeInfo) -> Unit)? = null
+
     /** 本次导航是否为「跳到顶部」 */
     @Volatile
     private var scrollJumpToTop = true
@@ -595,6 +608,9 @@ class FocusManager(
             focusGeneration++
             // ★ 记录可编辑焦点（供 FocusMonitor 的历史回退）
             monitor?.recordEditableFocus(node)
+            // ★ 采集节点路径（供屏幕状态恢复时按特征找回）
+            //   对应用户可感知的问题：焦点恢复时永远跳第一个
+            onFocusApplied?.invoke(node)
         }
         return ok
     }

@@ -154,6 +154,16 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var imeAdapter: ImeAdapter
         private set
 
+    /**
+     * 最近一次聚焦的节点路径 —— 用于跨屏幕状态/窗口变化的焦点恢复。
+     *
+     * 【为什么存路径而不是存节点引用】
+     *   节点会被 RecyclerView 回收，引用失效后指向别的 item。
+     *   路径是「特征描述」，可在新树里重新定位。
+     */
+    @Volatile
+    private var lastFocusPath: NodePath? = null
+
     // ==================== 朗读设置 ====================
 
     /** 语序（对应天坦 GlobalConfig.z()） */
@@ -390,6 +400,15 @@ class ReaderAccessibilityService : AccessibilityService() {
                 false   // 系统不支持 → 回退到普通遍历
             }
         }
+        // ★ 采集焦点路径 —— 供恢复时按特征找回（抗节点回收）
+        //
+        // 修复的真机问题：原来 restoreInitialFocus 无条件取第一个节点，
+        // 导致息屏亮屏/切换 App 后焦点跳到页面顶部。
+        focus.onFocusApplied = { node ->
+            val path = NodePath.of(node)
+            if (path != null) lastFocusPath = path
+        }
+
         // ★ 滚动定位委托（跳到顶部/底部）—— P1-1
         //
         // 对齐 TalkBack ACTION_SCROLL_TO_POSITION：
@@ -998,8 +1017,49 @@ class ReaderAccessibilityService : AccessibilityService() {
      *
      * 策略：找本窗口内第一个可聚焦节点并设焦点。
      */
+    /**
+     * 恢复焦点 —— 修复「永远跳到第一个节点」
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【原来错在哪】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 原实现无条件调 `FocusSearch.findFirstFocus()` ——
+     * 名字叫「恢复焦点」，行为是「聚焦第一个节点」。
+     *
+     * 真机后果：息屏亮屏 / 切换 App 后，焦点**无条件跳到页面顶部**。
+     * 用户读了半屏内容，锁屏再解锁就回到开头。
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【现在的策略（三路降级）】
+     * ══════════════════════════════════════════════════════════
+     *
+     *   ① 有路径记录 → NodePathResolver 按路径特征找回（抗节点回收）
+     *   ② 路径找不到 → 退回「第一个可聚焦节点」（原来的行为）
+     *
+     * 路径在每次成功聚焦时采集（见 `focus.onFocusApplied`）。
+     */
     private fun restoreInitialFocus(force: Boolean) {
         val root = rootInActiveWindow ?: return
+
+        // ① 先试路径恢复 —— 这是本能力的核心价值
+        val restored = NodePathResolver.resolve(root, lastFocusPath)
+        if (restored != null && ShouldFocusNode.shouldFocus(restored)) {
+            if (focus.applyFocus(restored, force = true)) {
+                eventHandler.recordFocusAction(
+                    ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION
+                )
+                eventHandler.speakNode(restored, "恢复焦点(路径)")
+                log("恢复焦点：按路径找回成功")
+                return
+            }
+        }
+
+        // ② 路径不可用 → 退回第一个（保持原行为，不静默失败）
+        log(
+            if (lastFocusPath == null) "恢复焦点：无路径记录 → 取第一个"
+            else "恢复焦点：路径未命中 → 取第一个"
+        )
 
         val strategy = TraversalStrategyFactory.createDefault(
             root = root,
