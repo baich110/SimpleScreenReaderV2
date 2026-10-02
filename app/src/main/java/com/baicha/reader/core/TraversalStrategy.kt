@@ -414,6 +414,31 @@ object TraversalStrategyFactory {
     /** 空间查找（按几何方向找最近节点）—— 本项目新增，对应 TalkBack DirectionalTraversalStrategy */
     const val TYPE_SPATIAL = 100
 
+    /**
+     * 创建遍历策略
+     *
+     * ⚠️ **必须用具名参数调用**，或按 (strategyType, root, filter) 顺序传全三个参数。
+     *
+     * 【为什么强调这点】
+     *   本方法的第一个参数是 `strategyType: Int`，不是 `root`。
+     *   如果写成 `create(root) { ... }`（漏掉 strategyType），
+     *   编译器报的是「root 位置收到 Int」这类**难以定位**的错误。
+     *
+     *   更危险的情况：如果将来把 filter 改成有默认值，
+     *   漏参数**不会报错**，而是静默用错配置。
+     *
+     *   推荐写法：
+     *     TraversalStrategyFactory.create(
+     *         strategyType = TraversalStrategyFactory.TYPE_DEFAULT,
+     *         root = root,
+     *         filter = { ShouldFocusNode.shouldFocus(it) }
+     *     )
+     */
+    fun createDefault(
+        root: AccessibilityNodeInfo?,
+        filter: (AccessibilityNodeInfo) -> Boolean
+    ): TraversalStrategy = create(TYPE_DEFAULT, root, filter)
+
     fun create(
         strategyType: Int,
         root: AccessibilityNodeInfo?,

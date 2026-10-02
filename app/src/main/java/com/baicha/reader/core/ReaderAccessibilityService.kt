@@ -116,6 +116,10 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var voiceScroll: VoiceScrollTracker
         private set
 
+    /** 屏幕状态变化后的焦点恢复（对应 TalkBack FocusProcessorForScreenStateChange） */
+    lateinit var screenRecovery: ScreenStateRecovery
+        private set
+
     /** 朗读替换引擎（两级作用域 + 正则） */
     lateinit var replacement: ReadReplacementEngine
         private set
@@ -143,6 +147,24 @@ class ReaderAccessibilityService : AccessibilityService() {
     // ==================== 内部状态 ====================
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * 最近一次焦点动作的时间与来源
+     *
+     * 供 ScreenStateRecovery 做「用户在窗口切换期间是否已操作」的竞态判定。
+     * 对应 TalkBack 的 AccessibilityFocusActionHistory。
+     */
+    @Volatile
+    private var lastFocusActionTime = 0L
+
+    @Volatile
+    private var lastFocusActionSource = 0
+
+    /** 记录一次焦点动作 */
+    private fun recordFocusAction(source: Int) {
+        lastFocusActionTime = SystemClock.uptimeMillis()
+        lastFocusActionSource = source
+    }
 
     /**
      * 去重：上次朗读的节点**身份**
@@ -201,6 +223,26 @@ class ReaderAccessibilityService : AccessibilityService() {
         ShouldFocusNode.cache = nodeCache
 
         focus = FocusManager(this)
+        screenRecovery = ScreenStateRecovery(
+            getCurrentFocus = { focus.getFocused() },
+            getActiveWindowId = {
+                try {
+                    windows?.firstOrNull { it.isActive }?.id ?: -1
+                } catch (e: Throwable) {
+                    -1
+                }
+            },
+            isWindowAccessibilityFocused = {
+                try {
+                    windows?.firstOrNull { it.isActive }?.isAccessibilityFocused ?: false
+                } catch (e: Throwable) {
+                    false
+                }
+            },
+            onRestoreFocus = { force -> restoreInitialFocus(force) },
+            getLastFocusActionTime = { lastFocusActionTime },
+            getLastFocusActionSource = { lastFocusActionSource }
+        )
         speech = SpeechEngine(this).apply {
             enginePackage = TtsEngineManager.getSavedEngine(this@ReaderAccessibilityService)
             speechRate = TtsEngineManager.getRate(this@ReaderAccessibilityService)
@@ -652,6 +694,72 @@ class ReaderAccessibilityService : AccessibilityService() {
         // 播报页面标题
         val title = event.text?.joinToString("")?.trim().orEmpty()
         if (title.isNotEmpty()) speech.speak(title, interrupt = true)
+
+        // ★ 屏幕状态变化后的焦点恢复 —— 对应 TalkBack onScreenStateChanged
+        //
+        // TalkBack 的延迟逻辑：窗口切换刚开始（耗时 < 500ms）时先等一等，
+        // 因为「会先播报窗口标题，用户感觉不到延迟」，同时给窗口切换留出时间。
+        val transitionStart = event.eventTime
+        val elapsed = SystemClock.uptimeMillis() - transitionStart
+
+        if (ScreenStateTiming.shouldDelay(elapsed)) {
+            mainHandler.postDelayed(
+                { performScreenStateRecovery(transitionStart) },
+                ScreenStateTiming.WINDOW_CHANGE_DELAY_MS - elapsed
+            )
+        } else {
+            performScreenStateRecovery(transitionStart)
+        }
+    }
+
+    /**
+     * 执行屏幕状态恢复
+     */
+    private fun performScreenStateRecovery(transitionStart: Long) {
+        try {
+            val ok = screenRecovery.onScreenStateChanged(transitionStart)
+            if (ok) {
+                log("屏幕状态恢复: ${screenRecovery.stats()}")
+            }
+        } catch (e: Throwable) {
+            ReaderLog.w("Service", "屏幕状态恢复失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 恢复初始焦点 —— 对应 TalkBack 的 pipeline.input(WindowChange)
+     *
+     * 策略：
+     *   ① 优先用焦点历史里的锚点位置找最近的节点
+     *   ② 退化到「窗口内第一个可聚焦节点」
+     */
+    private fun restoreInitialFocus(force: Boolean) {
+        val root = rootInActiveWindow ?: return
+
+        // ① 找第一个可聚焦（本窗口）
+        val strategy = TraversalStrategyFactory.createDefault(
+            root = root,
+            filter = { ShouldFocusNode.shouldFocus(it) }
+        )
+        val first = try {
+            FocusSearch.findFirstFocus(
+                traversal = strategy,
+                root = root,
+                direction = TraversalDirection.FORWARD,
+                filter = { ShouldFocusNode.shouldFocus(it) }
+            )
+        } finally {
+            strategy.release()
+        }
+
+        if (first != null) {
+            if (focus.applyFocus(first)) {
+                recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION)
+                speakNode(first, "恢复焦点")
+            }
+        } else {
+            log("恢复焦点：本窗口无可聚焦节点")
+        }
     }
 
     /**
@@ -753,6 +861,8 @@ class ReaderAccessibilityService : AccessibilityService() {
         val spoken = text ?: roleName!!
         log("触摸: $spoken")
         speech.speak(spoken, interrupt = true)
+        // 记录触摸探索动作（供屏幕状态恢复的竞态判定）
+        recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_TOUCH_EXPLORATION)
         focus.focusForTouch(node)
         playFocusSound(node)
     }
@@ -872,6 +982,9 @@ class ReaderAccessibilityService : AccessibilityService() {
      * 焦点移动 —— 供手势链调用
      */
     private fun moveFocusInternal(forward: Boolean): Boolean {
+        // 记录逻辑导航动作（供屏幕状态恢复的竞态判定）
+        recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION)
+
         val dir = if (forward) FocusManager.DIR_NEXT else FocusManager.DIR_PREVIOUS
         // ★ 走当前导航的模式与过滤器
         val node = focus.moveFocus(
