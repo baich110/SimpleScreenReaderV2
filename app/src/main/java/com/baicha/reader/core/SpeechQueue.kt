@@ -121,14 +121,60 @@ class SpeechQueue(
      * @return 需要立即执行打断的信号数（0 = 只入队，1 = 需要打断当前）
      */
     fun enqueue(item: SpeechItem): EnqueueResult {
-        synchronized(lock) {
+        // 被丢弃项的回调 —— 在**锁外**统一触发
+        //
+        // 【为什么不在锁内调】回调是调用方提供的任意代码，
+        // 可能耗时（TTS 调用、写日志、跨进程查询）。
+        // 在锁内执行会阻塞其它线程的 enqueue/pollNext ——
+        // 读屏的播报在无障碍线程与主线程间高频切换，
+        // 持锁时间被拉长直接表现为「播报延迟、滑动变卡」。
+        //
+        // （注：**同线程**重入本类的 synchronized 方法不会死锁 ——
+        //   JVM monitor 可重入。这一点我最初判断错了，已在测试类里更正。）
+        val discardedCallbacks = ArrayList<SpeechItem>(4)
+
+        val result = synchronized(lock) {
             val needInterrupt = SpeechFlags.has(item.flags, SpeechFlags.FLUSH)
 
             // FLUSH：清空待播队列
+            //
+            // ══════════════════════════════════════════════════════════
+            // 【★ 本轮修复：被 FLUSH 丢弃的项必须通知 onDone】
+            // ══════════════════════════════════════════════════════════
+            //
+            // 原来这里只标记 `cancelled = true` 就 `clear()`，**不调用
+            // onDone**；而 `clear()` 方法对同样被丢弃的项**是会调的**。
+            // 两条路径语义不一致。
+            //
+            // 【为什么必须统一】`onDone` 的语义是「这一项结束了
+            // （无论是播完还是被取消），通知调用方」。
+            // 调用方若依赖它做资源释放 / 状态复位 / 流程推进，
+            // 那一项的回调就**永远不会来** —— 表现为功能静默卡住，
+            // 属于目标里点名的错误模式⑨「静默失败」。
+            //
+            // 【真机场景】用户快速滑动时焦点高频切换，FLUSH 是常态；
+            // 一旦有功能依赖播报完成回调（如连续朗读的分段推进、
+            // 播报完成才解锁下一步），就会卡在那一段不再前进。
+            //
+            // 【当前是否已有症状】`SpeechEngine` 目前不设置 `onDone`，
+            // 故尚无实际症状 —— 但这是 API 契约不一致，必须先修。
+            //
+            // 【注意顺序】回调必须在**锁外**执行，见下方收集后统一触发。
             if (needInterrupt) {
-                pending.forEach { it.cancelled = true }
-                pending.clear()
-                current?.let { it.cancelled = true }
+                var i = 0
+                while (pending.isNotEmpty()) {
+                    val discarded = pending.removeFirst()
+                    if (!discarded.cancelled) {
+                        discarded.cancelled = true
+                        discardedCallbacks.add(discarded)
+                    }
+                    i++
+                }
+                val cur = current
+                if (cur != null && !cur.cancelled) {
+                    cur.cancelled = true
+                    discardedCallbacks.add(cur)
+                }
             }
 
             // 去重：相同文本已在队列中 → 跳过
@@ -147,8 +193,19 @@ class SpeechQueue(
             }
 
             pending.addLast(item)
-            return EnqueueResult(needInterrupt, false)
+            EnqueueResult(needInterrupt, false)
         }
+
+        // ★ 锁外触发被丢弃项的回调（见方法开头的说明）
+        for (discarded in discardedCallbacks) {
+            try {
+                discarded.onDone?.invoke()
+            } catch (e: Throwable) {
+                ReaderLog.w("SpeechQueue", "onDone 回调异常: ${e.message}")
+            }
+        }
+
+        return result
     }
 
     /** 入队结果 */
@@ -212,29 +269,50 @@ class SpeechQueue(
      * @return 被取消的项数
      */
     fun clear(keepCurrent: Boolean = false): Int {
-        synchronized(lock) {
-            var count = 0
-            // 触发被取消项的回调（让上层知道）
+        // 与 enqueue 的 FLUSH 路径保持一致：**锁外**触发回调
+        //
+        // 【为什么改】原来 `onDone` 在 `synchronized` 内执行。
+        // 回调是调用方任意代码，可能耗时（TTS 调用 / 写日志 / 跨进程查询），
+        // 持锁期间会阻塞其它线程的 enqueue/pollNext ——
+        // 读屏播报在无障碍线程与主线程间高频切换，
+        // 持锁时间被拉长直接表现为「播报延迟、滑动变卡」。
+        //
+        // 【顺带统一语义】被丢弃的项**一律**通知 onDone，
+        // 与 FLUSH 路径行为一致（本轮同时修了 FLUSH 不通知的缺陷）。
+        val toNotify = ArrayList<SpeechItem>(4)
+
+        val count = synchronized(lock) {
+            var n = 0
             while (pending.isNotEmpty()) {
                 val item = pending.removeFirst()
                 if (!item.cancelled) {
                     item.cancelled = true
-                    item.onDone?.invoke()
-                    count++
+                    toNotify.add(item)
+                    n++
                 }
             }
             if (!keepCurrent) {
                 current?.let {
                     if (!it.cancelled) {
                         it.cancelled = true
-                        it.onDone?.invoke()
-                        count++
+                        toNotify.add(it)
+                        n++
                     }
                 }
                 current = null
             }
-            return count
+            n
         }
+
+        for (item in toNotify) {
+            try {
+                item.onDone?.invoke()
+            } catch (e: Throwable) {
+                ReaderLog.w("SpeechQueue", "onDone 回调异常: ${e.message}")
+            }
+        }
+
+        return count
     }
 
     fun stats(): String = "[$channelName] 播报 $spokenCount / 丢弃 $droppedCount / 待播 $size"
