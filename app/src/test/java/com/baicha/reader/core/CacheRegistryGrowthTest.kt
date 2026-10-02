@@ -228,3 +228,94 @@ class CacheRegistryGrowthTest {
         )
     }
 }
+
+/**
+ * 注册类 API —— **服务重启不得累积**（通用守卫）
+ *
+ * ══════════════════════════════════════════════════════════
+ * 【为什么单独立这个类】
+ * ══════════════════════════════════════════════════════════
+ *
+ * 本轮修完 `CacheRegistry` 后，按纪律⑦「主动检查服务启动路径」，
+ * 我用脚本扫了 `onServiceConnected` 里所有 `register/add/attach/observe`
+ * 调用，逐一核实是否有「重启累积」风险：
+ *
+ * | 调用 | 目标 | 判定 |
+ * |---|---|---|
+ * | `CacheRegistry.register` ×7 | **object 单例** | ❌ 真缺陷，本轮已修（去重） |
+ * | `ttsObserver.register` | **class 实例** | ✅ 安全 —— `if (registered) return true` 守卫，且每次 onServiceConnected 新建实例 |
+ * | `systemState.register` | **class 实例** | ✅ 安全 —— 同上 |
+ * | `gestureChain.register` ×3 | **class 实例** | ✅ 安全 —— `gestureChain = GestureChain()` 每次重建（:352），注册在 :671 |
+ *
+ * ⇒ **只有 object 单例才是风险**（实例类随实例重建而自然清空）。
+ *
+ * 本测试把这个结论**固化成自动检查** —— 将来若有人把某个
+ * `register` 的目标改成 object 单例、或去掉实例守卫，这里会失败。
+ */
+class RegistrationLifecycleTest {
+
+    private fun codeOf(path: String) = java.io.File(path).readText()
+        .lines()
+        .filterNot { it.trimStart().startsWith("//") || it.trimStart().startsWith("*") }
+        .joinToString("\n")
+
+    /**
+     * ★ object 单例的 `register` 必须有去重逻辑
+     *
+     * 判据：出现 `indexOfFirst` / `contains` / `distinct` 之类的查重。
+     */
+    @Test
+    fun singletonRegister_deduplicates() {
+        val cr = codeOf("src/main/java/com/baicha/reader/core/CacheRegistry.kt")
+        assertTrue("CacheRegistry 必须是 object 单例", cr.contains("object CacheRegistry"))
+        val idx = cr.indexOf("fun register(")
+        assertTrue("必须存在 register", idx >= 0)
+        val body = cr.substring(idx, minOf(cr.length, idx + 1200))
+        assertTrue(
+            "★ object 单例的 register 必须去重（同名覆盖）—— " +
+                    "否则服务每次重启都累积 handler：旧服务实例被 lambda " +
+                    "强引用无法回收（内存泄漏）+ 每次 invalidate 执行 n 倍回调。\n$body",
+            body.contains("indexOfFirst") || body.contains("contains") ||
+                    body.contains("distinct") || body.contains("put(")
+        )
+    }
+
+    /**
+     * ★ 实例类的 register 必须有「已注册」守卫
+     *
+     * 判据：函数体开头有 `if (registered) return true` 之类。
+     */
+    @Test
+    fun instanceRegister_hasGuard() {
+        for (f in listOf("TtsSettingsObserver", "SystemStateAnnouncer")) {
+            val src = codeOf("src/main/java/com/baicha/reader/core/$f.kt")
+            val idx = src.indexOf("fun register()")
+            assertTrue("$f 必须有 register()", idx >= 0)
+            val body = src.substring(idx, minOf(src.length, idx + 400))
+            assertTrue(
+                "$f.register 必须有「已注册则直接返回」的守卫（防重复注册）:\n$body",
+                body.contains("if (registered) return")
+            )
+        }
+    }
+
+    /**
+     * ★ `gestureChain` 必须在注册 Actor **之前**重建
+     *
+     * 否则重启后会拿着旧实例往里加 Actor，导致 Actor 数量随重启增长。
+     */
+    @Test
+    fun gestureChain_isRecreatedBeforeRegisteringActors() {
+        val src = codeOf("src/main/java/com/baicha/reader/core/ReaderAccessibilityService.kt")
+        val createIdx = src.indexOf("gestureChain = GestureChain()")
+        val setupCallIdx = src.indexOf("setupGestureChain()")
+        assertTrue("必须重建 gestureChain", createIdx >= 0)
+        assertTrue("必须调用 setupGestureChain", setupCallIdx >= 0)
+        assertTrue(
+            "★ `gestureChain = GestureChain()` 必须排在 `setupGestureChain()` 之前 —— " +
+                    "否则重启后 Actor 会在旧实例上累积。" +
+                    "实际：创建在 $createIdx，注册在 $setupCallIdx",
+            createIdx < setupCallIdx
+        )
+    }
+}
