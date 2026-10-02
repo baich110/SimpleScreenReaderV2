@@ -101,8 +101,12 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var gestureChain: GestureChain
         private set
 
-    /** 导航管理器（26 种导航模式的分发） */
+    /** 导航管理器（27 种导航模式的分发） */
     lateinit var navigation: NavigationManager
+        private set
+
+    /** 朗读替换引擎（两级作用域 + 正则） */
+    lateinit var replacement: ReadReplacementEngine
         private set
 
     // ==================== 辅助组件 ====================
@@ -178,6 +182,7 @@ class ReaderAccessibilityService : AccessibilityService() {
             volume = TtsEngineManager.getVolume(this@ReaderAccessibilityService)
         }
         gestureChain = GestureChain()
+        replacement = ReadReplacementEngine()
         navigation = NavigationManager().apply {
             onModeChanged = { mode ->
                 // 切换导航后清缓存（过滤器变了，判定结果不再有效）
@@ -675,12 +680,14 @@ class ReaderAccessibilityService : AccessibilityService() {
     ): String? {
         if (node == null) return null
         return nodeCache.composeText(node) {
-            SpeechCompositor.compose(
+            val raw = SpeechCompositor.compose(
                 node = node,
                 order = speechOrder,
                 includeRole = includeRole,
                 granularity = navigation.granularityLevel()
             )
+            // ★ 应用朗读替换（两级作用域）
+            replacement.apply(raw, node.packageName?.toString())
         }
     }
 
