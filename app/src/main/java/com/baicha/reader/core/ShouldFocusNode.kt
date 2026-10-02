@@ -423,6 +423,49 @@ object ShouldFocusNode {
             }
         }
 
+        // ══════════════════════════════════════════════════════════════
+        // ⑤-b 【TalkBack 独有】窗口级根容器拒绝
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【为什么加这一条】三方对照时发现：这一步 **TalkBack 有、天坦没有**，
+        //   而白茶此前两边都没有 —— 属于双方对照出的**共同空白**。
+        //
+        // 【TalkBack 原文】`AccessibilityNodeInfoUtils.java:870~880`：
+        // ```java
+        //   if (areBoundsIdenticalToWindow(node)
+        //       && node.getChildCount() > 0
+        //       && !isFocusableOrClickable(node)) {
+        //     logShouldFocusNode(checkChildren, FOCUS_FAIL_SAME_WINDOW_BOUNDS_CHILDREN,
+        //         "Don't focus, bounds are same as window root node bounds, node has children and"
+        //             + " is neither actionable nor focusable: ", node);
+        //     return false;
+        //   }
+        // ```
+        //   而 `areBoundsIdenticalToWindow`（`:2428~2447`）取的是
+        //   **窗口对象**的 `getBoundsInScreen` 与节点边界比较 —— 与白茶
+        //   ⑤ 步的 `baselineBounds`（同样取自 `node.window`）语义一致。
+        //
+        // 【与 ⑤ 步的区别 —— 两者不是重复】
+        //   ⑤（天坦）：`同边界 && 有子` ⇒ 再看 `k/i`，**条件成立才拒**
+        //               （微信特判、非微信要 `k && i`）
+        //   ⑤-b（TalkBack）：`同边界 && 有子 && 不可操作不可聚焦` ⇒ **直接拒**
+        //   天坦的 `k(node)` = `isFocusable || isClickable`，
+        //   而 TalkBack 的 `isFocusableOrClickable` 多含
+        //   `isScreenReaderFocusable` 且**先要求 `isVisible`**。
+        //   ⇒ ⑤-b 覆盖了天坦 ⑤ 在「非微信 + 非 k」时的漏网情形。
+        //
+        // 【真机为什么需要它】真机 Compose 树的根是
+        //   `FrameLayout [0,0][1280,2772]` —— 正好命中
+        //   「边界等于窗口 + 有子 + 不可操作不可聚焦」。
+        //   放行它 ⇒ 焦点落到根容器 ⇒ 整屏没有可朗读内容。
+        //
+        // 【注意】TalkBack 的 `isFocusableOrClickable` 内部含 `isVisible(node)`，
+        //   而此处节点必然可见（前面已过 `isVisible` 校验），
+        //   故等价于 `isScreenReaderFocusable || isActionableForAccessibility`。
+        if (baselineInitialized && isSameBounds(node, baselineBounds) && node.childCount > 0) {
+            if (!isFocusableOrClickable(node)) return false
+        }
+
         // ⑥ 角色判定
         val role = NodeRoleHelper.roleOf(node)
 
@@ -468,7 +511,20 @@ object ShouldFocusNode {
             if (!z9) return z11
 
             if (z11) {
-                if (node.childCount == 0 || p(node)) return true
+                // ⚠️ 【已删除的旧行】这里是照抄旧函数 `C3678d.shouldFocus` 的
+                //   `if (nodeInfo.getChildCount() == 0
+                //       || hasContentOrActionableChild(nodeInfo)) return true;`
+                //   本项目对应 `if (node.childCount == 0 || p(node)) return true`。
+                //   **这一行就是真机 20 个空容器被放行的真正原因** ——
+                //   `p(node)`（`hasContentOrActionableChild`）对
+                //   「有可聚焦子节点」的容器返回 **true**，
+                //   于是 `ChildCount != 0 + 有可聚焦子` 的容器在这里
+                //   **提前 return true**，根本走不到下面的新尾巴。
+                //   真机 Compose 树里这类容器有 20 个
+                //   （`View` + `focusable=true` + `clickable=true` + 无文本 + 有可见子），
+                //   白茶全部放行 ⇒ 焦点停在容器上 ⇒ 只能走两个焦点。
+                //   天坦真正生效的 `shouldFocusNodeInternal` **没有这一行**。
+                //
                 // ★★ 修复真机 P0：这里原是 `k(node) && !k(node)` ——
                 //   **恒为 false**（一个条件与自己取反做与运算），
                 //   导致该分支永不返回 true。
@@ -493,7 +549,61 @@ object ShouldFocusNode {
                 //   这正对应用户的实测描述：
                 //   「左右滑动从来都没有正常获取到焦点过，
                 //     一到边界或者是没有焦点的那种震动反馈」。
-                return k(node) && !hasChildContent(node)
+                //
+                // ══════════════════════════════════════════════════════════
+                // 【★★★ 真机 P0 根因（第三轮）：这一支抄的是**旧函数**
+                //   `C3678d.shouldFocus`，而真正生效的是
+                //   `AccessibilityNodeInfoUtils.shouldFocusNodeInternal`】
+                // ══════════════════════════════════════════════════════════
+                //
+                // 【旧函数】`w7/FocusFinder.java:371~374`（= C3678d）：
+                // ```java
+                //   if (z11) {
+                //       if (nodeInfo.getChildCount() == 0
+                //           || hasContentOrActionableChild(nodeInfo)) return true;
+                //       return NodeUtils.isFocusableOrSelectable(nodeInfo)
+                //           && !hasFocusableChild(nodeInfo);
+                //   }
+                // ```
+                // ← 白茶一直照抄的是**这一支**。
+                //
+                // 【真正生效的函数】
+                // `w7/AccessibilityNodeInfoUtils.java:971~984`：
+                // ```java
+                //   if (z11) {
+                //       recycleAll(hashSet);
+                //       hashSet.clear();
+                //       if (!hasVisibleChildren(nodeInfo)) {
+                //           logIfEnabled(z9, "Focus, %s is focusable and has no visible children", ...);
+                //           return true;                    // ① 无可见子 → 接受
+                //       }
+                //       if (hasSomethingToSpeakInternal(nodeInfo, map, hashSet)) {
+                //           logIfEnabled(z9, "Focus, %s is focusable and has something to speak", ...);
+                //           return true;                    // ② 有可朗读内容 → 接受
+                //       }
+                //       logIfEnabled(z9, "Don't focus, %s is focusable but has nothing to speak", ...);
+                //       return false;                       // ③ 有可见子且无内容 → **拒绝**
+                //   }
+                // ```
+                // 而它由公开入口 `shouldFocusNodeWithCache(node, map)`（`:894~897`）
+                // **传 z9=true** 调用 —— 这才是导航实际走的路径。
+                //
+                // 【两者的差别就是真机卡住的原因】
+                //   真机 Compose 树里**大量存在**
+                //   `focusable=true + clickable=true + **无任何文本**` 的
+                //   `android.view.View` 容器（我的真机 dump 实测 20 个）。
+                //   旧分支：`childCount != 0 && !hasContentOrActionableChild`
+                //           → 落到 `k(node) && !hasChildContent(node)`，
+                //             而这类容器 `k()` 为真（clickable）⇒ **可能被接受**。
+                //   真分支：这类容器**有可见子节点**且**自己没内容可朗读**
+                //           → 走到 ③ **被拒绝** ✔
+                //   ⇒ 白茶放行了这些容器 ⇒ 焦点停在它们上面 ⇒
+                //     每次滑动都在容器之间打转 ⇒ 用户「只能走两个焦点」。
+                //
+                // 【修复】按**真正生效的** `shouldFocusNodeInternal` 改写这一支。
+                if (!hasVisibleChildren(node)) return true
+                if (hasSomethingToSpeak(node)) return true
+                return false
             }
 
             // ══════════════════════════════════════════════════════════
@@ -724,7 +834,57 @@ object ShouldFocusNode {
      */
     private fun isVisible(node: AccessibilityNodeInfo): Boolean {
         if (node.isVisibleToUser) return true
-        return isInRecyclerView(node) && !isType15(node)
+        // ② TalkBack 的 WebView 兜底
+        //
+        // 【TalkBack 原文】`AccessibilityNodeInfoUtils.java:2364~2371`：
+        // ```java
+        // public static boolean isVisible(AccessibilityNodeInfoCompat node) {
+        //   // We need to move focus to invisible node in WebView to scroll it but we don't want to
+        //   // move focus if WebView itself is invisible.
+        //   return node != null
+        //       && (node.isVisibleToUser()
+        //           || (WebInterfaceUtils.isWebContainer(node)
+        //               && Role.getRole(node) != Role.ROLE_WEB_VIEW));
+        // }
+        // ```
+        // 【语义】WebView **内部**的节点即使 `isVisibleToUser=false` 也视为可见
+        //   （否则无法聚焦到需要滚动才显现的网页元素）；
+        //   但 WebView **容器本身**不享受这个豁免（容器不可见就是真不可见）。
+        //
+        // 【天坦的对应实现】`AccessibilityNodeInfoUtils.java:570~578` 兜底的是
+        //   **RecyclerView** 而非 WebView：
+        // ```java
+        //   return NodeNavigator.isInRecyclerView(nodeInfo)
+        //       && EventUtils.getNodeType(nodeInfo) != 15;
+        // ```
+        //   注意天坦的 `!= 15` 与 TalkBack 的 `Role != ROLE_WEB_VIEW`
+        //   是**同一个数字 15**（白茶 `NodeRoleHelper.ROLE_WEB_VIEW = 15`
+        //   正是从这个常量来的）—— 两者在此处语义殊途同归：
+        //   都排除「WebView 容器自身」。
+        //
+        // 【两方对照的结论】两者的**豁免对象不同**
+        //   （TalkBack 豁免 WebView 内部节点；天坦豁免 RecyclerView 内节点），
+        //   但**排除条件一致**。此处两条都保留：
+        //   真机的 RecyclerView 列表和网页都需要各自的兜底。
+        return (isInRecyclerView(node) && !isType15(node)) || isVisibleWebContent(node)
+    }
+
+    /**
+     * TalkBack `WebInterfaceUtils.isWebContainer(node) && Role != ROLE_WEB_VIEW`
+     * —— `AccessibilityNodeInfoUtils.java:2369~2370`
+     *
+     * `isWebContainer` 即「该节点是网页内容容器」（具备 Web 动作能力）。
+     * 白茶已有 `WebNavigator.supportsWebActions`（对齐 TalkBack
+     * `WebInterfaceUtils.supportsWebActions()`），此处复用它。
+     */
+    private fun isVisibleWebContent(node: AccessibilityNodeInfo): Boolean = try {
+        if (NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_WEB_VIEW) {
+            false  // WebView 容器自身不豁免
+        } else {
+            WebElementNavigation.isSupported(node)
+        }
+    } catch (e: Throwable) {
+        false
     }
 
     /**
@@ -868,6 +1028,40 @@ object ShouldFocusNode {
 
         // ③ hasRangeInfo：区间有效 **且** current 落在区间内
         return hasRangeInfo(node)
+    }
+
+    /**
+     * ★ TalkBack `isFocusableOrClickable(node)` —— `:1908~1912`
+     *
+     * 【原文】
+     * ```java
+     * private static boolean isFocusableOrClickable(AccessibilityNodeInfoCompat node) {
+     *   return (node != null)
+     *       && isVisible(node)
+     *       && (node.isScreenReaderFocusable() || isActionableForAccessibility(node));
+     * }
+     * ```
+     *
+     * 【`isActionableForAccessibility` 在 TalkBack 里的定义】
+     * `:1159~1178`：
+     * ```java
+     *   if (isClickable(node) || isLongClickable(node)) return true;   // ①
+     *   if (node.isFocusable()) return true;                           // ②
+     *   if (WebInterfaceUtils.hasNativeWebContent(node)) { ... }        // ③ Web 特判
+     * ```
+     * ⇒ ①② 合起来就是「可点击 / 可长按 / 可聚焦」。
+     *
+     * 【与天坦 `k(node)` 的差异】天坦 `k(node)` = `H(node) || N(node)`，
+     *   只含 `isFocusable`/`isClickable`/`isLongClickable` 与动作位，
+     *   **不含 `isScreenReaderFocusable`**。TalkBack 多这一项。
+     *   本函数用于 ⑤-b（TalkBack 独有条），故按 TalkBack 语义实现。
+     */
+    private fun isFocusableOrClickable(node: AccessibilityNodeInfo): Boolean = try {
+        isVisible(node) &&
+            (isScreenReaderFocusable(node) || node.isClickable ||
+                node.isLongClickable || node.isFocusable)
+    } catch (e: Throwable) {
+        false
     }
 
     /**
@@ -1394,6 +1588,63 @@ object ShouldFocusNode {
         val hasHint = !node.hintText.isNullOrEmpty()              // A()
         return hasMainText || hasContentDesc || hasHint
     }
+
+    /**
+     * 天坦 `AccessibilityNodeInfoUtils.hasVisibleChildren(node)`
+     *
+     * 依据 `w7/AccessibilityNodeInfoUtils.java:975` 的使用处；其实现为
+     * 「是否存在 `isVisibleToUser()` 为真的直接子节点」。
+     *
+     * 【为什么用**直接子节点**】这一支的语义是「这个可聚焦容器下面
+     * 还有没有可见的东西可看」—— 若没有，容器本身就是最底层，
+     * 直接接受它（①）；若有，则要判断「有没有内容可朗读」（②③）。
+     */
+    private fun hasVisibleChildren(node: AccessibilityNodeInfo): Boolean {
+        val count = try { node.childCount } catch (e: Throwable) { return false }
+        if (count <= 0) return false
+        for (i in 0 until count) {
+            val child = try { node.getChild(i) } catch (e: Throwable) { null } ?: continue
+            if (isVisibleToUserOrNull(child)) return true
+        }
+        return false
+    }
+
+    private fun isVisibleToUserOrNull(node: AccessibilityNodeInfo): Boolean = try {
+        node.isVisibleToUser
+    } catch (e: Throwable) {
+        false
+    }
+
+    /**
+     * 天坦 `AccessibilityNodeInfoUtils.hasSomethingToSpeakInternal(node, map, set)`
+     *
+     * 【本处用它回答的问题】「这个可聚焦的容器**自己**有没有值得朗读的内容」。
+     *
+     * 【判定组成】（`NodeUtils.B(node)` = `AbstractC3693m.B`）：
+     * ```java
+     *   public static boolean B(o0.w wVar) {
+     *       if (wVar != null) {
+     *           return !TextUtils.isEmpty(wVar.J())     // J() = stateDescription
+     *               || wVar.Y()                          // Y() = 勾选类状态
+     *               || D(wVar);                          // D() = 有进度信息
+     *       }
+     *       return false;
+     *     }
+     * ```
+     * 本项目对应 [hasSpeakableContent]（已按可读版逐条核实过）。
+     *
+     * 【为什么**不**包含 text/contentDescription】
+     * 因为这一支的前提是 `z11` 为真（`isAccessibilityFocusable`），
+     * 即节点本身是 `isScreenReaderFocusable` 或可点击的**容器**。
+     * 天坦对「容器 + 有文本」的情形由**另一支**（`!z11` 的
+     * `hasTextOrContent` 兜底）处理。两者不能混。
+     */
+    private fun hasSomethingToSpeak(node: AccessibilityNodeInfo): Boolean =
+        try {
+            hasSpeakableContent(node)
+        } catch (e: Throwable) {
+            false
+        }
 
     /**
      * 有子节点内容 —— 天坦 C3678d.k()

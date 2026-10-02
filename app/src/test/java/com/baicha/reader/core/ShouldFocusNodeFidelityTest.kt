@@ -69,16 +69,38 @@ class ShouldFocusNodeFidelityTest {
     }
 
     /**
-     * ★★ 该分支必须同时调用两个**不同**的判定函数
+     * ★★★ 真机 P0 根因护栏：`z11` 分支必须照抄**真正生效的**
+     * `AccessibilityNodeInfoUtils.shouldFocusNodeInternal`，而不是旧函数
+     * `FocusFinder.shouldFocus`（= C3678d）。
      *
-     * 天坦：`AbstractC3688i.k(wVar) && !k(wVar)`
-     * 本项目：`k(node) && !hasChildContent(node)`
+     * 【两个函数的差别】
+     *   旧函数：`if (childCount == 0 || hasContentOrActionableChild) return true;`
+     *           —— 对「有可聚焦子节点」的容器**放行**。
+     *   真函数：`!hasVisibleChildren → true`；`hasSomethingToSpeak → true`；否则 false
+     *           —— 对「有可见子且自己没内容」的容器**拒绝**。
+     *
+     * 【为什么必须拒绝】真机 Compose 树里大量存在
+     * `focusable=true + clickable=true + 无任何文本 + 有可见子` 的
+     * `android.view.View` 容器（我的真机 dump 实测 20 个）。
+     * 放行它们 ⇒ 焦点停在容器上 ⇒ 用户「左右滑动只能走两个焦点」。
      */
     @Test
-    fun branch_uses_two_distinct_functions() {
-        assertTrue(
-            "该分支应是 k(node) && !hasChildContent(node)",
+    fun z11_branch_matches_live_function_not_legacy() {
+        assertFalse(
+            "z11 分支不得残留旧函数的 hasContentOrActionableChild 提前放行（真机 P0 根因）",
+            code.contains("if (node.childCount == 0 || p(node)) return true")
+        )
+        assertFalse(
+            "z11 分支不得使用旧函数的自否定尾巴 k(node) && !hasChildContent(node)",
             code.contains("return k(node) && !hasChildContent(node)")
+        )
+        assertTrue(
+            "z11 分支必须按真函数实现：无可见子 → true",
+            code.contains("if (!hasVisibleChildren(node)) return true")
+        )
+        assertTrue(
+            "z11 分支必须按真函数实现：有可朗读内容 → true",
+            code.contains("if (hasSomethingToSpeak(node)) return true")
         )
     }
 
