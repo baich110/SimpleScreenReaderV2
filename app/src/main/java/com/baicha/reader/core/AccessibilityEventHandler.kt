@@ -77,21 +77,6 @@ class AccessibilityEventHandler(
 
     companion object {
 
-        /**
-         * 动作 ID —— 与 `AccessibilityNodeInfo.ACTION_*` 一致
-         *
-         * 【为什么用字面量而不是引用 android 常量】
-         * 这些值同时要与天坦源码对照（`matchActionMask3(node, 1, 16, 32)`
-         * 用的是字面量），写成同名常量后**两边一眼能对上**。
-         * 取值已由 `IsActionableFidelityTest.actionIdsMatchPlatformConstants`
-         * 与官方常量逐条断言锁定。
-         */
-        private const val ACTION_FOCUS = 1
-        private const val ACTION_CLICK = 16
-        private const val ACTION_LONG_CLICK = 32
-        private const val ACTION_NEXT_HTML_ELEMENT = 1024
-        private const val ACTION_PREVIOUS_HTML_ELEMENT = 2048
-
         private const val TAG = "EventHandler"
 
         /** 滚动节流窗口 —— 天坦 ProcessorScroll 用 250ms */
@@ -914,49 +899,14 @@ class AccessibilityEventHandler(
      * 【为什么用 hasAction 辅助函数】与天坦的 `hasAction(node, id)`
      * 同名同义，便于将来对照维护；也让本方法读起来与源码同构。
      */
-    private fun isActionable(node: AccessibilityNodeInfo): Boolean {
-        if (node.isFocusable) return true
-        if (node.isClickable) return true
-        if (node.isLongClickable) return true
-        return try {
-            // ① 位掩码路径 —— 天坦 `(actions & i9) == i9`
-            //
-            //    `AccessibilityNodeInfo.getActions()` 返回一个位掩码，
-            //    与 `getActionList()`（结构化动作表）是**两个独立字段**。
-            //    只查其中一个会漏掉另一部分节点。
-            val actions = node.actions
-            val maskHit = (actions and ACTION_FOCUS) == ACTION_FOCUS ||
-                    (actions and ACTION_CLICK) == ACTION_CLICK ||
-                    (actions and ACTION_LONG_CLICK) == ACTION_LONG_CLICK ||
-                    (actions and ACTION_NEXT_HTML_ELEMENT) == ACTION_NEXT_HTML_ELEMENT ||
-                    (actions and ACTION_PREVIOUS_HTML_ELEMENT) == ACTION_PREVIOUS_HTML_ELEMENT
-            if (maskHit) return true
-
-            // ② 动作表路径 —— 天坦 `hasAction(nodeInfo, i9)`
-            node.actionList.any { hasActionId(it.id) }
+    private fun isActionable(node: AccessibilityNodeInfo): Boolean =
+        try {
+            ShouldFocusNode.isActionableLike(node)
         } catch (e: Throwable) {
+            // 节点已回收时读属性会抛 IllegalStateException
             false
         }
-    }
 
-    /**
-     * 天坦 `NodeUtils.hasAction(nodeInfo, id)` 的「id 匹配」部分
-     *
-     * 天坦检查的五个动作 ID（`matchActionMask3` + `matchActionMask2`）：
-     * | ID | 常量 | 来源 |
-     * |---|---|---|
-     * | 1 | `ACTION_FOCUS` | `matchActionMask3` 第 1 参 |
-     * | 16 | `ACTION_CLICK` | 第 2 参 |
-     * | 32 | `ACTION_LONG_CLICK` | 第 3 参 |
-     * | 1024 | `ACTION_NEXT_HTML_ELEMENT` | `matchActionMask2` 第 1 参（`f23604z`）|
-     * | 2048 | `ACTION_PREVIOUS_HTML_ELEMENT` | 第 2 参 |
-     */
-    private fun hasActionId(id: Int): Boolean =
-        id == ACTION_FOCUS ||
-                id == ACTION_CLICK ||
-                id == ACTION_LONG_CLICK ||
-                id == ACTION_NEXT_HTML_ELEMENT ||
-                id == ACTION_PREVIOUS_HTML_ELEMENT
 
     private fun updateScreenState() {
         val now = SystemClock.uptimeMillis()

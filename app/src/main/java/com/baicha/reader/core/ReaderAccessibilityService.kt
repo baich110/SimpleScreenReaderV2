@@ -938,20 +938,37 @@ class ReaderAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 天坦 AbstractC3688i.j(node) —— 节点是否可操作
+     * 节点是否「可操作」—— 1:1 对应天坦 `w7/NodeUtils.java:136~139`
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮修复：本函数与 AccessibilityEventHandler 里的是**同一份逻辑的
+     *   两份拷贝**，且**两份都错**（同样的两处偏差）】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 偏差 A：动作 ID 写成 **131072**（那是**事件**常量
+     *   `TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY`），
+     *   天坦用的是 `f23604z` = **1024** = `ACTION_NEXT_HTML_ELEMENT`
+     *   （见 `o0/NodeInfo.java:477`）—— 131072 作为 action id 恒不匹配。
+     *
+     * 偏差 B：只查 `actionList`，漏了 `getActions()` **位掩码**路径。
+     *   两者是独立字段（天坦 `matchActionMask3` 第一条就是
+     *   `(actions & i9) == i9`）。
+     *
+     * 【本处的后果与 Handler 里不同】这里用于
+     * `playFocusSound()`（`:908~919`）选择**音效与震动**：
+     *   · 判「可操作」→ `focusActionable` + `haptic.focusClickable()`
+     *   · 判「不可操作」→ `focus` + `haptic.focus()`
+     * 判定恒偏「不可操作」的后果是：可点击元素**本该给出"可点击"的
+     * 音效/震动提示，却给了普通文本的** ——
+     * 视障用户靠这个音效区分「这里能点」和「这里只是文字」，
+     * 判错等于**拿掉了他的一个判断依据**。
+     *
+     * 【为什么抽成共享实现】现在两处都调用
+     * `ShouldFocusNode.isActionableLike()`（单一来源），
+     * 避免将来再出现「改了一处忘了另一处」。
      */
-    private fun isActionable(node: AccessibilityNodeInfo): Boolean {
-        if (node.isFocusable) return true
-        if (node.isClickable) return true
-        if (node.isLongClickable) return true
-        return try {
-            node.actionList.any {
-                it.id == 1 || it.id == 16 || it.id == 32 || it.id == 131072 || it.id == 2048
-            }
-        } catch (e: Throwable) {
-            false
-        }
-    }
+    private fun isActionable(node: AccessibilityNodeInfo): Boolean =
+        ShouldFocusNode.isActionableLike(node)
 
     // ==================== 手势 ====================
 

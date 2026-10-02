@@ -830,7 +830,17 @@ object ShouldFocusNode {
      *     || y(wVar, VAD_z, 2048);           // 有「滚动」类 action
      * ```
      */
-    private fun isActionableLike(node: AccessibilityNodeInfo): Boolean =
+    /**
+     * 【★ 本轮改为 internal 可见】供 `ReaderAccessibilityService.playFocusSound()`
+     * 与 `AccessibilityEventHandler` **共用同一份实现**。
+     *
+     * 【为什么必须共享】这两个地方原先各自抄了一份
+     * `it.id == 1 || ... || it.id == 131072 || ...` 的**错误**版本
+     * （131072 是事件常量，恒不匹配；且漏了位掩码路径）。
+     * 抄两份的必然结果是「改一处忘一处」——
+     * 本类里这份是对的，那两份是错的，正是实例。
+     */
+    internal fun isActionableLike(node: AccessibilityNodeInfo): Boolean =
         // ★★ P1 修复（本轮）：拆成与天坦一致的两路判定
         //
         // 【天坦原文】`w7/AbstractC3688i.java:125~128` 的 `j()`：

@@ -95,30 +95,29 @@ class IsActionableFidelityTest {
      */
     @Test
     fun doesNotUseEventConstantAsActionId() {
+        // 扫描**两个**曾经各自抄一份的地方，以及共享实现
+        val all = handler + codeOf("src/main/java/com/baicha/reader/core/ShouldFocusNode.kt")
+        val offenders = Regex("(?m)^[^/\\n]*131072").findAll(all).count()
         assertFalse(
-            "★ isActionable 里不得出现 131072 —— 它是**事件**常量" +
+            "★ 不得再把 131072 当动作 ID —— 它是**事件**常量" +
                     "（TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY），" +
                     "作为 action id 永远为假。天坦用的是 1024" +
-                    "（ACTION_NEXT_HTML_ELEMENT）。\n${body()}",
-            body().contains("131072")
+                    "（ACTION_NEXT_HTML_ELEMENT）。发现 $offenders 处非注释出现。",
+            offenders > 0
         )
     }
 
     @Test
     fun usesActionNextHtmlElement1024() {
-        // 允许两种写法：字面量 1024 或具名常量 ACTION_NEXT_HTML_ELEMENT
-        // （用常量更好 —— 但**取值必须真的是 1024**，
-        //   由 actionIdsMatchPlatformConstants 与官方常量锁定）
-        val b = body()
+        // 实现已统一到 ShouldFocusNode.isActionableLike —— 那里必须有 1024
+        val sf = codeOf("src/main/java/com/baicha/reader/core/ShouldFocusNode.kt")
         assertTrue(
-            "必须检查 1024（ACTION_NEXT_HTML_ELEMENT）—— 与 2048 成对:\n$b",
-            b.contains("1024") || b.contains("ACTION_NEXT_HTML_ELEMENT")
+            "共享实现必须检查 1024（ACTION_NEXT_HTML_ELEMENT）—— 与 2048 成对",
+            sf.contains("ACTION_NEXT_HTML_ELEMENT") || sf.contains("1024")
         )
-        // 且常量定义处必须是 1024（不是 131072）
-        val all = handler
         assertTrue(
-            "ACTION_NEXT_HTML_ELEMENT 必须定义为 1024（天坦 f23604z = 1024）",
-            all.contains("ACTION_NEXT_HTML_ELEMENT = 1024")
+            "验证 1024 的真实取值：ACTION_NEXT_HTML_ELEMENT",
+            android.view.accessibility.AccessibilityNodeInfo.ACTION_NEXT_HTML_ELEMENT == 1024
         )
     }
 
@@ -143,19 +142,48 @@ class IsActionableFidelityTest {
      */
     @Test
     fun checksActionBitmaskNotOnlyActionList() {
-        val b = body()
-        val hasBitmask = b.contains("actions") || b.contains("hasAction(") ||
-                b.contains("bitmask") || b.contains("动作位掩码")
+        // 位掩码路径必须在**共享实现**（ShouldFocusNode）里
+        val sf = codeOf("src/main/java/com/baicha/reader/core/ShouldFocusNode.kt")
         assertTrue(
-            "★ isActionable 必须同时查 `getActions()` 位掩码 —— " +
-                    "天坦 matchActionMask3 的第一条就是 `(actions & i9) == i9`。\n" +
-                    "部分 App 只把动作放在位掩码里、不放进 actionList，" +
-                    "只查 actionList 会把那些节点判为不可操作 → **用户滑不到它们**。\n$b",
-            hasBitmask
+            "★ 必须同时查 getActions() 位掩码 —— 天坦 matchActionMask3 的" +
+                    "第一条就是 (actions & i9) == i9。部分 App 只把动作放在" +
+                    "位掩码里、不放进 actionList，只查 actionList 会把那些节点" +
+                    "判为不可操作 → **用户滑不到它们**。",
+            sf.contains("actions")
         )
         assertTrue(
-            "必须真的读 node.actions（而不是只查 actionList）:\n$b",
-            b.contains("node.actions") || b.contains(".actions")
+            "必须有取 node.actions 的代码",
+            sf.contains("node.actions") || sf.contains("getActions()")
+        )
+    }
+
+    /**
+     * ★★ 单一来源守卫：三个曾经各自实现的地方必须**都委托**给共享实现
+     *
+     * 【为什么】`isActionable` 原先在 `AccessibilityEventHandler` 与
+     * `ReaderAccessibilityService` 里各有一份**同样错误**的拷贝。
+     * 抄两份的必然结果是「改一处忘一处」。
+     */
+    @Test
+    fun singleSourceOfTruth_allCallSitesDelegate() {
+        val svc = codeOf("src/main/java/com/baicha/reader/core/ReaderAccessibilityService.kt")
+        assertTrue(
+            "★ ReaderAccessibilityService.isActionable 必须委托给共享实现 —— " +
+                    "它原先有一份与 Handler 同样错误的拷贝（131072 + 漏位掩码）",
+            svc.contains("ShouldFocusNode.isActionableLike(node)")
+        )
+        assertTrue(
+            "★ AccessibilityEventHandler.isActionable 也必须委托给共享实现",
+            handler.contains("ShouldFocusNode.isActionableLike(node)")
+        )
+        // 不得再出现各自实现的残留
+        assertFalse(
+            "Service 里不得再有 `it.id == 1 || it.id == 16` 这样的自制实现",
+            svc.contains("it.id == 1 || it.id == 16")
+        )
+        assertFalse(
+            "Handler 里不得再有自制实现",
+            handler.contains("it.id == 1 || it.id == 16")
         )
     }
 
@@ -163,10 +191,14 @@ class IsActionableFidelityTest {
 
     @Test
     fun keepsFocusableClickableLongClickable() {
-        val b = body()
-        assertTrue("必须保留 isFocusable 检查", b.contains("isFocusable"))
-        assertTrue("必须保留 isClickable 检查", b.contains("isClickable"))
-        assertTrue("必须保留 isLongClickable 检查", b.contains("isLongClickable"))
+        // 三个前置条件在**共享实现**里（ShouldFocusNode.isActionableLike）
+        val sf = codeOf("src/main/java/com/baicha/reader/core/ShouldFocusNode.kt")
+        val idx = sf.indexOf("fun isActionableLike(")
+        assertTrue("必须存在共享实现", idx >= 0)
+        val impl = sf.substring(idx, minOf(sf.length, idx + 900))
+        assertTrue("必须保留 isFocusable 检查:\n$impl", impl.contains("isFocusable"))
+        assertTrue("必须保留 isClickable 检查", impl.contains("isClickable"))
+        assertTrue("必须保留 isLongClickable 检查", impl.contains("isLongClickable"))
     }
 
     /** 异常必须被吞掉（节点已回收时读属性会抛 IllegalStateException） */
