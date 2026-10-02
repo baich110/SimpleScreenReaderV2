@@ -108,9 +108,31 @@ object NodeOrderComparator {
     var sortEnabled = true
 
     /**
+     * 外部注入的缓存 —— 由服务在启动时设置
+     *
+     * 这是**本项目独有的性能优化**：天坦每次遍历都重新排序子节点，
+     * 同一次滑动浏览里同一棵树被反复排序。加上缓存后，
+     * 同一父节点在一次窗口生命周期内只排一次。
+     */
+    @Volatile
+    var cache: NodeCache? = null
+
+    /**
      * 获取排序后的子节点列表 —— 1:1 抄天坦 a.q(parent, sort)
+     *
+     * 【性能】带缓存：同一父节点直接命中排序结果
      */
     fun sortChildren(parent: AccessibilityNodeInfo, sort: Boolean = true): List<AccessibilityNodeInfo> {
+        // 走缓存（只缓存需要排序的路径，不排序的直接构造）
+        val c = cache
+        if (c != null && sort) {
+            return c.getSortedChildren(parent) { sortChildrenUncached(parent, true) }
+        }
+        return sortChildrenUncached(parent, sort)
+    }
+
+    /** 无缓存的排序实现 */
+    private fun sortChildrenUncached(parent: AccessibilityNodeInfo, sort: Boolean): List<AccessibilityNodeInfo> {
         val count = parent.childCount
         if (count <= 0) return emptyList()
 

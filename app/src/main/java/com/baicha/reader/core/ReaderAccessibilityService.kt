@@ -162,6 +162,10 @@ class ReaderAccessibilityService : AccessibilityService() {
             selfPackageName = packageName
             isScreenOn = true
         }
+        // ★ 把缓存注入到热点路径（排序 + 可聚焦判定）
+        NodeOrderComparator.cache = nodeCache
+        ShouldFocusNode.cache = nodeCache
+
         focus = FocusManager(this)
         speech = SpeechEngine(this).apply {
             enginePackage = TtsEngineManager.getSavedEngine(this@ReaderAccessibilityService)
@@ -488,6 +492,9 @@ class ReaderAccessibilityService : AccessibilityService() {
         // ① 时间节流
         if (now - lastScrollTime < SCROLL_THROTTLE_MS) return
         lastScrollTime = now
+
+        // ★ 滚动后节点可见性变了 → 只失效判定/文本缓存（结构未变，子节点列表可留）
+        nodeCache.invalidateFocus()
 
         val node = event.source
         val nodeKey = node?.hashCode() ?: -1

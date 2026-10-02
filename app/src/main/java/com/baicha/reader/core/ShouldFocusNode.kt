@@ -83,8 +83,22 @@ object ShouldFocusNode {
      * 天坦的 f39007b/f39008c 只是「首次初始化边界」的哨兵，
      * 不是跨调用缓存。这里改为**不做持久缓存**，只在单次调用内递归用。
      */
+    /**
+     * 外部注入的缓存 —— 由服务在启动时设置
+     *
+     * 【性能】可聚焦判定要递归子树，代价高。
+     * 天坦的 f39013h 缓存只在单次 e() 调用内有效，跨调用无收益。
+     * 这里用 NodeCache 做跨调用缓存，窗口/内容变化时整体失效。
+     */
+    @Volatile
+    var cache: NodeCache? = null
+
     fun shouldFocus(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
+        val c = cache
+        if (c != null) {
+            return c.shouldFocus(node) { r(node, false, 0) }
+        }
         return r(node, false, 0)
     }
 
