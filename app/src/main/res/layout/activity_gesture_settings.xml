@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  手势配置页（D2）—— 对应天坦 TouchControlPreferencesActivity 的最小可用版
+
+  无障碍要点（视障用户用 TalkBack/天坦操作本页）：
+    · 每个手势项是一个可点击的按钮，contentDescription 含「手势名 + 当前动作」
+    · 用 ListView 而非自定义视图 —— 系统会自动提供正确的集合语义
+    · 48dp 以上触控目标
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/gesture_settings_title"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:paddingBottom="8dp" />
+
+    <TextView
+        android:id="@+id/txtGestureHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/gesture_settings_hint"
+        android:textSize="14sp"
+        android:paddingBottom="12dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingBottom="8dp">
+
+        <Button
+            android:id="@+id/btnResetAll"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:minHeight="48dp"
+            android:text="@string/gesture_reset_all" />
+
+        <Button
+            android:id="@+id/btnShowConflicts"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:minHeight="48dp"
+            android:text="@string/gesture_check_conflicts" />
+    </LinearLayout>
+
+    <!-- 用 ListView：系统自带正确的集合语义（读屏会播报「第 X 项，共 Y 项」）-->
+    <ListView
+        android:id="@+id/listGestures"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>

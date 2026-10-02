@@ -226,7 +226,25 @@ enum class GestureAction {
     TOGGLE_SPEAK,
 
     /** 停止播报 */
-    STOP_SPEAK
+    STOP_SPEAK;
+
+    companion object {
+        /**
+         * 从名字反查 —— 用于手势配置的持久化（A7）。
+         *
+         * 【为什么用 name 而不是序号存】
+         *   序号会随枚举重排而失效（在中间插一个新动作，
+         *   后面所有动作的序号全变，用户配置会串位）。
+         *   名字稳定，且可读 —— 便于排查。
+         *
+         * @return 对应动作；名字无法识别时返回 null
+         *         （调用方应跳过该项，而不是回退到错误动作）
+         */
+        fun fromName(name: String?): GestureAction? {
+            if (name.isNullOrEmpty()) return null
+            return values().firstOrNull { it.name == name }
+        }
+    }
 }
 
 /**
@@ -257,7 +275,57 @@ object GestureMap {
      *   三指双击 → 全局菜单
      *   四指双击 → 粒度切换
      */
-    fun actionOf(gestureId: Int): GestureAction = when (gestureId) {
+    /**
+     * 全部有映射的手势 ID —— 供配置页列出与一致性测试使用（A7）。
+     *
+     * 【为什么需要显式枚举】`actionOf` 是个 `when`，
+     * 无法从外部枚举它覆盖了哪些手势。
+     * 配置页要列出「所有可配置的手势」，必须有这个清单。
+     */
+    fun allMappedGestures(): List<Int> = listOf(
+        Gestures.GESTURE_SWIPE_LEFT, Gestures.GESTURE_SWIPE_RIGHT,
+        Gestures.GESTURE_SWIPE_UP, Gestures.GESTURE_SWIPE_DOWN,
+        Gestures.GESTURE_2_FINGER_SWIPE_UP, Gestures.GESTURE_2_FINGER_SWIPE_DOWN,
+        Gestures.GESTURE_2_FINGER_SWIPE_LEFT, Gestures.GESTURE_2_FINGER_SWIPE_RIGHT,
+        Gestures.GESTURE_3_FINGER_SWIPE_UP, Gestures.GESTURE_3_FINGER_SWIPE_DOWN,
+        Gestures.GESTURE_3_FINGER_SWIPE_LEFT, Gestures.GESTURE_3_FINGER_SWIPE_RIGHT,
+        Gestures.GESTURE_4_FINGER_SWIPE_UP, Gestures.GESTURE_4_FINGER_SWIPE_DOWN,
+        Gestures.GESTURE_4_FINGER_SWIPE_LEFT, Gestures.GESTURE_4_FINGER_SWIPE_RIGHT,
+        Gestures.GESTURE_DOUBLE_TAP, Gestures.GESTURE_DOUBLE_TAP_AND_HOLD,
+        Gestures.GESTURE_2_FINGER_SINGLE_TAP, Gestures.GESTURE_2_FINGER_DOUBLE_TAP,
+        Gestures.GESTURE_2_FINGER_TRIPLE_TAP, Gestures.GESTURE_3_FINGER_SINGLE_TAP,
+        Gestures.GESTURE_3_FINGER_DOUBLE_TAP, Gestures.GESTURE_3_FINGER_TRIPLE_TAP,
+        Gestures.GESTURE_4_FINGER_SINGLE_TAP, Gestures.GESTURE_4_FINGER_DOUBLE_TAP,
+        Gestures.GESTURE_4_FINGER_TRIPLE_TAP,
+        Gestures.GESTURE_2_FINGER_DOUBLE_TAP_AND_HOLD,
+        Gestures.GESTURE_3_FINGER_DOUBLE_TAP_AND_HOLD,
+        Gestures.GESTURE_4_FINGER_DOUBLE_TAP_AND_HOLD,
+        Gestures.GESTURE_2_FINGER_TRIPLE_TAP_AND_HOLD,
+        Gestures.GESTURE_3_FINGER_SINGLE_TAP_AND_HOLD,
+        Gestures.GESTURE_SWIPE_LEFT_AND_RIGHT, Gestures.GESTURE_SWIPE_RIGHT_AND_LEFT
+    )
+
+    fun actionOf(gestureId: Int): GestureAction {
+        // ★ A7：优先用配置存储（用户可覆盖）
+        //
+        // 【为什么不是替换掉整个 when】
+        //   `GestureStore` 的默认表与下面的 when 必须一致（测试里有断言）。
+        //   但 store 只在「已加载 / 有覆盖」时才给出非 NONE 结果，
+        //   为避免「store 未初始化就返回 NONE 把默认冲掉」，
+        //   这里的顺序是：store 有明确结果就用它，否则走 when 默认。
+        val fromStore = GestureStore.resolveOrNull(gestureId)
+        if (fromStore != null) return fromStore
+        return legacyActionOf(gestureId)
+    }
+
+    /**
+     * 硬编码默认映射 —— 保留作为 store 未初始化时的兜底。
+     *
+     * 【为什么不直接删掉】`GestureStore` 的默认表与它是同一份语义，
+     * 但 store 需要 Context 才能加载用户覆盖；在服务启动早期
+     * （尚未 load）时，仍要能给出正确的默认动作。
+     */
+    private fun legacyActionOf(gestureId: Int): GestureAction = when (gestureId) {
         // 单指滑动 —— 焦点导航
         Gestures.GESTURE_SWIPE_LEFT -> GestureAction.FOCUS_PREVIOUS
         Gestures.GESTURE_SWIPE_RIGHT -> GestureAction.FOCUS_NEXT

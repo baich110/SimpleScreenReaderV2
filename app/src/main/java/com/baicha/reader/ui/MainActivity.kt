@@ -33,6 +33,10 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnTtsSettings).setOnClickListener {
             startActivity(Intent(this, TtsSettingsActivity::class.java))
         }
+        // 手势配置（A7/D2）—— 让「手势可配置」真正落地
+        findViewById<Button>(R.id.btnGestureSettings).setOnClickListener {
+            startActivity(Intent(this, GestureSettingsActivity::class.java))
+        }
 
         findViewById<Button>(R.id.btnTest).setOnClickListener {
             ReaderAccessibilityService.instance?.speakTest("测试朗读，白茶读屏")

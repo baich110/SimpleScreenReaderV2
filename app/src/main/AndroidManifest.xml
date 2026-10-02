@@ -52,6 +52,12 @@
 
         <!-- 语音设置界面 -->
         <activity
+            android:name=".ui.GestureSettingsActivity"
+            android:exported="false"
+            android:label="@string/gesture_settings_title"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
             android:name=".ui.TtsSettingsActivity"
             android:exported="false"
             android:label="@string/tts_settings_title"

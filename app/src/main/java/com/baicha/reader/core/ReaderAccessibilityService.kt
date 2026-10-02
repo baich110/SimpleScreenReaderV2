@@ -439,6 +439,12 @@ class ReaderAccessibilityService : AccessibilityService() {
             currentText = { focus.getFocused()?.let { composeNode(it) } },
             log = { msg -> log(msg) }
         )
+        // ★ 加载手势配置（A7）
+        //
+        // 修复的问题：手势映射是 `GestureMap.actionOf()` 里写死的 when，
+        // 用户改不了、换手机带不走。
+        GestureStore.load(this)
+
         // ★ 实例化手势动作处理器
         //
         // 【本发现的一个严重缺陷】`gestureActions` 声明为 lateinit
