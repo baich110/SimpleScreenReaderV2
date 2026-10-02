@@ -1,0 +1,235 @@
+package com.baicha.reader.core
+
+import android.content.Context
+import android.media.AudioManager
+import android.view.KeyEvent
+import android.view.accessibility.AccessibilityNodeInfo
+
+/**
+ * 手势动作处理器 —— 从 `ReaderAccessibilityService` 抽出
+ *
+ * 【为什么抽出来】
+ *
+ * 原服务类 1196 行、38 个方法，混合了「服务生命周期 + 事件分发 + 手势动作 +
+ * 播报 + 工具方法」五类职责，可维护性差。
+ *
+ * 本类只负责**「手势 ID → 具体动作」的映射执行**，
+ * 依赖通过构造注入，可独立测试与替换。
+ *
+ * 【设计】
+ *   服务提供三个能力回调（移动焦点 / 滚动 / 播报），
+ *   本类负责其余全部手势动作（系统动作、媒体、音量、粒度、编辑、菜单）。
+ */
+class GestureActionHandler(
+    private val context: Context,
+    /** 移动焦点 —— 由服务提供 */
+    private val onMoveFocus: (forward: Boolean) -> Boolean,
+    /** 滚动 —— 由服务提供 */
+    private val onScroll: (forward: Boolean) -> Boolean,
+    /** 取当前操作目标节点 */
+    private val getTargetNode: () -> AccessibilityNodeInfo?,
+    /** 播报 */
+    private val speak: (text: String, interrupt: Boolean) -> Unit,
+    /** 停止播报 */
+    private val stopSpeech: () -> Unit,
+    /** 读屏开关状态读写 */
+    private val isSpeechEnabled: () -> Boolean,
+    private val setSpeechEnabled: (Boolean) -> Unit,
+    /** 导航管理器 */
+    private val navigation: NavigationManager,
+    /** 清缓存（粒度变化后调用） */
+    private val invalidateCache: () -> Unit,
+    /** 点击当前目标（兜底路径用） */
+    private val onClickTarget: () -> Boolean = { false },
+    /** 长按当前目标（兜底路径用） */
+    private val onLongClickTarget: () -> Boolean = { false }
+) {
+
+    private val audioManager: AudioManager? =
+        context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+
+    /** 全局动作执行器（系统级操作，由服务注入） */
+    @Volatile
+    var performGlobalAction: ((Int) -> Boolean)? = null
+
+    // ==================== 主入口 ====================
+
+    /**
+     * 执行按映射表派发的手势
+     *
+     * @return true = 已处理
+     */
+    fun handleMappedGesture(gestureId: Int): Boolean {
+        return when (GestureMap.actionOf(gestureId)) {
+            // ---- 点击/长按：由 GestureChain 硬编码优先处理，这里兜底 ----
+            GestureAction.CLICK -> onClickTarget()
+            GestureAction.LONG_CLICK -> onLongClickTarget()
+
+            // ---- 导航 ----
+            GestureAction.FOCUS_PREVIOUS -> onMoveFocus(false)
+            GestureAction.FOCUS_NEXT -> onMoveFocus(true)
+            GestureAction.SCROLL_BACKWARD -> onScroll(false)
+            GestureAction.SCROLL_FORWARD -> onScroll(true)
+
+            // ---- 系统动作 ----
+            GestureAction.BACK -> global(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+            GestureAction.HOME -> global(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+            GestureAction.RECENTS -> global(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS)
+            GestureAction.NOTIFICATIONS -> global(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
+            GestureAction.SCREENSHOT -> global(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
+            GestureAction.SCREEN_RECOGNIZE -> global(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN)
+
+            // ---- 播报控制 ----
+            GestureAction.STOP_SPEAK -> { stopSpeech(); true }
+            GestureAction.TOGGLE_SPEAK -> toggleSpeech()
+
+            // ---- 音量 ----
+            GestureAction.VOLUME_UP -> { adjustVolume(true); true }
+            GestureAction.VOLUME_DOWN -> { adjustVolume(false); true }
+
+            // ---- 媒体 ----
+            GestureAction.MEDIA_PREVIOUS, GestureAction.MEDIA_NEXT, GestureAction.MEDIA_PLAY_PAUSE ->
+                handleMediaGesture(gestureId)
+
+            // ---- 粒度（保留旧的 4 粒度切换）----
+            GestureAction.GRANULARITY_CHARACTER -> setGranularity(GranularityNavigator.Level.CHARACTER)
+            GestureAction.GRANULARITY_WORD -> setGranularity(GranularityNavigator.Level.WORD)
+            GestureAction.GRANULARITY_LINE -> setGranularity(GranularityNavigator.Level.LINE)
+            GestureAction.GRANULARITY_DEFAULT -> cycleGranularity()
+
+            // ---- 文本编辑 ----
+            GestureAction.COPY -> runEditAction(EditAction.COPY)
+            GestureAction.PASTE -> runEditAction(EditAction.PASTE)
+            GestureAction.CUT -> runEditAction(EditAction.CUT)
+            GestureAction.SELECT_ALL -> runEditAction(EditAction.SELECT_ALL)
+
+            // ---- 菜单 ----
+            GestureAction.GLOBAL_MENU -> { showGlobalMenu(); true }
+
+            GestureAction.NONE -> false
+        }
+    }
+
+    private fun global(action: Int): Boolean = performGlobalAction?.invoke(action) ?: false
+
+    // ==================== 播报开关 ====================
+
+    private fun toggleSpeech(): Boolean {
+        val enabled = !isSpeechEnabled()
+        setSpeechEnabled(enabled)
+        if (!enabled) stopSpeech()
+        speak(if (enabled) "读屏已开启" else "读屏已关闭", true)
+        return true
+    }
+
+    // ==================== 粒度 ====================
+
+    private fun setGranularity(level: GranularityNavigator.Level): Boolean {
+        GranularityNavigator.setLevel(level)
+        invalidateCache()
+        speak(GranularityNavigator.levelName(level), true)
+        return true
+    }
+
+    private fun cycleGranularity(): Boolean {
+        val level = GranularityNavigator.cycle()
+        invalidateCache()
+        speak(GranularityNavigator.levelName(level), true)
+        return true
+    }
+
+    // ==================== 音量 ====================
+
+    private fun adjustVolume(up: Boolean) {
+        val am = audioManager ?: return
+        try {
+            am.adjustStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                if (up) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER,
+                AudioManager.FLAG_SHOW_UI
+            )
+            val vol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val pct = if (max > 0) vol * 100 / max else 0
+            speak("音量 $pct%", true)
+        } catch (e: Exception) {
+            ReaderLog.w("GestureAction", "调音量失败: ${e.message}")
+        }
+    }
+
+    // ==================== 媒体 ====================
+
+    private fun handleMediaGesture(gestureId: Int): Boolean {
+        val keyCode = when (gestureId) {
+            Gestures.GESTURE_2_FINGER_SWIPE_LEFT -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            Gestures.GESTURE_2_FINGER_SWIPE_RIGHT -> KeyEvent.KEYCODE_MEDIA_NEXT
+            Gestures.GESTURE_2_FINGER_SINGLE_TAP -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            else -> return false
+        }
+        return sendMediaKey(keyCode)
+    }
+
+    private fun sendMediaKey(keyCode: Int): Boolean {
+        val am = audioManager ?: return false
+        return try {
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            true
+        } catch (e: Exception) {
+            ReaderLog.w("GestureAction", "媒体键失败: ${e.message}")
+            false
+        }
+    }
+
+    /** 是否有媒体在播放（媒体 Actor 的激活条件） */
+    fun isMediaActive(): Boolean = try {
+        audioManager?.isMusicActive ?: false
+    } catch (e: Exception) {
+        false
+    }
+
+    // ==================== 编辑动作 ====================
+
+    /**
+     * 执行编辑动作 —— 走动态动作列表校验
+     *
+     * 若节点不支持该动作，播报失败原因而不是静默。
+     */
+    private fun runEditAction(action: EditAction): Boolean {
+        val node = getTargetNode()
+        if (node == null) {
+            speak("${action.label}失败", true)
+            return false
+        }
+        // 先检查该节点是否真的支持这个动作（天坦的动态动作列表机制）
+        val available = EditActionExecutor.availableActions(node)
+        if (available.isNotEmpty() && !available.contains(action)) {
+            speak("当前不支持${action.label}", true)
+            return false
+        }
+        val ok = EditActionExecutor.execute(action, node)
+        speak(if (ok) "已${action.label}" else "${action.label}失败", true)
+        return ok
+    }
+
+    // ==================== 全局菜单 ====================
+
+    private fun showGlobalMenu() {
+        val items = arrayOf("语音设置", "导航模式", "焦点粒度", "停止朗读")
+        android.app.AlertDialog.Builder(context)
+            .setTitle("全局菜单")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> ReaderLog.i("Menu", "→ 语音设置")
+                    1 -> {
+                        val mode = navigation.next()
+                        ReaderLog.i("Menu", "→ 导航: ${mode.label}")
+                    }
+                    2 -> cycleGranularity()
+                    3 -> stopSpeech()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+}

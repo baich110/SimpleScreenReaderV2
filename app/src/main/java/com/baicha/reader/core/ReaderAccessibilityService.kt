@@ -108,6 +108,10 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var navigation: NavigationManager
         private set
 
+    /** 手势动作处理器（从本类抽出的动作执行职责） */
+    lateinit var gestureActions: GestureActionHandler
+        private set
+
     /** 朗读替换引擎（两级作用域 + 正则） */
     lateinit var replacement: ReadReplacementEngine
         private set
@@ -292,7 +296,7 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         // ② 媒体控制（仅播放时激活）
         gestureChain.register(MediaControlActor(
-            isMediaPlaying = { isMediaActive() },
+            isMediaPlaying = { gestureActions.isMediaActive() },
             onMediaControl = { id, _ -> handleMediaGesture(id) }
         ))
 
@@ -306,7 +310,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         gestureChain.register(DefaultNavigationActor(
             onFocusMove = { forward, _ -> moveFocusInternal(forward) },
             onScroll = { forward, _ -> scrollInternal(forward) },
-            onMappedAction = { id, _ -> handleMappedGesture(id) }
+            onMappedAction = { id, _ -> gestureActions.handleMappedGesture(id) }
         ))
     }
 
@@ -803,132 +807,14 @@ class ReaderAccessibilityService : AccessibilityService() {
         return ok
     }
 
-    /**
-     * 媒体手势
-     */
-    private fun handleMediaGesture(gestureId: Int): Boolean {
-        val keyCode = when (gestureId) {
-            Gestures.GESTURE_2_FINGER_SWIPE_LEFT -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
-            Gestures.GESTURE_2_FINGER_SWIPE_RIGHT -> KeyEvent.KEYCODE_MEDIA_NEXT
-            Gestures.GESTURE_2_FINGER_SINGLE_TAP -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
-            else -> return false
-        }
-        sendMediaKey(keyCode)
-        return true
-    }
+    /** 媒体手势（委托给 GestureActionHandler） */
+    private fun handleMediaGesture(gestureId: Int): Boolean =
+        gestureActions.handleMappedGesture(gestureId)
+
 
     /**
      * 映射手势（按 GestureMap 查表执行）
      */
-    private fun handleMappedGesture(gestureId: Int): Boolean {
-        return when (GestureMap.actionOf(gestureId)) {
-            GestureAction.FOCUS_PREVIOUS -> moveFocusInternal(false)
-            GestureAction.FOCUS_NEXT -> moveFocusInternal(true)
-            GestureAction.SCROLL_BACKWARD -> scrollInternal(false)
-            GestureAction.SCROLL_FORWARD -> scrollInternal(true)
-            GestureAction.CLICK -> focus.clickTarget().also { if (it) haptic.click() }
-            GestureAction.LONG_CLICK -> focus.longClickTarget()
-            GestureAction.BACK -> { performGlobalAction(GLOBAL_ACTION_BACK); true }
-            GestureAction.HOME -> { performGlobalAction(GLOBAL_ACTION_HOME); true }
-            GestureAction.RECENTS -> { performGlobalAction(GLOBAL_ACTION_RECENTS); true }
-            GestureAction.NOTIFICATIONS -> { performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS); true }
-            GestureAction.STOP_SPEAK -> { speech.stop(); true }
-            GestureAction.TOGGLE_SPEAK -> toggleSpeech()
-            GestureAction.SCREENSHOT -> { performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT); true }
-            GestureAction.VOLUME_UP -> { adjustVolume(true); true }
-            GestureAction.VOLUME_DOWN -> { adjustVolume(false); true }
-            GestureAction.MEDIA_PREVIOUS, GestureAction.MEDIA_NEXT, GestureAction.MEDIA_PLAY_PAUSE ->
-                handleMediaGesture(gestureId)
-            GestureAction.GRANULARITY_CHARACTER -> setGranularity(GranularityNavigator.Level.CHARACTER)
-            GestureAction.GRANULARITY_WORD -> setGranularity(GranularityNavigator.Level.WORD)
-            GestureAction.GRANULARITY_LINE -> setGranularity(GranularityNavigator.Level.LINE)
-            GestureAction.GRANULARITY_DEFAULT -> cycleGranularity()
-            GestureAction.COPY -> { val ok = TextEditActions.copy(focus.getTargetNode()); speech.speak(if (ok) "已复制" else "复制失败", true); ok }
-            GestureAction.PASTE -> { val ok = TextEditActions.paste(focus.getTargetNode()); speech.speak(if (ok) "已粘贴" else "粘贴失败", true); ok }
-            GestureAction.CUT -> { val ok = TextEditActions.cut(focus.getTargetNode()); speech.speak(if (ok) "已剪切" else "剪切失败", true); ok }
-            GestureAction.SELECT_ALL -> { val ok = TextEditActions.selectAll(focus.getTargetNode()); speech.speak(if (ok) "已全选" else "全选失败", true); ok }
-            GestureAction.GLOBAL_MENU -> { showGlobalMenu(); true }
-            GestureAction.SCREEN_RECOGNIZE -> { performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN); true }
-            GestureAction.NONE -> false
-        }
-    }
-
-    private fun toggleSpeech(): Boolean {
-        val enabled = !speech.enabled
-        speech.enabled = enabled
-        if (!enabled) speech.stop()
-        speech.speak(if (enabled) "读屏已开启" else "读屏已关闭", interrupt = true)
-        log("→ 读屏${if (enabled) "开" else "关"}")
-        return true
-    }
-
-    private fun setGranularity(level: GranularityNavigator.Level): Boolean {
-        GranularityNavigator.setLevel(level)
-        nodeCache.invalidateAll()
-        speech.speak(GranularityNavigator.levelName(level), interrupt = true)
-        haptic.focus()
-        return true
-    }
-
-    private fun cycleGranularity(): Boolean {
-        val level = GranularityNavigator.cycle()
-        nodeCache.invalidateAll()
-        speech.speak(GranularityNavigator.levelName(level), interrupt = true)
-        haptic.focus()
-        return true
-    }
-
-    private fun adjustVolume(up: Boolean) {
-        try {
-            val am = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
-            am.adjustStreamVolume(
-                android.media.AudioManager.STREAM_MUSIC,
-                if (up) android.media.AudioManager.ADJUST_RAISE
-                else android.media.AudioManager.ADJUST_LOWER,
-                android.media.AudioManager.FLAG_SHOW_UI
-            )
-            val vol = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
-            val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
-            val pct = if (max > 0) vol * 100 / max else 0
-            speech.speakInterrupt("音量 $pct%")
-            haptic.focus()
-        } catch (e: Exception) {
-            log("调音量失败: ${e.message}")
-        }
-    }
-
-    private fun sendMediaKey(keyCode: Int) {
-        try {
-            val am = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
-            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-        } catch (e: Exception) {
-            log("媒体键失败: ${e.message}")
-        }
-    }
-
-    private fun isMediaActive(): Boolean = try {
-        val am = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
-        am.isMusicActive
-    } catch (e: Exception) {
-        false
-    }
-
-    private fun showGlobalMenu() {
-        val items = arrayOf("语音设置", "焦点粒度", "停止朗读")
-        android.app.AlertDialog.Builder(this)
-            .setTitle("全局菜单")
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> log("→ 语音设置")
-                    1 -> cycleGranularity()
-                    2 -> speech.stop()
-                }
-            }
-            .setNegativeButton("取消", null)
-            .show()
-    }
-
     /** 坐标点击（焦点管理器兜底用） */
     fun dispatchGestureTap(x: Float, y: Float): Boolean {
         val path = Path().apply { moveTo(x, y) }
@@ -1030,13 +916,16 @@ class ReaderAccessibilityService : AccessibilityService() {
         instance = null
         isRunning = false
 
-        try { speech.shutdown() } catch (e: Exception) { }
-        try { sound.shutdown() } catch (e: Exception) { }
-        try { autoScroll.stop() } catch (e: Exception) { }
-        try { focus.shutdown() } catch (e: Exception) { }
-        try { eventQueue.clear() } catch (e: Exception) { }
-        try { nodeCache.hardClear() } catch (e: Exception) { }
-        try { gestureChain.clear() } catch (e: Exception) { }
+        // 逐个关闭资源：任一失败不影响其余，但记录日志便于排查
+        // （原来是静默 catch，关闭失败无从发现）
+        shutdownSafely("speech") { speech.shutdown() }
+        shutdownSafely("sound") { sound.shutdown() }
+        shutdownSafely("autoScroll") { autoScroll.stop() }
+        shutdownSafely("focus") { focus.shutdown() }
+        shutdownSafely("eventQueue") { eventQueue.clear() }
+        shutdownSafely("nodeCache") { nodeCache.hardClear() }
+        shutdownSafely("boundsCache") { NodeBoundsCalculator.clear() }
+        shutdownSafely("gestureChain") { gestureChain.clear() }
 
         onLogUpdate = null
         synchronized(eventLog) { eventLog.clear() }
@@ -1045,6 +934,20 @@ class ReaderAccessibilityService : AccessibilityService() {
     }
 
     // ==================== 工具 ====================
+
+    /**
+     * 安全关闭辅助 —— 捕获异常但记录日志
+     *
+     * 关闭路径必须「尽力而为」：任一组件关闭失败不能影响其他组件，
+     * 但也不能静默吞掉（否则资源泄漏无从发现）。
+     */
+    private inline fun shutdownSafely(name: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Throwable) {
+            ReaderLog.w("Shutdown", "$name 关闭失败: ${e.message}")
+        }
+    }
 
     private fun log(msg: String) {
         ReaderLog.i("Service", msg)
