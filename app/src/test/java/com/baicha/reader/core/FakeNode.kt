@@ -61,7 +61,18 @@ open class FakeNode(
     var fakeClickable: Boolean = false,
 
     /** 是否可滚动 */
-    var fakeScrollable: Boolean = false
+    var fakeScrollable: Boolean = false,
+
+    /** 包名 —— `needsSort` 按包名分支（vivo 桌面 / 原生桌面） */
+    var fakePackageName: CharSequence? = null,
+
+    /**
+     * 类名 —— `NodeRoleHelper.roleOf()` 的**主输入**
+     *
+     * 它是角色判定的第一依据（查 NODE_ROLE_MAP + 继承链检查），
+     * 不提供就无法测角色/排序相关逻辑。
+     */
+    var fakeClassName: CharSequence? = null
 ) : AccessibilityNodeInfo() {
 
     private val childList = ArrayList<FakeNode>(4)
@@ -107,6 +118,10 @@ open class FakeNode(
     override fun isClickable(): Boolean = fakeClickable
 
     override fun isScrollable(): Boolean = fakeScrollable
+
+    override fun getPackageName(): CharSequence? = fakePackageName
+
+    override fun getClassName(): CharSequence? = fakeClassName
 
     override fun hashCode(): Int = nodeId
 
