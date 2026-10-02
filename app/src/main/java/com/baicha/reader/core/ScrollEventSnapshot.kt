@@ -36,7 +36,21 @@ class ScrollEventSnapshot(
     /** 水平滚动增量 */
     @JvmField val deltaX: Int,
     /** 垂直滚动增量 */
-    @JvmField val deltaY: Int
+    @JvmField val deltaY: Int,
+
+    /**
+     * 水平可滚动最大值 —— `AccessibilityEvent.getMaxScrollX()`
+     *
+     * 【为什么需要】自动滚动成功判定的**边缘检测**依赖它：
+     * 天坦 `AutoScrollSuccessChecker.e()`（`:97~123`）
+     * 用 `maxScrollY - scrollY < 72` 判定「已到底」，
+     * 从而在「位置不再变化」的情况下**提前判成功** ——
+     * 否则会误判失败并无限重试（焦点卡在列表末尾反复播报）。
+     */
+    @JvmField val maxScrollX: Int = 0,
+
+    /** 垂直可滚动最大值 —— `AccessibilityEvent.getMaxScrollY()` */
+    @JvmField val maxScrollY: Int = 0
 ) {
 
     /**
@@ -52,7 +66,9 @@ class ScrollEventSnapshot(
         scrollY = event.scrollY,
         itemCount = event.itemCount,
         deltaX = event.scrollDeltaX,
-        deltaY = event.scrollDeltaY
+        deltaY = event.scrollDeltaY,
+        maxScrollX = event.maxScrollX,
+        maxScrollY = event.maxScrollY
     )
 
     /**

@@ -160,6 +160,22 @@ class AutoScrollManager(
             }
 
             val boundsChanged = hasBoundsChanged(state)
+
+            // ②b ★ 事件驱动成功（本轮新增）——
+            //     对应天坦 `C2109b.i()`：滚动事件判定成功就立即收尾 `h()`。
+            //
+            //     这条分支专治「滚到边缘后位置不再变化」：
+            //     那时 `tryFocusAfterScroll` 会一直返回 null，
+            //     靠轮询要等 MAX_RETRY 次才判失败，用户听到的是
+            //     同一个元素被反复播报（真机上像读屏卡死）。
+            if (scrollSuccessFromEvent) {
+                ReaderLog.d(TAG, "滚动成功（事件判定，第 $attempt 次）")
+                lastResult = ScrollRecoveryResult.Success(anchorNode, attempt)
+                scrollSuccessFromEvent = false
+                onSucceeded(boundsChanged)
+                return
+            }
+
             val focused = tryFocusAfterScroll(
                 scrollNode, anchorNode, state.direction, state.targetType
             )
@@ -299,6 +315,15 @@ class AutoScrollManager(
             boundsBeforeScroll = boundsBefore
         )
 
+        // 判定器重置并绑定本次滚动动作 —— 对应天坦构造
+        // `new C1074b(i9, rect, 0.6f)`（C2109b.j() 里创建）
+        scrollSuccessFromEvent = false
+        resetSuccessChecker(
+            scrollNode,
+            if (direction == 1) AutoScrollSuccessChecker.ACTION_SCROLL_FORWARD
+            else AutoScrollSuccessChecker.ACTION_SCROLL_BACKWARD
+        )
+
         val task = ScrollTask(state)
         currentTask = task
         isScrolling = true
@@ -369,6 +394,61 @@ class AutoScrollManager(
         private set
 
     /**
+     * 自动滚动成功判定器 —— 对应天坦 `a7/AutoScrollSuccessChecker`
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮接线：此前这类判定完全缺失】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 白茶原来只用 `hasBoundsChanged(state)` 判「滚动是否生效」——
+     * 即「锚点节点的屏幕边界变了没有」。
+     *
+     * 天坦用的是**另一套更可靠的信号**：累计滚动事件的位移量
+     * （`AutoScrollSuccessChecker.b()`，见该类的完整源码摘录），
+     * 与「容器尺寸 × 0.6」的阈值比较，并带**边缘提前成功**分支。
+     *
+     * 【为什么「边界变了没」不够可靠】
+     *   ① 很多 App 滚动时**不复用**原节点 —— 锚点对象指向的节点
+     *      已被回收/替换，`getBoundsInScreen` 要么抛异常要么返回旧值，
+     *      于是「没变」被误判成「没滚动」，而实际上内容已经滚了。
+     *   ② 反过来，有些 App 滚动时会做动画/回弹，边界**变了**但内容
+     *      没换 —— 被判成「滚动了」，焦点落到同一个逻辑位置。
+     *   ③ 最要命的是**滚到边缘**：位置不再变化 ⇒ 永远判「没动」⇒
+     *      无限重试直到 `MAX_RETRY` 耗尽，用户听到的是反复播报
+     *      同一个元素（真机上极容易被当成「读屏卡死」）。
+     *      天坦的 `isReachedEdge` 分支正是为了避免这个。
+     *
+     * 【两者的关系】不是替换，而是**补充**：
+     *   · 本判定器 → 决定「滚动是否应判成功」（主信号）
+     *   · `hasBoundsChanged` → 仍作为传给回调的 `boundsChanged` 参数
+     *     （天坦也把它传给 `onAutoScrolled(boundsChanged)`）
+     */
+    @Volatile
+    var successChecker: AutoScrollSuccessChecker? = null
+
+    /**
+     * 本次滚动是否已被「事件驱动」判定为成功 —— 对应天坦
+     * `C2109b.i()` 中 `c1074bB.b(event)` 返回 true 后立即 `h()` 收尾
+     */
+    @Volatile
+    private var scrollSuccessFromEvent = false
+
+    /** 判定器的一次性重置 —— 每次自动滚动启动前调用 */
+    private fun resetSuccessChecker(scrollNode: AccessibilityNodeInfo, action: Int) {
+        val rect = android.graphics.Rect()
+        try {
+            scrollNode.getBoundsInScreen(rect)
+        } catch (e: Throwable) {
+            // 取不到尺寸 → 用一个保守的小容器，阈值不会过大而永不达标
+        }
+        successChecker = AutoScrollSuccessChecker(
+            scrollAction = action,
+            containerWidth = rect.width(),
+            containerHeight = rect.height()
+        )
+    }
+
+    /**
      * 处理滚动事件 —— 对应天坦 `M6/r.e()` + `C2121b.i()`
      *
      * 【本实现相对原版的修正】
@@ -398,6 +478,31 @@ class AutoScrollManager(
         val dy = current.deltaY
         if (dx != 0 && dx != -1) scrollDeltaX += dx
         if (dy != 0 && dy != -1) scrollDeltaY += dy
+
+        // ②b 喂给成功判定器（对应天坦 C2109b.i() 里的 c1074bB.b(event)）
+        //
+        //     天坦在**每个滚动事件**上调用判定器，一旦判定成功就收尾
+        //     （`if (c1074bB.b(accessibilityEvent)) { h(); }`）。
+        //     白茶此前把所有判定压在 `ScrollTask.run()` 的轮询里，
+        //     于是「滚到边缘」这种事件驱动的成功信号被完全丢掉。
+        val checker = successChecker
+        if (checker != null && isScrolling) {
+            val metrics = ScrollMetrics(
+                scrollX = current.scrollX,
+                scrollY = current.scrollY,
+                maxScrollX = current.maxScrollX,
+                maxScrollY = current.maxScrollY
+            )
+            val success = try {
+                checker.onScrollEvent(dx.toLong(), dy.toLong(), metrics)
+            } catch (e: Throwable) {
+                false
+            }
+            if (success) {
+                ReaderLog.d(TAG, "滚动事件判定成功（累计位移达阈值或已到边缘）")
+                scrollSuccessFromEvent = true
+            }
+        }
 
         // ③ 保存快照供下次比较（天坦 f6112h = cVar）
         lastSnapshot = current
@@ -451,6 +556,8 @@ class AutoScrollManager(
         lastDetectedDirection = ScrollDirectionDetector.UNKNOWN
         scrollDeltaX = 0
         scrollDeltaY = 0
+        scrollSuccessFromEvent = false
+        successChecker?.reset()
     }
 
     /**
