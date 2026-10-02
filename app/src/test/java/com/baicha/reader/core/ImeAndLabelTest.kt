@@ -35,6 +35,37 @@ class ImeTextCommitterTest {
         assertFalse(ImeTextCommitter.deleteBackward(null, 0))
         assertFalse(ImeTextCommitter.deleteBackward(null, -1))
     }
+
+    /**
+     * ★ 版本门槛 —— 天坦用 `SDK_INT >= 33` 判定
+     *   （`AbstractC3703x.j()`），白茶对齐该值。
+     *
+     * 【这条测试是补上的缺口】
+     *   之前所有测试都传 null service，会在版本检查**之前**短路，
+     *   导致「API 33 门槛」这条分支从未被覆盖 ——
+     *   变异测试证实：把 33 改成 26，全部测试仍然通过。
+     *
+     *   把门槛抽成具名常量 + 纯函数后，这条才可测。
+     */
+    @Test
+    fun api_threshold_matches_tantang() {
+        org.junit.Assert.assertEquals(
+            "天坦要求 API 33+（AbstractC3703x.j()）",
+            33,
+            ImeTextCommitter.MIN_API_FOR_INPUT_METHOD
+        )
+    }
+
+    @Test
+    fun api_support_boundary_is_exact() {
+        // 32 及以下不支持
+        assertFalse(ImeTextCommitter.isApiSupported(26))
+        assertFalse(ImeTextCommitter.isApiSupported(32))
+        // 33 起支持 —— 边界必须精确
+        assertTrue(ImeTextCommitter.isApiSupported(33))
+        assertTrue(ImeTextCommitter.isApiSupported(34))
+        assertTrue(ImeTextCommitter.isApiSupported(36))
+    }
 }
 
 class ImeAdapterTest {

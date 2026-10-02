@@ -28,8 +28,8 @@ object NavigationStore {
     private const val PREFS_NAME = "baicha_navigation"
     private const val KEY_MODE = "navigation_mode_code"
 
-    /** 未存储过时的默认值 */
-    private const val DEFAULT_CODE = 0   // NavigationMode.DEFAULT.typeCode
+    /** 默认导航码 —— NavigationMode.DEFAULT.typeCode */
+    private const val DEFAULT_CODE = 0
 
     /**
      * 读取上次使用的导航。
@@ -43,8 +43,35 @@ object NavigationStore {
         } catch (e: Throwable) {
             return NavigationMode.DEFAULT
         }
-        return NavigationMode.fromTypeCode(code) ?: NavigationMode.DEFAULT
+        return resolve(code)
     }
+
+    /**
+     * 导航码 → 导航模式（**纯函数，可测**）
+     *
+     * 【为什么抽出来】
+     *   `load()` 需要真实 `Context`（SharedPreferences），
+     *   JVM 单测构造不出来 —— 于是「存的码非法时怎么回退」
+     *   这条**最需要防御逻辑**的分支反而没有覆盖。
+     *
+     *   变异测试证实：把 DEFAULT_CODE 改成 99，所有测试仍通过。
+     *
+     * 回退链（三层，任一环坏掉都要能兜住）：
+     *   ① 码在枚举里 → 用它
+     *   ② 码查不到（降级安装/改库/枚举项被删）→ DEFAULT
+     *   ③ 连 DEFAULT 都取不到 → 返回枚举首个（理论上不会发生，
+     *      但读屏常驻，任何路径都不允许抛异常）
+     */
+    fun resolve(code: Int): NavigationMode {
+        NavigationMode.fromTypeCode(code)?.let { return it }
+        ReaderLog.d(TAG, "导航码 $code 无对应模式 → 回退默认")
+        return NavigationMode.fromTypeCode(DEFAULT_CODE)
+            ?: NavigationMode.values().firstOrNull()
+            ?: NavigationMode.DEFAULT
+    }
+
+    /** 默认导航码（供测试核对） */
+    fun defaultCode(): Int = DEFAULT_CODE
 
     /** 保存导航选择 */
     fun save(context: Context, mode: NavigationMode) {

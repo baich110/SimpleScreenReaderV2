@@ -73,8 +73,8 @@ object ImeTextCommitter {
 
         // API 33 以下没有 InputMethod 无障碍 API —— 与天坦同样直接放弃，
         // 而不是「假装成功」。调用方据此走兜底路径。
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            ReaderLog.d(TAG, "API < 33，无 InputMethod 无障碍接口")
+        if (!isCurrentApiSupported()) {
+            ReaderLog.d(TAG, "API < $MIN_API_FOR_INPUT_METHOD，无 InputMethod 无障碍接口")
             return false
         }
 
@@ -102,7 +102,7 @@ object ImeTextCommitter {
     /** 当前是否可以提交（供 UI 层判断是否显示「上屏」操作） */
     fun isAvailable(service: AccessibilityService?): Boolean {
         if (service == null) return false
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+        if (!isCurrentApiSupported()) return false
         return try {
             service.inputMethod?.currentInputConnection != null
         } catch (e: Throwable) {
@@ -118,7 +118,7 @@ object ImeTextCommitter {
      */
     fun deleteBackward(service: AccessibilityService?, count: Int = 1): Boolean {
         if (service == null || count <= 0) return false
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+        if (!isCurrentApiSupported()) return false
 
         return try {
             val connection = service.inputMethod?.currentInputConnection ?: return false
@@ -130,6 +130,29 @@ object ImeTextCommitter {
             false
         }
     }
+
+    /**
+     * 官方 InputMethod 无障碍 API 的最低版本。
+     *
+     * 【为什么抽出常量】用 `Build.VERSION.SDK_INT` 直接比较时，
+     * 版本门槛**无法被单测覆盖** —— JVM 环境的 SDK_INT 恒为 0，
+     * 测不到「33 以下应当拒绝」这条分支。
+     * 抽成常量 + [isApiSupported] 纯函数后可测。
+     *
+     * 天坦用 `AbstractC3703x.j()` 判定（`SDK_INT >= 33`），
+     * 同样是一个具名函数 —— 这里对齐该做法。
+     */
+    const val MIN_API_FOR_INPUT_METHOD = Build.VERSION_CODES.TIRAMISU   // 33
+
+    /**
+     * 给定 API 级别是否支持 InputMethod 无障碍接口。
+     *
+     * 纯函数，供单测直接验证门槛值。
+     */
+    fun isApiSupported(apiLevel: Int): Boolean = apiLevel >= MIN_API_FOR_INPUT_METHOD
+
+    /** 当前设备是否支持 */
+    fun isCurrentApiSupported(): Boolean = isApiSupported(Build.VERSION.SDK_INT)
 
     private const val TAG = "ImeTextCommitter"
 }

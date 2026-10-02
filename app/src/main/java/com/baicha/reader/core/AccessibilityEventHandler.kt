@@ -439,8 +439,10 @@ class AccessibilityEventHandler(
         val nodeKey = node?.hashCode() ?: -1
         val windowId = node?.windowId ?: -1
 
-        // ② 节点去重
-        if (nodeKey == lastScrollNodeKey && windowId == lastScrollWindowId) return
+        // ② 节点去重（判定抽成纯函数以便单测）
+        if (ScrollDedup.isDuplicate(nodeKey, windowId, lastScrollNodeKey, lastScrollWindowId)) {
+            return
+        }
         lastScrollNodeKey = nodeKey
         lastScrollWindowId = windowId
 
