@@ -200,13 +200,30 @@ class ShouldFocusNodeFidelityTest {
     }
 
     /**
-     * ★ 天坦里 `k` 与 `nn` 是「可点击」与「可选中」两个独立判定，
-     *   `m()` 里的组合 `H(node) && N(node)` 需要两者都存在
+     * ★★ 我引入的 `nn()` 是**多余且错误**的 —— 已删除
+     *
+     * 【为什么删】可读版 `FocusFinder.java:293~309` 显示
+     * `hasActionableChild`（我的 `m()`）里**没有** `H(node) && N(node)`
+     * 这个组合；那句「父节点既可点击又可选中」是我推断出来的，
+     * 天坦实际用的是：
+     *     `isActionableForAccessibility(node) && isLongClickable(node)`
+     * 即「父节点可点击**且**可长按」。
+     *
+     * `nn()`（isSelected || hasAction(32)）在天坦侧对应的是
+     * `N(node)`，但它只出现在 `isActionable(node, true)` 的
+     * `matchActionMask3(1,16,32)` 里，**不作为独立判定使用**。
+     * 保留一个没人正确使用的函数只会误导后来者。
      */
     @Test
-    fun clickable_and_selectable_are_separate() {
-        assertTrue("需要「可点击」判定 k()", code.contains("fun k("))
-        assertTrue("需要「可选中」判定 nn()", code.contains("fun nn("))
+    fun redundant_nn_function_is_removed() {
+        assertFalse(
+            "nn() 是我误加的（天坦 m() 里没有这个组合），应已删除",
+            code.contains("fun nn(")
+        )
+        assertTrue(
+            "m() 里应改用 isActionableForAccessibility(node) && node.isLongClickable",
+            code.contains("isActionableForAccessibility(node) && node.isLongClickable")
+        )
     }
 
     // ==================== ⑦ 可读版反编译核对后的修正 ====================
@@ -300,4 +317,223 @@ class ShouldFocusNodeFidelityTest {
             code.contains("(node.actions and id) == id")
         )
     }
+
+/**
+ * 可读版反编译（jadx-ultimate）对照的第二轮修正测试
+ *
+ * ══════════════════════════════════════════════════════════
+ * 【为什么要单独立一个类】
+ * ══════════════════════════════════════════════════════════
+ *
+ * 第一轮核查用的是**混淆版**反编译（函数名全是 C3678d / AbstractC3688i
+ * 这种），而可读版把它们命名成了 FocusFinder / NodeUtils /
+ * AccessibilityNodeInfoUtils，并**给每个方法起了语义名**。
+ *
+ * 只用可读版才看出的 5 处错误：
+ *   ① `m()` 漏了 `!isActionable(child, true)` 排除项
+ *   ② `m()` 的三层条件被我压成了两层
+ *   ③ `m()` 的子节点去重集合应是**静态**的（跨递归共享）
+ *   ④ `W()` 漏了 `hasScrollAction(parent)` 与三星 AdapterView 特判
+ *   ⑤ `l()` 漏了前置短路 `f39056f`（是滚动容器则直接 false）
+ *   ⑥ `hasSpeakableContent()` 的 isCheckable 写宽、rangeInfo 缺区间校验
+ *
+ * 【测试方法】同样只能用源码结构断言 —— JVM 里 AccessibilityNodeInfo
+ * 是空壳，行为测不出。但这次加了 `extractFunctionBody()` 把断言
+ * **限定在目标函数体内**（第一轮吃过亏：全局串匹配让变异测试逃逸）。
+ */
+class ShouldFocusNodeReadableAuditTest {
+
+    private val src: String by lazy {
+        java.io.File("src/main/java/com/baicha/reader/core/ShouldFocusNode.kt").readText()
+    }
+
+    private val code: String by lazy {
+        src.lines()
+            .filterNot { it.trimStart().startsWith("//") || it.trimStart().startsWith("*") }
+            .joinToString("\n")
+    }
+
+    /** 抽取函数体（从签名到下一个同级 private fun） */
+    private fun body(signature: String): String {
+        val start = code.indexOf(signature)
+        if (start < 0) return ""
+        val end = code.indexOf("\n    private fun ", start + signature.length)
+            .let { if (it < 0) code.length else it }
+        return code.substring(start, end)
+    }
+
+    // ==================== ① m() 漏了排除项 ====================
+
+    /**
+     * ★★ `m()` 必须含 `!isActionable(child, true)` 排除项
+     *
+     * 依据可读版 `FocusFinder.java:302`：
+     *   `child.isVisibleToUser() && !bridgeIsActionable_DefaultTrue(this, child, false, 2, null) && ...`
+     * 桥接 `:162~166` 把 z9 改写为 true → `!isActionable(child, true)`
+     */
+    @Test
+    fun m_excludes_actionable_children() {
+        val b = body("private fun m(node: AccessibilityNodeInfo): Boolean")
+        assertTrue("m() 必须排除「自身已可操作」的子节点：$b".take(300), b.contains("if (n(child, true)) continue"))
+    }
+
+    /**
+     * ★★ `m()` 的三层条件必须完整
+     *
+     * 天坦：(!hasContentOrActionableChild(child)
+     *        || !isTopLevelScrollItem(child)
+     *        || (isActionableForAccessibility(node) && isLongClickable(node)))
+     *       && hasContentOrActionableChild(child)
+     */
+    @Test
+    fun m_has_three_layer_condition() {
+        val b = body("private fun m(node: AccessibilityNodeInfo): Boolean")
+        assertTrue("应有第一层取反：!childHasContentOrActionable", b.contains("!childHasContentOrActionable"))
+        assertTrue("应有第二层取反：!topLevelScroll", b.contains("!topLevelScroll"))
+        assertTrue("应有第三层：父节点可点击且可长按", b.contains("parentClickableAndLongClickable"))
+        assertTrue("末项必须是与 hasContentOrActionable 相与", b.contains("inner && childHasContentOrActionable"))
+    }
+
+    /**
+     * ★★ `m()` 的去重集合必须是**静态**的（跨递归共享）
+     *
+     * 依据 `FocusFinder.java:59`：`public static final HashSet f39022g`
+     */
+    @Test
+    fun m_uses_shared_seen_set() {
+        val b = body("private fun m(node: AccessibilityNodeInfo): Boolean")
+        assertFalse(
+            "不该在函数内新建局部去重集合（天坦是静态共享的）",
+            b.contains("val seen = java.util.IdentityHashMap")
+        )
+        assertTrue("应使用类级的 seenChildren", b.contains("seenChildren.put(child"))
+    }
+
+    // ==================== ② W() 漏两个条件 ====================
+
+    /**
+     * ★★ `W()` 必须含 `hasScrollAction(parent)` 且优先于角色判定
+     *
+     * 依据可读版 `AccessibilityNodeInfoUtils.java:547`：
+     *   `if (hasScrollAction(parent)) return true;`
+     */
+    @Test
+    fun w_checks_scroll_action_first() {
+        val b = body("private fun W(node: AccessibilityNodeInfo): Boolean")
+        assertTrue("W() 必须检查父节点是否有滚动 action：$b".take(300), b.contains("hasScrollAction(parent)"))
+        // 且必须在角色判定之前
+        val scrollIdx = b.indexOf("hasScrollAction(parent)")
+        val roleIdx = b.indexOf("NodeRoleHelper.roleOf(parent)")
+        assertTrue("hasScrollAction 应优先于角色判定", scrollIdx in 0 until roleIdx)
+    }
+
+    /**
+     * ★★ `W()` 必须含三星 AdapterView 特判
+     * 依据 `AccessibilityNodeInfoUtils.java:554` 与 `:284`
+     */
+    @Test
+    fun w_checks_samsung_adapter_view() {
+        val b = body("private fun W(node: AccessibilityNodeInfo): Boolean")
+        assertTrue("W() 必须含三星 AdapterView 特判", b.contains("isSamsungAdapterView(parent)"))
+        assertTrue(
+            "三星类名必须与天坦一致（f39055e）",
+            code.contains("com.sec.android.touchwiz.widget.TwAdapterView")
+        )
+    }
+
+    /**
+     * ★ `hasScrollAction` 必须检查 6 个滚动 action
+     * 依据 `:489~491`
+     */
+    @Test
+    fun hasScrollAction_covers_six_actions() {
+        val b = body("private fun hasScrollAction(node: AccessibilityNodeInfo): Boolean")
+        listOf("ACTION_SCROLL_FORWARD", "ACTION_SCROLL_BACKWARD", "ACTION_SCROLL_UP",
+               "ACTION_SCROLL_DOWN", "ACTION_SCROLL_LEFT", "ACTION_SCROLL_RIGHT")
+            .forEach { assertTrue("hasScrollAction 应含 $it：$b", b.contains(it)) }
+    }
+
+    // ==================== ③ l() 漏前置短路 ====================
+
+    /**
+     * ★★ `l()` 必须有「是滚动容器则短路」的前置判断
+     *
+     * 依据可读版 `FocusFinder.java:278~280` + `AccessibilityNodeInfoUtils.java:173~181`
+     */
+    @Test
+    fun l_short_circuits_for_scrollable_container() {
+        val b = body("private fun l(node: AccessibilityNodeInfo, count: Int): Boolean")
+        assertTrue("l() 必须含滚动容器前置短路：$b".take(300), b.contains("isScrollableContainerNode(node)"))
+        assertTrue("应在循环之前", b.indexOf("isScrollableContainerNode") < b.indexOf("for (idx in"))
+    }
+
+    @Test
+    fun scrollable_container_check_exists() {
+        assertTrue("需要 isScrollableContainerNode 实现", code.contains("fun isScrollableContainerNode("))
+        val b = body("private fun isScrollableContainerNode(node: AccessibilityNodeInfo): Boolean")
+        assertTrue("应检查 hasScrollAction", b.contains("hasScrollAction(node)"))
+        assertTrue("应检查可见性", b.contains("isVisibleToUser"))
+    }
+
+    // ==================== ④ hasSpeakableContent ====================
+
+    /**
+     * ★★ `hasSpeakableContent` 的勾选判定**只能**用 isCheckable
+     *
+     * 依据可读版 `AccessibilityNodeInfoUtils.java:334`：
+     *   `!TextUtils.isEmpty(stateDescription) || nodeInfo.isCheckable() || hasRangeInfo(nodeInfo)`
+     */
+    @Test
+    fun speakable_content_uses_only_isCheckable() {
+        val b = body("private fun hasSpeakableContent(node: AccessibilityNodeInfo): Boolean")
+        assertTrue("应含 isCheckable", b.contains("node.isCheckable"))
+        assertFalse(
+            "不该含 isChecked/isSelected（天坦只有 isCheckable）",
+            b.contains("isChecked") || b.contains("isSelected")
+        )
+    }
+
+    /**
+     * ★★ `hasRangeInfo` 必须校验 current ∈ [min, max]
+     *
+     * 依据 `:348~357`：
+     *   `max - min > 0 && cur >= min && cur <= max`
+     */
+    @Test
+    fun range_info_checks_current_within_bounds() {
+        val b = body("private fun hasRangeInfo(node: AccessibilityNodeInfo): Boolean")
+        assertTrue("应含 current >= min", b.contains("range.current >= range.min"))
+        assertTrue("应含 current <= max", b.contains("range.current <= range.max"))
+        assertTrue("应含区间有效判定", b.contains("(range.max - range.min) > 0f"))
+    }
+
+    // ==================== ⑤ 命名准确性 ====================
+
+    /**
+     * ★ 那个函数应叫 `isType15` 而不是 `isWebView`
+     *
+     * 依据可读版 `NodeUtils.java:255~260`：
+     *   `isType15(node) = matchActionMask2(node, 1024, 2048)`
+     * 真正的 WebView 判定是 `NodeNavigator.isInWebView()`（`:105`）。
+     */
+    @Test
+    fun function_is_named_isType15_not_isWebView() {
+        assertTrue(
+            "应按可读版命名为 isType15",
+            code.contains("fun isType15(")
+        )
+        assertFalse(
+            "不该叫 isWebView（那是另一个函数 NodeNavigator.isInWebView）",
+            code.contains("fun isWebView(")
+        )
+    }
+
+    /** 1024/2048 的语义注释必须在场（避免下次又被误读为滚动 action） */
+    @Test
+    fun html_element_constants_are_documented() {
+        assertTrue(code.contains("ACTION_NEXT_HTML_ELEMENT"))
+        assertTrue(code.contains("ACTION_PREVIOUS_HTML_ELEMENT"))
+    }
+}
+
 }

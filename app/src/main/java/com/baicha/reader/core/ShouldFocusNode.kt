@@ -25,7 +25,7 @@ import android.view.accessibility.AccessibilityNodeInfo
  *
  * 【天坦原版 r(node, z9)】
  *   ① node == null → false
- *   ② isWebView(node) → A0.b(node) 是否可见
+ *   ② isType15(node) → A0.b(node) 是否可见（可读版命名，勿叫 isWebView）
  *   ③ !node.isVisibleToUser → false
  *   ④ if (f39007b == null) { 初始化 f39008c = node 边界 }
  *   ⑤ if (c(node) && node.childCount > 0) {
@@ -177,7 +177,7 @@ object ShouldFocusNode {
         if (depth > MAX_DEPTH) return false
 
         // ② WebView 检查
-        if (isWebView(node)) {
+        if (isType15(node)) {
             val webView = findWebViewRoot(node)
             return webView?.isVisibleToUser == true
         }
@@ -459,7 +459,35 @@ object ShouldFocusNode {
      * 即使节点没有 text/desc，只要有状态或进度，也应可聚焦。
      */
     private fun hasSpeakableContent(node: AccessibilityNodeInfo): Boolean {
-        // J() —— 状态描述
+        // ★★ 本轮重核修正（可读版 `AccessibilityNodeInfoUtils.java:332~337`）
+        //
+        // 【天坦原文】就是 `hasStateDescription(nodeInfo)` 一个函数：
+        // ```java
+        // public static boolean hasStateDescription(NodeInfo nodeInfo) {
+        //     if (nodeInfo != null) {
+        //         return !TextUtils.isEmpty(nodeInfo.getStateDescription())
+        //             || nodeInfo.isCheckable()          // ← 只有 isCheckable
+        //             || hasRangeInfo(nodeInfo);
+        //     }
+        //     return false;
+        // }
+        // ```
+        //
+        // 【我原来的两处错】
+        //   ① 勾选判定写宽了：我写 `isCheckable || isChecked || isSelected`，
+        //      天坦**只有 isCheckable**。
+        //      `isChecked`/`isSelected` 是「当前状态」，`isCheckable` 才是
+        //      「这个控件具备勾选语义」。写宽会让普通选中项被当成
+        //      「有可朗读内容」→ 过度接受节点。
+        //   ② 进度判定漏了区间校验：我只判 `max - min > 0`，
+        //      天坦 `hasRangeInfo`（`:348~357`）还要求
+        //      **`current ∈ [min, max]`**：
+        //      ```java
+        //      return fB - fC > 0 && fA >= fC && fA <= fB;
+        //      ```
+        //      漏掉会让「current 越界」的畸形进度条被误认为有内容。
+
+        // ① 状态描述
         val stateDesc = try {
             node.stateDescription
         } catch (e: Throwable) {
@@ -467,18 +495,31 @@ object ShouldFocusNode {
         }
         if (!stateDesc.isNullOrEmpty()) return true
 
-        // Y() —— 勾选/选中状态
-        if (node.isCheckable || node.isChecked || node.isSelected) return true
+        // ② isCheckable（**只有它**，不含 isChecked/isSelected）
+        if (node.isCheckable) return true
 
-        // D() —— 有进度信息（对应 AbstractC3693m.D()：rangeInfo 的区间有效）
+        // ③ hasRangeInfo：区间有效 **且** current 落在区间内
+        return hasRangeInfo(node)
+    }
+
+    /**
+     * `AccessibilityNodeInfoUtils.hasRangeInfo(node)`
+     *
+     * 可读版 `:348~357`：
+     * ```java
+     * float max = i.max, min = i.min, cur = i.current;
+     * return max - min > 0 && cur >= min && cur <= max;
+     * ```
+     */
+    private fun hasRangeInfo(node: AccessibilityNodeInfo): Boolean {
         val range = try {
             node.rangeInfo
         } catch (e: Throwable) {
             null
-        }
-        if (range != null && range.max - range.min > 0f) return true
-
-        return false
+        } ?: return false
+        return (range.max - range.min) > 0f &&
+            range.current >= range.min &&
+            range.current <= range.max
     }
 
     /**
@@ -546,45 +587,97 @@ object ShouldFocusNode {
      *   **缓存不只是优化，它是终止递归的必要条件**。
      */
     private fun m(node: AccessibilityNodeInfo): Boolean {
+        // ★★ 本轮重核修正（用可读版 FocusFinder.java:293~309）
+        //
+        // 【天坦原文】
+        // ```java
+        // public final boolean hasActionableChild(NodeInfo nodeInfo) {
+        //     int childCount = nodeInfo.getChildCount();
+        //     for (int i9 = 0; i9 < childCount; i9++) {
+        //         NodeInfo child = nodeInfo.getChild(i9);
+        //         if (child != null) {
+        //             if (!f39022g.add(child)) { child.x0(); return false; }
+        //             if (child.isVisibleToUser()
+        //                 && !bridgeIsActionable_DefaultTrue(this, child, false, 2, null)   // ← 我漏了
+        //                 && ((!hasContentOrActionableChild(child)
+        //                      || !AccessibilityNodeInfoUtils.isTopLevelScrollItem(child)
+        //                      || (isActionableForAccessibility(nodeInfo)
+        //                          && isLongClickable(nodeInfo)))
+        //                     && hasContentOrActionableChild(child))) {
+        //                 return true;
+        //             }
+        //         }
+        //     }
+        //     return hasInvisibleTextChild(nodeInfo, childCount);
+        // }
+        // ```
+        //
+        // 【我原来错在哪】
+        //   ① **漏了 `!isActionable(child, true)` 这一整条** —— 它是排除项：
+        //      「子节点自身已可操作」时不再把它当「容器的可操作子节点」。
+        //      漏掉会让本该被排除的子节点把父节点判成可聚焦。
+        //   ② 三目条件抄反：我只写了 `!w || bothSelectable`，
+        //      天坦是三层嵌套，末项固定为 `hasContentOrActionableChild(child)`。
+        //   ③ `k(node) && nn(node)` 应该只是第三层的一个子条件，
+        //      且用的是 **isActionableForAccessibility**（可点击）而非我的 k。
+        //   ④ 兜底应是 `hasInvisibleTextChild`（我的 l()），这部分原来是对的。
         val count = node.childCount
-        val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(4)
         for (idx in 0 until count) {
             val child = node.getChild(idx) ?: continue
-            // 重复节点 → 天坦直接 return false
-            if (seen.containsKey(child)) return false
-            seen[child] = true
+            // 重复节点 → 天坦直接 return false（f39022g 是**静态**集合）
+            if (seenChildren.put(child, true) != null) return false
 
             if (!child.isVisibleToUser) continue
 
-            val childHasContent = p(child)
-            if (!childHasContent) continue
+            // ① 排除：子节点自身可操作
+            if (n(child, true)) continue
 
-            // W(child)：父节点是列表/网格/滚动容器
-            val w = W(child)
-            // (H(node) && N(node))：父节点既可点击又可选中
-            val bothClickableAndSelectable = k(node) && nn(node)
+            // ② 三层条件
+            val childHasContentOrActionable = p(child)          // hasContentOrActionableChild
+            val topLevelScroll = W(child)                        // isTopLevelScrollItem
+            val parentClickableAndLongClickable =
+                isActionableForAccessibility(node) && node.isLongClickable
 
-            if (!w || bothClickableAndSelectable) {
+            val inner = !childHasContentOrActionable ||
+                !topLevelScroll ||
+                parentClickableAndLongClickable
+
+            if (inner && childHasContentOrActionable) {
                 return true
             }
         }
-        // 兜底：`l(wVar, iP)` —— 见 l() 的注释
+        // 兜底：`hasInvisibleTextChild(nodeInfo, childCount)` —— 见 l()
         return l(node, count)
     }
 
     /**
-     * `AbstractC3688i.N(node)` —— 是否「可选中/已选中」
+     * 子节点去重集合 —— 天坦 `f39022g`（**静态** `HashSet`）
      *
-     * 天坦 `w7/AbstractC3688i.java`：`N` 与 `k` 是一对 ——
-     *   `k(node)` = `H(node) || N(node)`
-     *   `H(node)` = `isFocusable || hasAction(16)`（可点击）
-     *   `N(node)` = `isSelected || hasAction(32)`（可选中）
+     * 【为什么是静态共享集合而非每次新建】
+     *   天坦 `FocusFinder.java:59` 声明为 `public static final HashSet`，
+     *   并且 `shouldFocus()` 在进入判定前会 `f39022g.clear()`
+     *   （可读版第 386 行）。它的语义是「**本轮判定**里已访问过的节点」——
+     *   跨 `hasActionableChild` 的多层递归共享，用于检测
+     *   「同一子节点被重复计入」这种畸形树结构。
      *
-     * `m()` 里的 `H(wVar) && N(wVar)` 即「父节点**既**可点击**又**可选中」——
-     * 这种父节点通常是「可选中的列表项容器」。
+     * 【我原来的实现】每次调用 `m()` 都新建一个局部 map ——
+     *   去重范围缩到「单次 m() 调用内」，与天坦的跨递归语义不符。
+     *
+     * 【注意】用 IdentityHashMap 而非 HashSet：节点必须按**身份**去重，
+     *   否则内容相同的两个兄弟会被误判为重复 → 返回 false（漏判）。
      */
-    private fun nn(node: AccessibilityNodeInfo): Boolean =
-        node.isSelected || hasAction(node, 32)
+    private val seenChildren = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(16)
+
+    /**
+     * `AccessibilityNodeInfoUtils.isTopLevelScrollItem` 里用到的
+     * `a0(parent, f39055e)` —— 类名匹配
+     *
+     * `f39055e` 已核实用源码确认（`AccessibilityNodeInfoUtils.java:284`）：
+     *   `AbstractC4096c.a("com.sec.android.touchwiz.widget.TwAdapterView")`
+     * 即三星 TouchWiz 的 AdapterView —— 天坦把它当「滚动列表」的特例。
+     */
+    private fun isSamsungAdapterView(node: AccessibilityNodeInfo): Boolean =
+        classNameEquals(node, SAMSUNG_ADAPTER_VIEW)
 
     /**
      * `C3678d.l(node, count)` —— 「存在不可见但含文本的非可操作子节点」
@@ -616,6 +709,30 @@ object ShouldFocusNode {
      * **不是阈值**。
      */
     private fun l(node: AccessibilityNodeInfo, count: Int): Boolean {
+        // ★★ 本轮重核补上前置过滤器（可读版 `FocusFinder.java:278~280`）
+        //
+        // 天坦原文：
+        // ```java
+        // public final boolean hasInvisibleTextChild(NodeInfo nodeInfo, int i9) {
+        //     if (AccessibilityNodeInfoUtils.f39056f.accept(nodeInfo)) {
+        //         return false;            // ← 前置短路，我漏了
+        //     }
+        //     for (int i10 = 0; i10 < i9; i10++) { ... }
+        // }
+        // ```
+        // `f39056f` = `AccessibilityNodeInfoUtils` 内部类 `g`
+        // （`w7/AccessibilityNodeInfoUtils.java:173~181`）：
+        //   接受条件 = `hasScrollAction(node) && isVisible(node)
+        //              && nodeType ∈ {3, 8, 5, 30, 31}`
+        //   （或三星 AdapterView）
+        // 语义 = **「本节点是滚动容器」**。
+        //
+        // 【为什么滚容要短路返回 false】
+        //   滚动容器内部的「不可见含文本子节点」是**正常现象**
+        //   （RecyclerView 回收屏外 item）——
+        //   若据此把容器判成可聚焦，会让滚动容器本身抢走焦点。
+        if (isScrollableContainerNode(node)) return false
+
         for (idx in 0 until count) {
             val child = node.getChild(idx) ?: continue
             val invisible = !child.isVisibleToUser
@@ -750,18 +867,129 @@ object ShouldFocusNode {
      *   父节点是 列表(8)/网格(5)/滚动视图(30)/横向滚动(31)
      */
     private fun W(node: AccessibilityNodeInfo): Boolean {
+        // ★★ 本轮重核修正（可读版 `AccessibilityNodeInfoUtils.java:534~558`）
+        //
+        // 【天坦原文】
+        // ```java
+        // public static boolean isTopLevelScrollItem(NodeInfo nodeInfo) {
+        //     if (nodeInfo == null || !isVisible(nodeInfo)) return false;
+        //     NodeInfo parent = nodeInfo.getParent();
+        //     if (parent == null) return false;
+        //     if (hasScrollAction(parent)) return true;              // ← 我漏了
+        //     int nodeType = EventUtils.getNodeType(parent);
+        //     if (nodeType == 8 || nodeType == 5 || nodeType == 30 || nodeType == 31) {
+        //         z9 = true;                                        // ← 我有（用 role 近似）
+        //     } else if (a0(parent, f39055e)) {                     // ← 我漏了
+        //         z9 = true;
+        //     }
+        //     return z9;
+        // }
+        // ```
+        //
+        // 【我漏掉的两条】
+        //   ① `hasScrollAction(parent)` —— **优先级最高**，只要父节点
+        //      暴露任一滚动 action（`AccessibilityNodeInfoUtils.java:489~491`
+        //      列了 6 个：SCROLL_FORWARD/BACKWARD/DOWN/UP/RIGHT/LEFT）
+        //      就直接返回 true。这一条覆盖面比 nodeType 判定广得多 ——
+        //      很多自定义滚动容器的 nodeType 不是 8/5/30/31，
+        //      但有滚动 action。
+        //   ② `a0(parent, f39055e)` —— 三星 TouchWiz AdapterView 特判
+        //      （`f39055e = "com.sec.android.touchwiz.widget.TwAdapterView"`，
+        //       `:284` 已核实）。
+        //
+        // 【为什么这处影响大】`W()` 用在 `m()` 的第二层条件里；
+        //   漏判会让「父节点是可滚动容器」的子节点大量走不到返回 true 的分支。
         if (!node.isVisibleToUser) return false
         val parent = node.parent ?: return false
         return try {
+            // ① 父节点有滚动 action —— 最高优先级
+            if (hasScrollAction(parent)) return true
+
+            // ② 父节点角色是列表/网格/滚动容器
             val role = NodeRoleHelper.roleOf(parent)
-            role == NodeRoleHelper.ROLE_LIST ||
-                    role == NodeRoleHelper.ROLE_GRID ||
-                    role == NodeRoleHelper.ROLE_SCROLL_VIEW ||
-                    role == NodeRoleHelper.ROLE_HORIZONTAL_SCROLL_VIEW
+            if (role == NodeRoleHelper.ROLE_LIST ||
+                role == NodeRoleHelper.ROLE_GRID ||
+                role == NodeRoleHelper.ROLE_SCROLL_VIEW ||
+                role == NodeRoleHelper.ROLE_HORIZONTAL_SCROLL_VIEW
+            ) {
+                return true
+            }
+
+            // ③ 三星 TouchWiz AdapterView
+            isSamsungAdapterView(parent)
         } finally {
             runCatching { parent.recycle() }
         }
     }
+
+    /**
+     * `AccessibilityNodeInfoUtils.hasScrollAction(node)`
+     *
+     * `w7/AccessibilityNodeInfoUtils.java:489~491`：检查 6 个滚动 action，
+     * 任一存在即 true。底层用 `r0(node, ...actions)` 做多动作判定。
+     */
+    private fun hasScrollAction(node: AccessibilityNodeInfo): Boolean =
+        r0(
+            node,
+            ACTION_SCROLL_FORWARD, ACTION_SCROLL_BACKWARD,
+            ACTION_SCROLL_DOWN, ACTION_SCROLL_UP,
+            ACTION_SCROLL_RIGHT, ACTION_SCROLL_LEFT
+        )
+
+    /**
+     * `AccessibilityNodeInfoUtils.r0(node, vararg actions)` —— 任一动作存在
+     *
+     * 天坦 `:489` 的底层实现：对每个 action 做 `hasActionMask`
+     * （位掩码 **或** actionList，见 `NodeUtils.matchActionMask`）。
+     */
+    private fun r0(node: AccessibilityNodeInfo, vararg actions: Int): Boolean =
+        actions.any { hasActionMask(node, it) || hasAction(node, it) }
+
+    /**
+     * 类名匹配 —— 对应 `AbstractC3693z.a(className, cls)`
+     *
+     * 天坦用 `Class.forName(...)` 拿 Class 再比；白茶用字符串比较
+     * （无需反射，且对混淆过的第三方类名同样可靠）。
+     */
+    private fun classNameEquals(node: AccessibilityNodeInfo, className: String): Boolean = try {
+        node.className?.toString() == className
+    } catch (e: Throwable) {
+        false
+    }
+
+    /**
+     * `AccessibilityNodeInfoUtils.f39056f` —— 「是滚动容器」
+     *
+     * 可读版 `w7/AccessibilityNodeInfoUtils.java:173~181`（内部类 `g`）：
+     * ```java
+     * public boolean accept(NodeInfo nodeInfo) {
+     *     if (!hasScrollAction(nodeInfo) || !isVisible(nodeInfo)) return false;
+     *     int nodeType = EventUtils.getNodeType(nodeInfo);
+     *     return nodeType == 3 || nodeType == 8 || nodeType == 5
+     *         || nodeType == 30 || nodeType == 31
+     *         || a0(nodeInfo, f39055e);
+     * }
+     * ```
+     * 用途：`l()` 的前置短路 —— 滚动容器内部的不可见子节点是
+     * 正常现象（RecyclerView 回收屏外 item），不该据此判容器可聚焦。
+     */
+    private fun isScrollableContainerNode(node: AccessibilityNodeInfo): Boolean {
+        if (!hasScrollAction(node) || !node.isVisibleToUser) return false
+        val role = NodeRoleHelper.roleOf(node)
+        if (role == NodeRoleHelper.ROLE_DROP_DOWN_LIST ||   // nodeType 3
+            role == NodeRoleHelper.ROLE_LIST ||              // nodeType 8
+            role == NodeRoleHelper.ROLE_GRID ||              // nodeType 5
+            role == NodeRoleHelper.ROLE_SCROLL_VIEW ||       // nodeType 30
+            role == NodeRoleHelper.ROLE_HORIZONTAL_SCROLL_VIEW // nodeType 31
+        ) {
+            return true
+        }
+        return isSamsungAdapterView(node)
+    }
+
+    /** 三星 TouchWiz AdapterView —— 天坦 `f39055e`（`:284` 已核实） */
+    private const val SAMSUNG_ADAPTER_VIEW = "com.sec.android.touchwiz.widget.TwAdapterView"
+
 
     /**
      * 是否有文本 —— 天坦 AbstractC3693m.C()
@@ -870,7 +1098,7 @@ object ShouldFocusNode {
     /**
      * 是否 WebView —— 天坦 AbstractC3688i.v()
      */
-    private fun isWebView(node: AccessibilityNodeInfo): Boolean {
+    private fun isType15(node: AccessibilityNodeInfo): Boolean {
         // ★★ P0 修复（本轮）：语义被整体抄错
         //
         // 【天坦原文】`w7/AbstractC3688i.java:232~237`：
@@ -899,27 +1127,33 @@ object ShouldFocusNode {
         return hasAction(node, ACTION_SCROLL_FORWARD, ACTION_SCROLL_BACKWARD)
     }
 
-    /**
-     * `AccessibilityNodeInfo.ACTION_SCROLL_FORWARD` = 4096？不 —— 是 1024。
-         *
-         * 已用 `javap android.jar` 核实：
-         *   ACTION_SCROLL_FORWARD  = 4096
-         *   ACTION_SCROLL_BACKWARD = 8192
-         *
-         * 【但天坦的 v() 用的是 1024/2048】—— 那是
-         * `ACTION_NEXT_HTML_ELEMENT`(1024) / `ACTION_PREVIOUS_HTML_ELEMENT`(2048)。
-         *
-         * 【如何取舍】天坦的意图是识别「可滚动/可分页的 Web 内容」。
-         *   1024/2048 是 WebView 用于遍历 HTML 元素的 action ——
-         *   只有真正的 WebView 会暴露它们，所以用它判断「这是网页」是合理的。
-         *   白茶沿用天坦的 1024/2048（本项目规则：A/B 取舍选天坦）。
-         */
+    // ==================== Action 常量 ====================
+    //
+    // 全部用 `javap android.jar` 逐个核实，并用**可读版反编译**
+    // `w7/AccessibilityNodeInfoUtils.java:655~660` 交叉确认。
+
+    /** 1024 —— `ACTION_NEXT_HTML_ELEMENT`（可读版 `:657` 直接标注） */
     private const val ACTION_NEXT_HTML_ELEMENT = 1024
+
+    /** 2048 —— `ACTION_PREVIOUS_HTML_ELEMENT`（可读版 `:659`） */
     private const val ACTION_PREVIOUS_HTML_ELEMENT = 2048
 
-    /** 与天坦 v() 一致：用 HTML 元素遍历 action 判断 WebView */
-    private const val ACTION_SCROLL_FORWARD = ACTION_NEXT_HTML_ELEMENT
-    private const val ACTION_SCROLL_BACKWARD = ACTION_PREVIOUS_HTML_ELEMENT
+    /**
+     * 天坦 `NodeUtils.isType15()` 用的就是 1024/2048
+     * （`w7/NodeUtils.java:255~260`）。
+     *
+     * 【命名纠正】我最初把它命名为 `isWebView()` —— **错的**。
+     * 可读版显示它叫 `isType15`，含义是「有 HTML 元素遍历 action」。
+     * 真正的 WebView 判定是 `NodeNavigator.isInWebView()`
+     * （`w7/NodeNavigator.java:105`，内部走 `isInScrollView`）。
+     * 白茶暂不引入后者（用途不明），但**命名必须准确**。
+     */
+    private const val ACTION_SCROLL_FORWARD = 4096
+    private const val ACTION_SCROLL_BACKWARD = 8192
+    private const val ACTION_SCROLL_UP = 16908344
+    private const val ACTION_SCROLL_DOWN = 16908346
+    private const val ACTION_SCROLL_LEFT = 16908345
+    private const val ACTION_SCROLL_RIGHT = 16908347
 
     /**
      * 找 WebView 根 —— 天坦 A0.b()
