@@ -131,38 +131,47 @@ object NodeBoundsCalculator {
             return bounds
         }
 
-        // ③ 不可聚焦 → 用可聚焦子节点的并集
+        // ③ 不可聚焦 → 收集子节点边界的并集
         val childCount = node.childCount
-        var minTop = Int.MAX_VALUE
-        var minLeft = Int.MAX_VALUE
-        var maxBottom = Int.MIN_VALUE
-        var maxRight = Int.MIN_VALUE
-        var hasChildBounds = false
-
+        val acc = BoundsAccumulator()
         for (i in 0 until childCount) {
             val child = node.getChild(i) ?: continue
-            val childBounds = getBoundsInternal(child)
-            if (childBounds !== EMPTY_RECT && !childBounds.isEmpty) {
-                hasChildBounds = true
-                if (childBounds.top < minTop) minTop = childBounds.top
-                if (childBounds.left < minLeft) minLeft = childBounds.left
-                if (childBounds.right > maxRight) maxRight = childBounds.right
-                if (childBounds.bottom > maxBottom) maxBottom = childBounds.bottom
-            }
+            val childRect = getBoundsInternal(child)
+            if (childRect === EMPTY_RECT) continue
+            // Android Rect → Bounds（边界转换）
+            acc.add(Bounds(childRect))
         }
 
-        val bounds = Rect()
-        node.getBoundsInScreen(bounds)
+        val ownBounds = Rect()
+        node.getBoundsInScreen(ownBounds)
 
         // ★ 裁剪到自身边界内 —— 子节点并集不能超出父容器
-        if (hasChildBounds) {
-            bounds.top = Math.max(minTop, bounds.top)
-            bounds.left = Math.max(minLeft, bounds.left)
-            bounds.right = Math.min(maxRight, bounds.right)
-            bounds.bottom = Math.min(maxBottom, bounds.bottom)
-        }
+        //
+        // 【可测性】并集与裁剪是纯几何运算，已抽到
+        // `clampChildBounds(own, accumulateChildren)`（纯 JVM 可测）。
+        // 这里只负责 Android 数据采集。
+        val result = clampChildBounds(Bounds(ownBounds), acc)
+        result.toRect(ownBounds)
+        return ownBounds
+    }
 
-        return bounds
+    /**
+     * 子节点并集裁剪到自身边界 —— 纯几何，可单测
+     *
+     * 对应 TalkBack `NodeCachedBoundsCalculator.fetchBound()` 的：
+     *   bounds.top    = Math.max(minTop, bounds.top)
+     *   bounds.left   = Math.max(minLeft, bounds.left)
+     *   bounds.right  = Math.min(maxRight, bounds.right)
+     *   bounds.bottom = Math.min(maxBottom, bounds.bottom)
+     *
+     * 若没有有效的子节点边界，则返回自身边界（不裁剪）。
+     *
+     * @param own 节点自身边界
+     * @param childBounds 子节点边界累加器
+     */
+    fun clampChildBounds(own: Bounds, childBounds: BoundsAccumulator): Bounds {
+        if (!childBounds.hasValue) return own
+        return childBounds.clampTo(own)
     }
 
     /**

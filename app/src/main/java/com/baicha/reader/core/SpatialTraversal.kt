@@ -135,45 +135,56 @@ class SpatialTraversalStrategy(
     fun findFocusInDirection(from: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
         if (focusableNodes.isEmpty()) return null
 
-        // 起点也用有效边界
-        val focusedRect = Rect()
-        NodeBoundsCalculator.getBounds(from)?.let { focusedRect.set(it) }
-            ?: from.getBoundsInScreen(focusedRect)
-        if (focusedRect.isEmpty) return null
+        // 起点用「有效边界」（不可聚焦容器按可聚焦子节点并集裁剪）
+        val focusedBounds = resolveBounds(from) ?: return null
+        if (focusedBounds.isEmpty) return null
 
         // ★ TalkBack 技巧：初始候选设为「起点沿反方向偏移自身宽高 +1」
         //   这样任何真实节点都会比它更优，省掉 null 特判
-        val bestCandidateRect = Rect(focusedRect)
-        when (direction) {
-            TraversalDirection.LEFT -> bestCandidateRect.offset(focusedRect.width() + 1, 0)
-            TraversalDirection.RIGHT -> bestCandidateRect.offset(-(focusedRect.width() + 1), 0)
-            TraversalDirection.UP -> bestCandidateRect.offset(0, focusedRect.height() + 1)
-            TraversalDirection.DOWN -> bestCandidateRect.offset(0, -(focusedRect.height() + 1))
+        val bestCandidateBounds = when (direction) {
+            TraversalDirection.LEFT -> focusedBounds.offset(focusedBounds.width + 1, 0)
+            TraversalDirection.RIGHT -> focusedBounds.offset(-(focusedBounds.width + 1), 0)
+            TraversalDirection.UP -> focusedBounds.offset(0, focusedBounds.height + 1)
+            TraversalDirection.DOWN -> focusedBounds.offset(0, -(focusedBounds.height + 1))
             else -> return null
         }
 
         var closest: AccessibilityNodeInfo? = null
-        val otherRect = Rect()
+        var bestBounds = bestCandidateBounds
 
         val n = focusableNodes.size
         for (i in 0 until n) {
             val candidate = focusableNodes[i]
-            // 跳过自己
+            // 跳过自己与根
             if (candidate === from || candidate === root) continue
 
-            // ★ 用「有效边界」而非原始边界 —— 对齐 TalkBack
-            //   不可聚焦容器按可聚焦子节点并集裁剪，避免大容器抢焦点
-            val effective = NodeBoundsCalculator.getBounds(candidate)
-            if (effective == null || effective.isEmpty) continue
-            otherRect.set(effective)
+            val otherBounds = resolveBounds(candidate) ?: continue
+            if (otherBounds.isEmpty) continue
 
-            if (isBetterCandidate(direction, focusedRect, otherRect, bestCandidateRect)) {
-                bestCandidateRect.set(otherRect)
+            if (isBetterCandidate(direction, focusedBounds, otherBounds, bestBounds)) {
+                bestBounds = otherBounds
                 closest = candidate
             }
         }
 
         return closest
+    }
+
+    /**
+     * 取节点的有效边界 —— 优先用 NodeBoundsCalculator 的结果
+     *
+     * 这是唯一需要与 Android API 交互的地方：
+     *   Rect → Bounds 的转换边界。
+     */
+    private fun resolveBounds(node: AccessibilityNodeInfo): Bounds? {
+        NodeBoundsCalculator.getBounds(node)?.let { return Bounds(it) }
+        return try {
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            Bounds(r)
+        } catch (e: Throwable) {
+            null
+        }
     }
 
     // ══════════════════════════════════════════════════════════
@@ -199,9 +210,9 @@ class SpatialTraversalStrategy(
      */
     private fun isBetterCandidate(
         direction: Int,
-        source: Rect,
-        rect1: Rect,
-        rect2: Rect
+        source: Bounds,
+        rect1: Bounds,
+        rect2: Bounds
     ): Boolean {
         // ① 候选资格（比 isToDirectionOf 严格）
         if (!isCandidate(source, rect1, direction)) return false
@@ -230,7 +241,7 @@ class SpatialTraversalStrategy(
      *   "This checks whether the dest is at least partially to the direction of
      *    (e.g left of) from source."
      */
-    private fun isCandidate(src: Rect, dest: Rect, direction: Int): Boolean {
+    private fun isCandidate(src: Bounds, dest: Bounds, direction: Int): Boolean {
         return when (direction) {
             TraversalDirection.LEFT ->
                 (src.right > dest.right || src.left >= dest.right) && src.left > dest.left
@@ -262,9 +273,9 @@ class SpatialTraversalStrategy(
      */
     private fun beamBeats(
         direction: Int,
-        source: Rect,
-        rect1: Rect,
-        rect2: Rect
+        source: Bounds,
+        rect1: Bounds,
+        rect2: Bounds
     ): Boolean {
         val rect1InBeam = beamsOverlap(direction, source, rect1)
         val rect2InBeam = beamsOverlap(direction, source, rect2)
@@ -292,7 +303,7 @@ class SpatialTraversalStrategy(
     /**
      * beam 是否重叠 —— 1:1 抄 TalkBack `beamsOverlap()`
      */
-    private fun beamsOverlap(direction: Int, rect1: Rect, rect2: Rect): Boolean {
+    private fun beamsOverlap(direction: Int, rect1: Bounds, rect2: Bounds): Boolean {
         return when (direction) {
             TraversalDirection.LEFT, TraversalDirection.RIGHT ->
                 rect2.bottom >= rect1.top && rect2.top <= rect1.bottom
@@ -315,7 +326,7 @@ class SpatialTraversalStrategy(
      *
      * 溢出保护：超 10000 直接返回 MAX_VALUE（最大可能值 1400000000 < Int.MAX）。
      */
-    private fun weightedDistance(direction: Int, source: Rect, dest: Rect): Int {
+    private fun weightedDistance(direction: Int, source: Bounds, dest: Bounds): Int {
         val major = majorAxisDistance(direction, source, dest)
         val minor = minorAxisDistance(direction, source, dest)
         if (major > 10000 || minor > 10000) return Int.MAX_VALUE
@@ -327,10 +338,10 @@ class SpatialTraversalStrategy(
      *
      * 注意 TalkBack 用 `Math.max(0, ...)` —— 目标不在该方向时返回 0（不是 1）。
      */
-    private fun majorAxisDistance(direction: Int, source: Rect, dest: Rect): Int =
+    private fun majorAxisDistance(direction: Int, source: Bounds, dest: Bounds): Int =
         Math.max(0, majorAxisDistanceRaw(direction, source, dest))
 
-    private fun majorAxisDistanceRaw(direction: Int, source: Rect, dest: Rect): Int =
+    private fun majorAxisDistanceRaw(direction: Int, source: Bounds, dest: Bounds): Int =
         when (direction) {
             TraversalDirection.LEFT -> source.left - dest.right
             TraversalDirection.RIGHT -> dest.left - source.right
@@ -344,10 +355,10 @@ class SpatialTraversalStrategy(
      *
      * 注意最小值为 **1**（不是 0）—— 用于与 majorAxisDistance 打破平局。
      */
-    private fun majorAxisDistanceToFarEdge(direction: Int, source: Rect, dest: Rect): Int =
+    private fun majorAxisDistanceToFarEdge(direction: Int, source: Bounds, dest: Bounds): Int =
         Math.max(1, majorAxisDistanceToFarEdgeRaw(direction, source, dest))
 
-    private fun majorAxisDistanceToFarEdgeRaw(direction: Int, source: Rect, dest: Rect): Int =
+    private fun majorAxisDistanceToFarEdgeRaw(direction: Int, source: Bounds, dest: Bounds): Int =
         when (direction) {
             TraversalDirection.LEFT -> source.left - dest.left
             TraversalDirection.RIGHT -> dest.right - source.right
@@ -359,13 +370,13 @@ class SpatialTraversalStrategy(
     /**
      * 垂直轴距离（中心线距离）—— 1:1 抄 TalkBack `minorAxisDistance()`
      */
-    private fun minorAxisDistance(direction: Int, source: Rect, dest: Rect): Int =
+    private fun minorAxisDistance(direction: Int, source: Bounds, dest: Bounds): Int =
         when (direction) {
             TraversalDirection.LEFT, TraversalDirection.RIGHT ->
-                Math.abs(source.centerY() - dest.centerY())
+                Math.abs(source.centerY - dest.centerY)
 
             TraversalDirection.UP, TraversalDirection.DOWN ->
-                Math.abs(source.centerX() - dest.centerX())
+                Math.abs(source.centerX - dest.centerX)
 
             else -> 0
         }
@@ -375,7 +386,7 @@ class SpatialTraversalStrategy(
      *
      * 用于 beamBeats 内部；候选资格由 isCandidate 负责。
      */
-    private fun isToDirectionOf(direction: Int, src: Rect, dest: Rect): Boolean =
+    private fun isToDirectionOf(direction: Int, src: Bounds, dest: Bounds): Boolean =
         when (direction) {
             TraversalDirection.LEFT -> src.left >= dest.right
             TraversalDirection.RIGHT -> src.right <= dest.left
