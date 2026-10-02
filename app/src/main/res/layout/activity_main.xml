@@ -63,9 +63,17 @@
             android:text="@string/log_title" />
 
         <Button
+            android:id="@+id/btnLogFilter"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:minHeight="48dp"
+            android:text="@string/log_filter_all" />
+
+        <Button
             android:id="@+id/btnClear"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_height="48dp"
+            android:minHeight="48dp"
             android:text="@string/btn_clear_log" />
     </LinearLayout>
 

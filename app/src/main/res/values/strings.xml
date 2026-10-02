@@ -11,6 +11,21 @@
     <string name="hint_enable">请在上方列表中找到「白茶读屏」并开启</string>
     <string name="log_title">事件日志</string>
     <string name="btn_clear_log">清空</string>
+    <!-- 日志筛选（读屏用户靠它把日志收窄到一类） -->
+    <string name="log_filter_label">只看：</string>
+    <string name="log_filter_all">全部</string>
+    <string name="log_filter_none">全部（不过滤）</string>
+    <string name="log_filter_applied">日志筛选：%1$s</string>
+    <string name="log_filter_cleared">日志筛选已取消，显示全部</string>
+    <string name="log_filter_count">%1$s，%2$d 条</string>
+    <string name="log_filter_empty">当前筛选下没有日志</string>
+    <string name="log_cat_focus">焦点</string>
+    <string name="log_cat_event">事件</string>
+    <string name="log_cat_speech">语音</string>
+    <string name="log_cat_gesture">手势</string>
+    <string name="log_cat_cache">缓存</string>
+    <string name="log_cat_system">系统</string>
+    <string name="log_cat_other">其它</string>
 
     <!-- 语音设置 -->
     <string name="btn_tts_settings">语音设置</string>
