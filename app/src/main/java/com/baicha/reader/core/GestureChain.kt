@@ -133,22 +133,72 @@ class GestureChain {
      * @return true = 已消费
      */
     fun handle(gestureId: Int, displayId: Int = 0): Boolean {
-        // ★ ① 双击/双击长按：硬编码优先（天坦行为）
+        // ★ ① 双击/双击长按：**硬编码优先且必须终止**（天坦行为）
+        //
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮修复：原来允许「处理器没消费就继续走链」，这是错的】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 天坦 `Q6/TouchInteractionMonitor.java:860~872`（原样摘录）：
+        // ```java
+        //   if (gestureId == 17) {
+        //       if (this.f7610o) {
+        //           F(accessibilityGestureEvent);       // 触摸探索模式：转交手势链
+        //           return;                             // ← 无论如何都 return
+        //       } else {
+        //           this.f7600e.performClick();         // 否则：直接点击当前焦点
+        //           return;                             // ← 无论如何都 return
+        //       }
+        //   }
+        //   if (gestureId == 18) {
+        //       this.f7600e.performLongClickAndStartDrag();
+        //       return;                                 // ← 无条件 return
+        //   }
+        // ```
+        //
+        // **两个分支都 `return`** —— 双击（17）在任何情况下都不会
+        // 落到后面的通用手势链上；双击长按（18）同理。
+        //
+        // 【我原来写的注释「处理器没消费 → 继续走链（天坦也是这个行为）」
+        //   是我自己臆断的，源码里没有这个行为】——
+        // 这正是目标里点名的错误模式②「凭印象写注释，比代码更危险」。
+        //
+        // 【真机后果】原先当 `clickTarget()` 失败（当前节点不可点击/已被
+        // 回收）时会**继续走链**，于是同一个双击被
+        //   MediaControlActor / FullScreenModeActor / VideoBrowseActor /
+        //   SlidingMenuActor / DefaultNavigationActor
+        // 依次尝试 —— 用户双击一个不可点节点，可能莫名其妙触发
+        // 「停止播放」「退出全屏」「打开侧边菜单」之类的**无关动作**，
+        // 或者被 DefaultNavigationActor 当成普通手势再走一遍导航。
+        // 而按天坦语义，双击就是这个双击，不该变成别的东西。
+        //
+        // 【修复】改为「调用处理器，无论成功与否都终止」。
+        // handler 为 null（未接线）时也不再继续走链 ——
+        // 与天坦一致（天坦这里的两个分支都不依赖外部是否注册）。
         if (gestureId == GESTURE_DOUBLE_TAP) {
             val handler = onDoubleTap
-            if (handler != null && handler.invoke(displayId)) {
+            val consumed = handler != null && handler.invoke(displayId)
+            if (consumed) {
                 handledCount++
-                lastHandledBy = "DoubleTap"
-                return true
+            } else {
+                // 未消费也终止 —— 但要记账，便于真机排障时区分
+                // 「双击没生效」到底是「没处理」还是「处理失败」
+                unhandledCount++
             }
-            // 处理器没消费 → 继续走链（天坦也是这个行为）
-        } else if (gestureId == GESTURE_DOUBLE_TAP_AND_HOLD) {
+            lastHandledBy = "DoubleTap"
+            return consumed
+        }
+
+        if (gestureId == GESTURE_DOUBLE_TAP_AND_HOLD) {
             val handler = onDoubleTapHold
-            if (handler != null && handler.invoke(displayId)) {
+            val consumed = handler != null && handler.invoke(displayId)
+            if (consumed) {
                 handledCount++
-                lastHandledBy = "DoubleTapHold"
-                return true
+            } else {
+                unhandledCount++
             }
+            lastHandledBy = "DoubleTapHold"
+            return consumed
         }
 
         // ★ ② 导航切换手势（硬编码优先）
