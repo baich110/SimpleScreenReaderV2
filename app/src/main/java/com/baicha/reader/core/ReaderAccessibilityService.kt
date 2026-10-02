@@ -150,6 +150,10 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var textMonitor: NodeTextMonitor
         private set
 
+    /** 输入法适配器（候选词上屏 / 播报 / 打断） */
+    lateinit var imeAdapter: ImeAdapter
+        private set
+
     // ==================== 朗读设置 ====================
 
     /** 语序（对应天坦 GlobalConfig.z()） */
@@ -296,7 +300,12 @@ class ReaderAccessibilityService : AccessibilityService() {
             onModeChanged = { mode ->
                 // 切换导航后清缓存（过滤器变了，判定结果不再有效）
                 CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
-                speech.speak(mode.label, interrupt = true)
+                // ★ 网页场景念「网页链接」而非「链接」—— 让用户听出模式
+                //   对齐天坦 X6/z.b.f(context, useWeb)
+                speech.speak(
+                    NavigationLabel.of(mode, inWebContext()),
+                    interrupt = true
+                )
                 haptic.focus()
                 // ★ 持久化（P1-5）：下次服务重启仍是这个导航
                 NavigationStore.save(this@ReaderAccessibilityService, mode)
@@ -324,6 +333,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         sound = SoundManager(this).apply { preloadAll() }
         autoScroll = AutoScrollManager(this, focus)
         webNavigator = WebElementNavigator()
+        imeAdapter = ImeAdapter(this)
         // ★ 增量文本监控（文本差分）—— 实时更新界面只念变化部分
         textMonitor = NodeTextMonitor().apply {
             enabled = true
@@ -830,6 +840,18 @@ class ReaderAccessibilityService : AccessibilityService() {
         return ok
     }
 
+    /**
+     * 当前是否处于网页上下文。
+     *
+     * 【判定依据】当前焦点节点是否暴露 HTML 元素动作 ——
+     * 这是 WebView 自己声明的能力，比猜包名可靠
+     * （对齐 TalkBack `WebInterfaceUtils.supportsWebActions()`）。
+     */
+    private fun inWebContext(): Boolean {
+        val node = focus.getFocused() ?: return false
+        return webNavigator.supportsWebActions(node)
+    }
+
     /** 媒体手势（委托给 GestureActionHandler） */
     private fun handleMediaGesture(gestureId: Int): Boolean =
         gestureActions.handleMappedGesture(gestureId)
@@ -1095,34 +1117,39 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
     }
 
+    // ---- 输入法适配（委托给 ImeAdapter）----
+
+    /**
+     * 候选词上屏（输入法请求）。
+     *
+     * 【本轮变更】原 `activateNodeByTexts` 只能走节点点击，
+     * 且没有调用方。现改走 [ImeAdapter] 的三级降级链：
+     * 输入连接 → 节点点击 → 明确失败。
+     */
+    fun commitImeCandidate(text: String): Boolean {
+        val method = imeAdapter.commitCandidate(text)
+        if (method != null) {
+            log("候选词上屏(${method.label}): $text")
+            return true
+        }
+        log("候选词上屏失败: $text")
+        return false
+    }
+
     fun speakFromIme(text: String, queueMode: Int) {
-        speech.speak(text, interrupt = queueMode == 0)
+        imeAdapter.speakCandidate(text, queueMode, speech)
     }
 
     fun interruptSpeech() {
-        speech.stop()
+        imeAdapter.interruptSpeech(speech)
         log("输入法中断播报")
     }
 
-    /** 按文本查找并激活节点（输入法候选词上屏） */
-    fun activateNodeByTexts(texts: List<String>): Boolean {
-        val root = rootInActiveWindow ?: return false
-        val textSet = texts.toHashSet()
-        val target = findNodeByTexts(root, textSet, 0) ?: return false
+    /** 删除光标前字符（输入法退格） */
+    fun deleteBackward(count: Int = 1): Boolean = imeAdapter.deleteBackward(count)
 
-        var node: AccessibilityNodeInfo? = target
-        var depth = 0
-        while (node != null && depth < 10) {
-            if (node.isClickable && node.isEnabled) {
-                val ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                log("输入法激活: ${texts.firstOrNull()}, ok=$ok")
-                return ok
-            }
-            node = node.parent
-            depth++
-        }
-        return false
-    }
+    /** 当前是否可接收输入法文字 */
+    fun canCommitImeText(): Boolean = imeAdapter.canCommit()
 
     private fun findNodeByTexts(
         node: AccessibilityNodeInfo,
