@@ -168,6 +168,35 @@ class FocusManager(
     var retryCount = 0L
         private set
 
+    // ==================== 滚动定位（P1-1）====================
+
+    /**
+     * 「跳到顶部/底部」钩子 —— 由服务注入。
+     *
+     * 参数 = 是否跳顶部（true 顶部 / false 底部）
+     * 返回 = 容器是否接受（false → 回退普通遍历，不静默）
+     *
+     * 【为什么用钩子而不是直接调 ScrollToPosition】
+     *   与 granularityMover 同构：FocusManager 不持有 Android 上下文，
+     *   保持纯逻辑可测；具体实现由服务层注入。
+     */
+    var scrollJump: ((top: Boolean) -> Boolean)? = null
+
+    /** 本次导航是否为「跳到顶部」 */
+    @Volatile
+    private var scrollJumpToTop = true
+
+    /**
+     * 设置滚动定位方向 —— 由服务在调用 moveFocus 前设置。
+     *
+     * 【为什么不用参数传递】
+     *   moveFocus 的签名已被 3 个调用方使用，加参数会波及全部；
+     *   且方向只在「滚动定位」这一种导航下有意义。
+     */
+    fun setScrollJumpDirection(top: Boolean) {
+        scrollJumpToTop = top
+    }
+
     // ==================== 获取焦点 ====================
 
     /**
@@ -282,6 +311,26 @@ class FocusManager(
         strategyType: Int,
         filter: ((AccessibilityNodeInfo) -> Boolean)?
     ): AccessibilityNodeInfo? {
+        // ★ ⓪ 滚动定位（跳到顶部/底部）
+        //
+        // 对应 TalkBack `performActionScrollToPosition()`。
+        // 放在最前面：它不参与遍历、不受防抖/滚动拦截影响 ——
+        // 「跳到顶部」是个明确的一次性指令，被防抖吞掉才是错的。
+        //
+        // 【为什么不做滚动状态判定】
+        //   TalkBack 把它当作独立动作（ScrollActionRecord.ACTION_AUTO_SCROLL），
+        //   不与逐项导航共用去重窗口。
+        val jump = scrollJump
+        if (jump != null) {
+            val handled = jump.invoke(scrollJumpToTop)
+            if (handled) {
+                ReaderLog.d(TAG, if (scrollJumpToTop) "已跳到顶部" else "已跳到底部")
+                return null   // 位置已改变，焦点由滚动事件回带，本次不设焦点
+            }
+            // 容器不支持 → 交给下面的普通遍历（不静默）
+            ReaderLog.d(TAG, "容器不支持滚动定位 → 回退遍历")
+        }
+
         // ★ ① 滚动中拦截（天坦行为）
         //
         // 【状态机说明】isScrolling 是「滚动进行中」的标志。

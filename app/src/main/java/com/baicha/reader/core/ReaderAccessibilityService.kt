@@ -142,6 +142,10 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var autoScroll: AutoScrollManager
         private set
 
+    /** 网页元素导航协调器（P1-3） */
+    lateinit var webNavigator: WebElementNavigator
+        private set
+
     // ==================== 朗读设置 ====================
 
     /** 语序（对应天坦 GlobalConfig.z()） */
@@ -290,8 +294,24 @@ class ReaderAccessibilityService : AccessibilityService() {
                 CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
                 speech.speak(mode.label, interrupt = true)
                 haptic.focus()
+                // ★ 持久化（P1-5）：下次服务重启仍是这个导航
+                NavigationStore.save(this@ReaderAccessibilityService, mode)
+                // ★ 光标重定位（P1-6）
+                //
+                // 切到「按字」/「按词」时，旧的光标位置会让系统
+                // 从一个错误起点开始算 —— 第一个词可能从半个字开始念。
+                // 对齐 TalkBack resetNavigableNodesSelection()。
+                CursorRepositioner.onGranularityChanged(
+                    node = focus.getFocused(),
+                    microGranularity = CursorRepositioner.isMicroGranularity(granularityLevel())
+                )
                 log("导航 → ${mode.label}")
             }
+            // ★ 恢复上次导航（P1-5）
+            //
+            // 用 restore() 而非 setMode()：恢复配置不该有播报/震动，
+            // 否则每次开机都会莫名念一遍导航名。
+            restore(NavigationStore.load(this@ReaderAccessibilityService))
         }
 
         // ---- 辅助组件 ----
@@ -299,6 +319,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         audioFocus = AudioFocusManager(this)
         sound = SoundManager(this).apply { preloadAll() }
         autoScroll = AutoScrollManager(this, focus)
+        webNavigator = WebElementNavigator()
 
         // ---- 事件处理器（从本类抽出）----
         eventHandler = AccessibilityEventHandler(
@@ -348,6 +369,23 @@ class ReaderAccessibilityService : AccessibilityService() {
             } else {
                 false   // 系统不支持 → 回退到普通遍历
             }
+        }
+        // ★ 滚动定位委托（跳到顶部/底部）—— P1-1
+        //
+        // 对齐 TalkBack ACTION_SCROLL_TO_POSITION：
+        //   向上找可滚动容器 → 发 (row, column) → App 自己一步到位。
+        // 不用 ACTION_SCROLL_FORWARD 循环：依赖滚动量与惯性，跳不准。
+        focus.scrollJump = { top ->
+            val current = focus.getFocused() ?: rootInActiveWindow
+            val ok = if (top) ScrollToPosition.scrollToTop(current)
+            else ScrollToPosition.scrollToBottom(current)
+            if (ok) {
+                // 容器已接受 → 焦点位置由滚动事件回带。
+                // 标记「滚动进行中」，避免用户在容器还在滚时又猛点导航。
+                focus.onScrollStart(if (top) FocusManager.DIR_PREVIOUS else FocusManager.DIR_NEXT)
+                autoScroll.onScrollSettled?.invoke()
+            }
+            ok
         }
         // ★ 滚动结束时显式结束「滚动中」状态（避免隐式依赖 TTL）
         autoScroll.onScrollSettled = { focus.onScrollEnd() }
@@ -419,6 +457,9 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
         CacheRegistry.register(CacheRegistry.Level.WINDOW, "traversalIndex") {
             TatansTraversal.invalidateIndexCache()
+        }
+        CacheRegistry.register(CacheRegistry.Level.WINDOW, "webElementNavigator") {
+            webNavigator.clear()
         }
 
         // ---- 滚动：只清可见性相关（结构没变）----
@@ -723,6 +764,36 @@ class ReaderAccessibilityService : AccessibilityService() {
             haptic.boundary()
             log("窗口导航：无更多窗口")
             return false
+        }
+
+        // ★ 网页元素导航（P1-3）—— 必须在普通遍历之前
+        //
+        // 对应 TalkBack `CursorGranularityManager.navigateWeb()`：
+        // 在 WebView 里，「链接」「标题」「控件」三种导航走
+        // ACTION_NEXT_HTML_ELEMENT，由 WebView 按 HTML 语义查找。
+        //
+        // 【为什么优先于树遍历】
+        //   WebView 的无障碍树是惰性展开的，远处的链接/标题根本不在树里，
+        //   自己遍历会「找不到就报边界」——用户以为到底了，其实没有。
+        if (navigation.current.let { it == NavigationMode.LINKS ||
+                it == NavigationMode.HEADINGS || it == NavigationMode.CONTROLS }) {
+            val cur = focus.getFocused()
+            if (cur != null && webNavigator.tryNavigate(cur, navigation.current, forward)) {
+                log("网页元素导航：${navigation.current.label}")
+                // 位置已由 WebView 处理，新焦点由事件回带
+                return true
+            }
+        }
+
+        // ★ 滚动定位（跳到顶部/底部）—— P1-1
+        //
+        // 对应 TalkBack `performActionScrollToPosition()`。
+        // 方向来自当前导航枚举，而不是手势方向 ——
+        // 「跳到顶部」是一个动作，向上/向下滑动对它没有意义。
+        when (navigation.current) {
+            NavigationMode.SCROLL_TOP -> focus.setScrollJumpDirection(top = true)
+            NavigationMode.SCROLL_BOTTOM -> focus.setScrollJumpDirection(top = false)
+            else -> {}
         }
 
         val dir = if (forward) FocusManager.DIR_NEXT else FocusManager.DIR_PREVIOUS

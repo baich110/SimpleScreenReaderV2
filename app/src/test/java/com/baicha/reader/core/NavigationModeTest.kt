@@ -8,14 +8,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 导航模式单测 —— 锁定 26 种导航的定义与切换
+ * 导航模式单测 —— 锁定导航定义与切换
  */
 class NavigationModeTest {
 
     @Test
-    fun navigation_count_is_27() {
-        // 天坦 X6/z 定义了 27 种导航（序号 0~26，逐条清点源码确认）
-        assertEquals(27, NavigationMode.values().size)
+    fun navigation_count_is_29() {
+        // 天坦 X6/z 定义了 27 种导航（序号 0~26，逐条清点源码确认）。
+        // 白茶在此基础上加 2 种（跳到顶部/底部，P1-1）：
+        //   天坦把「滚动定位」放在手势里，白茶提为导航模式 ——
+        //   对视障用户而言「我现在处于跳到顶部模式」比
+        //   「记住某个手势是跳顶部」更符合心智模型。
+        assertEquals(29, NavigationMode.values().size)
     }
 
     @Test

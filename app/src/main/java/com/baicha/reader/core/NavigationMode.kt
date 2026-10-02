@@ -131,6 +131,16 @@ enum class NavigationMode(
     SPLIT_TRAVERSAL("拆分遍历", 18, 0, NavigationKind.TRAVERSAL, implemented = false),
     WINDOWS_NAVIGATION("窗口导航", 9, 0, NavigationKind.TRAVERSAL),
 
+    // ==================== 滚动定位（P1-1）====================
+    //
+    // 对应 TalkBack `FocusProcessorForLogicalNavigation
+    //   .performActionScrollToPosition()`。
+    //
+    // 与「遍历」的区别：不逐项移动焦点，而是让容器一步跳到目标位置。
+    // 长列表里遍历到第 1000 项要点 1000 次，而定位只需一次。
+    SCROLL_TOP("跳到顶部", 33, 0, NavigationKind.SCROLL_JUMP),
+    SCROLL_BOTTOM("跳到底部", 34, 0, NavigationKind.SCROLL_JUMP),
+
     // ==================== 自动类 ====================
     CONTINUES_READING("连续朗读", 11, 0, NavigationKind.AUTO, implemented = false),
 
@@ -206,7 +216,16 @@ enum class NavigationKind {
     TOOL,
 
     /** 标记：用户自定义的路标 */
-    MARKER
+    MARKER,
+
+    /**
+     * 滚动定位：让可滚动容器一步跳到顶部/底部
+     *
+     * 对应 TalkBack ACTION_SCROLL_TO_POSITION 路径。
+     * 与 TRAVERSAL 的区别：不移动焦点到相邻节点，
+     * 而是改变「容器看哪里」，焦点随后由滚动事件回带。
+     */
+    SCROLL_JUMP
 }
 
 /**
@@ -248,6 +267,26 @@ class NavigationManager {
 
     /** 各导航的过滤器缓存（惰性构建，切换时复用） */
     private val filterCache = HashMap<NavigationMode, (AccessibilityNodeInfo) -> Boolean>(8)
+
+    /**
+     * 恢复导航（P1-5，不触发 [onModeChanged]）
+     *
+     * 【与 setMode 的区别】
+     *   setMode 是「用户主动切换」——要播报、要震动、要持久化。
+     *   restore 是「服务启动时读回配置」——不应有任何用户可感知反馈，
+     *   否则每次开机都会莫名念一遍导航名。
+     *
+     * 【为什么不做 implemented 校验】
+     *   存进去的一定是当次实现过的导航；若版本降级导致某导航消失，
+     *   `NavigationStore.load()` 已回退 DEFAULT，这里拿到的一定合法。
+     *   再校验一次反而会在「新增导航后又降级」时把用户配置吞掉。
+     */
+    fun restore(mode: NavigationMode) {
+        if (mode == current) return
+        if (!mode.implemented) return   // 保险：不恢复不可用导航
+        current = mode
+        ReaderLog.i("NavigationMode", "恢复导航：${mode.label}（类型码 ${mode.typeCode}）")
+    }
 
     /**
      * 切换导航
