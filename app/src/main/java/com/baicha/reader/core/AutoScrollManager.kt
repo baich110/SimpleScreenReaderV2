@@ -46,13 +46,25 @@ class AutoScrollManager(
     companion object {
         private const val TAG = "AutoScroll"
 
-        /** 重试间隔 —— 天坦 25ms */
+        /**
+         * 重试间隔 —— 天坦 25ms
+         *
+         * 注意：新框架统一用 [ScrollFocusState.RETRY_DELAY_MS]，
+         * 此常量仅供旧代码路径使用，保留是为兼容。
+         */
+        @Deprecated("改用 ScrollFocusState.RETRY_DELAY_MS")
         private const val RETRY_DELAY_MS = 25L
 
         /** 滚动完成检查延迟 —— 天坦 110ms */
         private const val SCROLL_SETTLE_MS = 110L
 
-        /** 最大重试次数（防死循环） */
+        /**
+         * 最大重试次数
+         *
+         * 【修正】原为 40，天坦是 **100**（"i9 > 100"）。
+         * 新框架统一用 [ScrollFocusState.MAX_ATTEMPT]。
+         */
+        @Deprecated("改用 ScrollFocusState.MAX_ATTEMPT")
         private const val MAX_RETRY = 40
     }
 
@@ -76,35 +88,150 @@ class AutoScrollManager(
     /**
      * 滚动任务 —— 天坦 M6.h.f 内部类
      */
-    private inner class ScrollTask(
-        val scrollNode: AccessibilityNodeInfo,
-        val pivotNode: AccessibilityNodeInfo,
-        val direction: Int,
-        val targetType: Int
-    ) : Runnable {
-        var retryCount = 0
+    // ==================== 恢复回调 ====================
+
+    /**
+     * 滚动恢复回调 —— 对应天坦 `M6/h` 内部类 `a`
+     *
+     * 服务可注入以处理「滚动成功/失败」的后续动作
+     * （例如失败后尝试跨窗口导航）。
+     */
+    @Volatile
+    var recoveryCallback: ScrollRecoveryCallback? = null
+
+    /** 最近一次恢复结果（诊断） */
+    @Volatile
+    var lastResult: ScrollRecoveryResult? = null
+        private set
+
+    /**
+     * 滚动重试任务 —— 对应天坦 `M6/h` 内部类 `f`
+     *
+     * 天坦原逻辑：
+     *   run() {
+     *       if (b0(scrollNode, pivot, dir, type)) {
+     *           a()                              // 成功 → 取消
+     *       } else {
+     *           handler.postDelayed(this, 25L)   // 失败 → 25ms 重试
+     *       }
+     *   }
+     */
+    private inner class ScrollTask(val state: ScrollFocusState) : Runnable {
 
         override fun run() {
-            if (retryCount++ > MAX_RETRY) {
-                ReaderLog.w(TAG, "autoScroll: max retry reached")
-                cancel()
+            if (state.cancelled) return
+
+            // ① 重试上限检查 —— 对应天坦 "i9 > 100"
+            val attempt = state.nextAttempt()
+            if (state.isExhausted()) {
+                ReaderLog.w(TAG, "滚动重试超限（$attempt 次），判定失败")
+                lastResult = ScrollRecoveryResult.Exhausted(attempt)
+                onFailed()
                 return
             }
 
-            if (tryFocusAfterScroll(scrollNode, pivotNode, direction, targetType)) {
-                ReaderLog.d(TAG, "autoScroll: success after ${retryCount} retries")
-                cancel()
-            } else {
-                handler.postDelayed(this, RETRY_DELAY_MS)
+            // ② 尝试聚焦（节点可空 → 缺失时视为未成功，继续重试）
+            val scrollNode = state.scrollNode
+            val anchorNode = state.anchorNode
+            if (scrollNode == null || anchorNode == null) {
+                lastResult = ScrollRecoveryResult.Retry
+                handler.postDelayed(this, state.retryDelay())
+                return
             }
+
+            val boundsChanged = hasBoundsChanged(state)
+            val focused = tryFocusAfterScroll(
+                scrollNode, anchorNode, state.direction, state.targetType
+            )
+
+            if (focused != null) {
+                ReaderLog.d(TAG, "滚动聚焦成功（第 $attempt 次，boundsChanged=$boundsChanged）")
+                lastResult = ScrollRecoveryResult.Success(focused, attempt)
+                onSucceeded(boundsChanged)
+                return
+            }
+
+            // ③ 失败 → 按 targetType 决定的延迟重试
+            lastResult = ScrollRecoveryResult.Retry
+            handler.postDelayed(this, state.retryDelay())
         }
 
         fun cancel() {
+            state.cancel()
             handler.removeCallbacks(this)
-            currentTask = null
+            if (currentTask === this) currentTask = null
             isScrolling = false
         }
     }
+
+    /**
+     * 成功回调 —— 对应天坦 `M6/h.a.e(boundsChanged)`
+     *
+     * 天坦逻辑：
+     *   if (f6023b == 2) postDelayed(runnable, 500L) else runnable.run()
+     *   → targetType == 2（慢速）时延迟 500ms 再收尾
+     */
+    private fun onSucceeded(boundsChanged: Boolean) {
+        val task = currentTask ?: return
+        val state = task.state
+        task.cancel()
+
+        val notify = Runnable {
+            recoveryCallback?.onAutoScrolled(boundsChanged)
+        }
+        if (state.targetType == ScrollFocusState.TYPE_SLOW) {
+            handler.postDelayed(notify, ScrollFocusState.SLOW_RETRY_DELAY_MS)
+        } else {
+            notify.run()
+        }
+    }
+
+    /**
+     * 失败回调 —— 对应天坦 `M6/h.a.d()` / `M6/h.H()`
+     *
+     * 天坦逻辑：
+     *   if (assumeScrollSuccess) { 视为成功 }
+     *   else { onAutoScrollFailed() }
+     */
+    private fun onFailed() {
+        val task = currentTask ?: return
+        val state = task.state
+        task.cancel()
+
+        val cb = recoveryCallback
+        if (cb != null && cb.assumeScrollSuccess()) {
+            ReaderLog.i(TAG, "假定滚动成功（assumeScrollSuccess）")
+            cb.onAutoScrolled(false)
+        } else {
+            cb?.onAutoScrollFailed()
+        }
+    }
+
+    /**
+     * 边界是否变化 —— 对应天坦的 `boundsChanged` 判定
+     *
+     * 【为什么需要】
+     *   判断「滚动是否真的生效」：如果锚点节点的边界没变，
+     *   说明 App 没有响应滚动指令 → 应视为失败或继续重试。
+     */
+    private fun hasBoundsChanged(state: ScrollFocusState): Boolean {
+        val node = state.anchorNode ?: return false
+        return try {
+            val now = android.graphics.Rect()
+            node.getBoundsInScreen(now)
+            Bounds(now) != state.boundsBeforeScroll
+        } catch (e: Throwable) {
+            // 节点已失效 → 视为"变了"（发生了某种变化）
+            true
+        }
+    }
+
+    /** 当前是否有滚动任务在跑 */
+    val hasActiveTask: Boolean
+        get() = currentTask != null
+
+    /** 当前重试次数（诊断） */
+    fun currentAttempt(): Int = currentTask?.state?.attempt ?: 0
 
     /**
      * 触发自动滚动 —— 1:1 抄天坦 M6/h.java c0()
@@ -134,31 +261,44 @@ class AutoScrollManager(
 
         currentTask?.cancel()
 
-        val task = ScrollTask(
-            AccessibilityNodeInfo.obtain(scrollNode),
-            AccessibilityNodeInfo.obtain(pivotNode),
-            direction,
-            targetType
+        // 记录锚点滚动前的边界 —— 用于 boundsChanged 判定
+        val boundsBefore = try {
+            val r = android.graphics.Rect()
+            pivotNode.getBoundsInScreen(r)
+            Bounds(r)
+        } catch (e: Throwable) {
+            Bounds.EMPTY
+        }
+
+        val state = ScrollFocusState(
+            scrollNode = AccessibilityNodeInfo.obtain(scrollNode),
+            anchorNode = AccessibilityNodeInfo.obtain(pivotNode),
+            direction = direction,
+            targetType = targetType,
+            isSingleColumnList = false,
+            boundsBeforeScroll = boundsBefore
         )
+
+        val task = ScrollTask(state)
         currentTask = task
         isScrolling = true
         lastScrollDirection = direction
 
-        ReaderLog.d(TAG, "autoScroll: start direction=$direction")
-        handler.postDelayed(task, RETRY_DELAY_MS)
+        ReaderLog.d(TAG, "autoScroll: 启动 direction=$direction type=$targetType")
+        handler.postDelayed(task, ScrollFocusState.RETRY_DELAY_MS)
     }
 
     /**
      * 滚动后尝试聚焦 —— 1:1 抄天坦 M6/h.java b0()
      *
-     * @return true = 聚焦成功（停止重试）
+     * @return 聚焦成功的节点；null = 未成功（应继续重试）
      */
     private fun tryFocusAfterScroll(
         scrollNode: AccessibilityNodeInfo,
         pivotNode: AccessibilityNodeInfo,
         direction: Int,
         targetType: Int
-    ): Boolean {
+    ): AccessibilityNodeInfo? {
         return try {
             // ① 从滚动容器开始遍历
             val traversal = TatansTraversal(scrollNode)
@@ -168,26 +308,28 @@ class AutoScrollManager(
             val forward = direction == 1
             val next = if (forward) traversal.next(pivotNode) else traversal.previous(pivotNode)
             if (next == null) {
-                ReaderLog.d(TAG, "autoScroll: no next node")
-                return false
+                ReaderLog.d(TAG, "滚动后未找到下一个节点")
+                return null
             }
 
-            // ③ 确认还在同一个滚动容器里
+            // ③ 确认还在同一个滚动容器里（天坦：必须同一个容器）
             val scrolled = findScrollableAncestor(next)
-            if (scrolled != scrollNode) {
-                ReaderLog.d(TAG, "autoScroll: left scroll container")
-                return false
+            if (scrolled !== scrollNode) {
+                ReaderLog.d(TAG, "已离开滚动容器")
+                return null
             }
 
             // ④ 尝试聚焦
-            val focused = focusManager.applyFocus(next)
-            if (focused) {
-                ReaderLog.d(TAG, "autoScroll: focused ${focusManager.desc(next)}")
+            val ok = focusManager.applyFocus(next)
+            if (ok) {
+                ReaderLog.d(TAG, "滚动后聚焦: ${focusManager.desc(next)}")
+                next
+            } else {
+                null
             }
-            focused
         } catch (e: Exception) {
-            ReaderLog.w(TAG, "autoScroll: exception ${e.message}")
-            false
+            ReaderLog.w(TAG, "滚动聚焦异常: ${e.message}")
+            null
         }
     }
 

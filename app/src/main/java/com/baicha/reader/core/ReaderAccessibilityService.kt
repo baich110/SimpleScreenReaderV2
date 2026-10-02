@@ -252,6 +252,38 @@ class ReaderAccessibilityService : AccessibilityService() {
         // ---- 焦点管理委托 ----
         focus.onCancelScroll = { autoScroll.stop() }
 
+        // ---- ★ 滚动焦点恢复回调 —— 对应天坦 M6/h 内部类 a ----
+        //
+        // 滚动失败（重试 100 次仍无果）时，兜底尝试跨窗口导航。
+        // 这是「滚动到底部后焦点丢失」的补救路径。
+        autoScroll.recoveryCallback = object : ScrollRecoveryCallback {
+            override fun onAutoScrolled(boundsChanged: Boolean) {
+                log("滚动完成（边界变化=$boundsChanged）")
+            }
+
+            override fun onAutoScrollFailed() {
+                log("滚动失败 → 尝试跨窗口兜底")
+                // 兜底：用跨窗口导航找下一个焦点
+                val node = WindowTraversal.navigateToNextWindow(
+                    service = this@ReaderAccessibilityService,
+                    forward = true
+                )
+                if (node != null) {
+                    if (focus.applyFocus(node)) {
+                        log("跨窗口兜底成功: ${focus.desc(node)}")
+                        speakNode(node, "跨窗口")
+                    }
+                } else {
+                    log("跨窗口兜底：无可用窗口")
+                }
+            }
+
+            override fun assumeScrollSuccess(): Boolean {
+                // 默认不假定成功（保持天坦的保守行为）
+                return false
+            }
+        }
+
         // ---- 手势责任链装配（顺序 = 优先级）----
         setupGestureChain()
 
