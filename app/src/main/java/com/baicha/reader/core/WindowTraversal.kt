@@ -80,7 +80,7 @@ object WindowTraversal {
      */
     val FOCUSABLE: WindowFilter = WindowFilter { w ->
         if (w == null) return@WindowFilter false
-        if (w.type == TYPE_INPUT_METHOD) return@WindowFilter false
+        if (safeType(w) == TYPE_INPUT_METHOD) return@WindowFilter false
         val root = safeRoot(w) ?: return@WindowFilter false
         hasFocusableInSubtree(root)
     }
@@ -92,7 +92,7 @@ object WindowTraversal {
      */
     val NORMAL: WindowFilter = WindowFilter { w ->
         if (w == null) return@WindowFilter false
-        val type = w.type
+        val type = safeType(w)
         val accepted = type == TYPE_APPLICATION ||
                 type == TYPE_SPLIT_SCREEN_DIVIDER ||
                 type == TYPE_SYSTEM ||
@@ -109,11 +109,11 @@ object WindowTraversal {
 
     /** 非当前窗口 —— 对应天坦内部类 `i` */
     fun notCurrent(service: AccessibilityService): WindowFilter =
-        WindowFilter { w -> w != null && w.id != activeWindowId(service) }
+        WindowFilter { w -> w != null && safeId(w) != activeWindowId(service) }
 
     /** 非活动窗口 —— 对应天坦内部类 `j` */
     fun notActive(): WindowFilter =
-        WindowFilter { w -> w != null && !w.isActive }
+        WindowFilter { w -> w != null && !safeIsActive(w) }
 
     /**
      * 排除系统栏（状态栏 / 导航栏）—— 对应天坦 `M6/h` 的窗口过滤器 `f6018r`
@@ -194,29 +194,21 @@ object WindowTraversal {
         }
 
         // ④ 只有一个且就是当前窗口 → 不跨
-        if (list.size == 1 && list[0].id == currentWindowId) {
+        if (WindowOrdering.isSingleCurrentWindow(currentWindowId, list.map { safeId(it) })) {
             ReaderLog.d(TAG, "只有当前窗口，无需跨窗口")
             return null
         }
 
-        // ⑤ 找当前窗口下标
-        var idx = -1
-        for (i in list.indices) {
-            if (list[i].id == currentWindowId) {
-                idx = i
-                break
-            }
-        }
-
-        // ⑥ 按方向取下一个（带环绕）
-        //    当前窗口不在筛选列表里（idx == -1）→ 从第一个/最后一个开始
-        var next: Int = if (idx < 0) {
-            if (forward) 0 else list.size - 1
-        } else {
-            if (forward) idx + 1 else idx - 1
-        }
-        if (forward && next >= list.size) next = 0
-        if (!forward && next < 0) next = list.size - 1
+        // ⑤⑥ 按方向取下一个（带环绕）—— 算法已抽到 [WindowOrdering] 使其可单测
+        //
+        // 【为什么抽出去】`AccessibilityWindowInfo` 是 **final 类**，
+        //   既不能实例化也不能子类化（与 AccessibilityNodeInfo 不同），
+        //   算法留在这里就永远只能靠读代码验证。「环绕 / 越界 /
+        //   当前窗口不在候选列表」这三种边界，必须能跑测试。
+        val ids = list.map { safeId(it) }
+        val next = WindowOrdering.nextIndex(currentWindowId, ids, forward)
+        if (next < 0) return null
+        val idx = ids.indexOf(currentWindowId)
 
         // ⑦ 从新窗口 root 找起点
         val targetWindow = list[next]
@@ -228,7 +220,7 @@ object WindowTraversal {
         ReaderLog.i(
             TAG,
             "跨窗口: ${if (forward) "前向" else "后向"} → " +
-                    "window=${targetWindow.id} type=${targetWindow.type} " +
+                    "window=${safeId(targetWindow)} type=${safeType(targetWindow)} " +
                     "(${idx}→${next}/${list.size})"
         )
 
@@ -284,7 +276,10 @@ object WindowTraversal {
         } ?: return emptyList()
 
         return try {
-            windows.sortedBy { it.layer }
+            // 按 layer 升序 —— 算法在 [WindowOrdering.sortByLayer]（可单测）
+            val order = WindowOrdering.sortByLayer(windows.map { safeId(it) to safeLayer(it) })
+            val byId = windows.associateBy { safeId(it) }
+            order.mapNotNull { byId[it] }
         } catch (e: Throwable) {
             windows
         }
@@ -295,6 +290,85 @@ object WindowTraversal {
         window?.root
     } catch (e: Throwable) {
         null
+    }
+
+    // ==================== 窗口属性的安全读取 ====================
+    //
+    // ══════════════════════════════════════════════════════════
+    // 【为什么要包一层（本轮修复）】
+    // ══════════════════════════════════════════════════════════
+    //
+    // `AccessibilityWindowInfo` 是**可回收对象**（走对象池）。
+    // Android 官方文档对 `recycle()` 的说明：
+    //
+    //   > Return an instance back to be reused.
+    //   > **Note: You must not touch the object after calling this function.**
+    //   > @throws IllegalStateException If the info is already recycled.
+    //   >   —— AccessibilityWindowInfo.java（AOSP）
+    //
+    // 读屏是常驻服务，窗口列表在**每次窗口变化时重建**——
+    // 上一次拿到的 `AccessibilityWindowInfo` 极可能在本次遍历时
+    // 已被系统回收。此时读它的任何属性都会抛 `IllegalStateException`。
+    //
+    // 【原来的问题】下列调用点**直接读属性、无 per-window 保护**：
+    //   · `FOCUSABLE` / `NORMAL` 过滤器读 `w.type`（:83 / :95）
+    //   · `notCurrent` 读 `w.id`（:112）
+    //   · `notActive` 读 `w.isActive`（:116）
+    //   · `sortedWindows()` 读 `it.layer`（:287）—— 排序比较器内抛异常，
+    //     整个 `sortedBy` 中断 → 跨窗口导航直接失效
+    //   · `activeWindowId()` 读 `it.isActive`（:318）——
+    //     首个窗口恰好被回收就整体返回 -1，**静默**
+    //   · `describeWindows()` 读 4 个属性（:366~367）—— 诊断日志自身崩溃
+    //
+    // 【为什么是真缺陷而不是洁癖】
+    //   ① `isActive` / `layer` 在**排序比较器**里抛异常，是
+    //      「一个坏窗口毁掉整次排序」——后果是跨窗口完全不可用；
+    //   ② 天坦对**节点**的同名风险（`getParent()` 抛
+    //      `IllegalStateException`）是**显式 catch 的**
+    //      （见 `d7/C1417r.java:303`、`needsSort` 的注释），
+    //      说明这是这类 API 的已知模式，窗口侧同理；
+    //   ③ 读屏崩溃/静默失效对用户是**彻底失去辅助**。
+    //
+    // 【语义选择】
+    //   取不到时返回「保守的安全值」，且**不让异常外溢**：
+    //   · `safeType`   → -1（不等于任何已知类型，过滤器自然拒绝该窗口）
+    //   · `safeId`     → -1（与真实 id 不可能相等，不会被误判为"当前窗口"）
+    //   · `safeLayer`  → Int.MIN_VALUE（排到最底，不破坏其余窗口的相对顺序）
+    //   · `safeIsActive` / `safeIsFocused` → false（保守：不认为它活动/有焦点）
+
+    /** 窗口类型；已回收 → -1（不等于任何已知类型） */
+    private fun safeType(window: AccessibilityWindowInfo): Int = try {
+        window.type
+    } catch (e: Throwable) {
+        -1
+    }
+
+    /** 窗口 ID；已回收 → -1（与真实 id 不可能相等） */
+    private fun safeId(window: AccessibilityWindowInfo): Int = try {
+        window.id
+    } catch (e: Throwable) {
+        -1
+    }
+
+    /** 窗口层级；已回收 → Int.MIN_VALUE（排到最底，不扰乱其余顺序） */
+    private fun safeLayer(window: AccessibilityWindowInfo): Int = try {
+        window.layer
+    } catch (e: Throwable) {
+        Int.MIN_VALUE
+    }
+
+    /** 是否活动窗口；已回收 → false（保守） */
+    private fun safeIsActive(window: AccessibilityWindowInfo): Boolean = try {
+        window.isActive
+    } catch (e: Throwable) {
+        false
+    }
+
+    /** 是否有输入焦点；已回收 → false（保守） */
+    private fun safeIsFocused(window: AccessibilityWindowInfo): Boolean = try {
+        window.isFocused
+    } catch (e: Throwable) {
+        false
     }
 
     /**
@@ -315,7 +389,7 @@ object WindowTraversal {
     /** 活动窗口 ID —— 对应天坦 `E0.e()` */
     private fun activeWindowId(service: AccessibilityService): Int {
         return try {
-            service.windows?.firstOrNull { it.isActive }?.id ?: -1
+            service.windows?.firstOrNull { safeIsActive(it) }?.let { safeId(it) } ?: -1
         } catch (e: Throwable) {
             -1
         }
