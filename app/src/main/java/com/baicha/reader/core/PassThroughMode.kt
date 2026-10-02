@@ -25,23 +25,36 @@ package com.baicha.reader.core
  * |---|---|---|
  * | 实现 | `PassThroughModeInterpreter`(74) + `PassThroughModeActor` | `m6/C2126d0` |
  * | API | `setTouchExplorationPassthroughRegion` | 同 |
- * | 超时 | **`PASS_THROUGH_IDLE_MS = 4000`**（4 秒无触摸自动退出） | 无固定超时，靠手势/上下文退出 |
+ * | 超时 | `PASS_THROUGH_IDLE_MS = 4000` | **也是 4000ms**（`s()` 里 `timer.schedule(new b(), 4000L)`） |
  * | 模式 | 单一「穿透中」 | **两种**：瞬时 `n()` + 锁定 `h(Region)` |
  *
- * 【A/B 取舍：混合，以天坦为主】
+ * 【核实修正】初版我写「天坦无固定超时，靠手势/上下文退出」——
+ * **这是错的**。天坦 `m6/C2126d0.java:239~243` 的 `s()`：
+ *   ```java
+ *   public final void s() {
+ *       Timer timer = new Timer();
+ *       this.f29270g = timer;
+ *       timer.schedule(new b(), 4000L);
+ *   }
+ *   ```
+ * 而 `s()` 恰好在**瞬时模式入口** `n(true, ...)` 里被调用
+ * （`n()` 第 1 行）。所以两边都是 4000ms。
  *
- * 天坦的**双模式**更实用：
- *   - 瞬时模式：按一下手势 → 穿透一次触摸 → 自动退出（用一次就走）
- *   - 锁定模式：指定一块 Region 持续穿透（游戏里长期用）
- * TalkBack 只有单模式 + 4 秒空闲超时。
+ * 我原来那句「以天坦双模式为骨架 + 加 TalkBack 空闲超时做安全网」
+ * 的**前提不成立** —— 两边都有超时，不存在「补天坦缺的超时」。
  *
- * 但 TalkBack 的**空闲超时**是必要的安全网 ——
- * 天坦靠用户主动退出，一旦用户忘了就永远退出不了，
- * 读屏等于失效而用户不知道。
+ * 【A/B 取舍：以天坦的双模式为骨架】
  *
- * 故：**以天坦的双模式为骨架，加上 TalkBack 的空闲超时做安全网**。
- * 这符合「A/B 取舍选天坦」，同时不丢掉 TalkBack 的防御设计
- * （有 A/B 取舍时选天坦，但两者可以互补时不排斥）。
+ * 真正的差异在**模式数量**，不在超时：
+ *   - 天坦瞬时模式 `n(boolean, boolean)`：全屏 Region 穿透（`g()` 取真实屏幕尺寸）
+ *   - 天坦锁定模式 `h(Region, ...)`：指定区域持续穿透，`e()` 取消定时器
+ *   - TalkBack 只有单模式
+ *
+ * 锁定模式的超时被显式取消（`e()` 里的 `timer.cancel()`），
+ * 这对游戏场景是必要的：用户可能十几秒不动（思考），
+ * 若按空闲超时退出，一动就又变回读屏接管 —— 体验断裂。
+ *
+ * 故**照天坦的两条路径实现**：瞬时带 4000ms 空闲超时、锁定不超时。
  *
  * ══════════════════════════════════════════════════════════
  * 【为什么抽成纯类】
@@ -109,6 +122,9 @@ class PassThroughState(
      * 【为什么要锁定模式】
      *   游戏里用户可能十几秒不动（思考策略），
      *   若按空闲超时退出，用户一动就又变成读屏接管 —— 体验断裂。
+     *
+     * 天坦的实现依据：`h()` 走独立路径，进入后 `e()` 会
+     * `timer.cancel()` 取消空闲定时器 —— 即锁定模式**不超时**。
      */
     fun enterLocked(now: Long = 0L): Boolean {
         if (isActive && isLocked) return false
@@ -152,8 +168,16 @@ class PassThroughState(
      * @return true = 应退出
      */
     fun shouldExitForIdle(now: Long): Boolean {
+        // 未激活或锁定模式 → 永不超时
         if (!isActive || isLocked) return false
-        if (lastTouchTime <= 0L) return false
+        // 【修正】原来还有一条 `lastTouchTime <= 0L → false` 的守卫，
+        // 本意是「从未记录过触摸就不超时」。
+        // 但它把**合法的 0 时间戳**也挡掉了 ——
+        // 单测里 `enter(now = 0)` 是常见写法（与 uptimeMillis 起点无关），
+        // 真机上 `SystemClock.uptimeMillis()` 在开机瞬间也可能接近 0。
+        //
+        // 而且 `isActive` 已经保证了「进入时一定赋过值」，
+        // 那条守卫是冗余的 —— 冗余的守卫反而制造了边界 bug。
         return now - lastTouchTime >= idleTimeoutMs
     }
 
@@ -180,10 +204,12 @@ class PassThroughState(
 
     companion object {
         /**
-         * 空闲自动退出时长 —— TalkBack `PASS_THROUGH_IDLE_MS = 4000`
+         * 空闲自动退出时长。
          *
-         * 【为什么用它而不是自己定】
-         *   这是 TalkBack 在大量真机上验证过的值：
+         * **两方一致**：TalkBack `PASS_THROUGH_IDLE_MS = 4000`；
+         * 天坦 `m6/C2126d0.s()` 里 `timer.schedule(new b(), 4000L)`。
+         *
+         * 【为什么用这个值】两方都选它，说明是实测可用值：
          *   短于它用户来不及操作，长于它「忘了退」的风险变大。
          */
         const val PASS_THROUGH_IDLE_MS = 4000L
