@@ -79,10 +79,30 @@ class AutoScrollManager(
         private set
 
     /** 滚动方向 —— 天坦 f6008h */
+    /**
+     * 上次滚动方向 —— **跨线程访问，必须 @Volatile**
+     *
+     * ★★ 本轮修正（P2）：本类有一半字段标了 `@Volatile`（`isScrolling`
+     * `:78`、`recoveryCallback` `:100`、`lastResult` `:104` …），
+     * 但这三个漏了 —— 属**遗漏**而非有意。
+     *
+     * 【为什么确实跨线程】
+     *   · 写：`onScrollEvent`（`:379~380`）由**事件处理器**调用，
+     *     运行在无障碍线程（`ReaderAccessibilityService.onAccessibilityEvent`）
+     *   · 读+清：`checkScrollResult`（`:410~412`）运行在**主线程**
+     *   ⇒ 无内存屏障时主线程可能读到过期值（观察不到累加结果），
+     *     导致「滚动成功但判定为未移动」，进而触发多余的重试/恢复。
+     */
+    @Volatile
     private var lastScrollDirection = 0
 
     /** 滚动累计量 —— 天坦 f29251d/f29252e */
+    /** 累计滚动位移 X —— 跨线程（无障碍线程写 / 主线程读+清），见 lastScrollDirection 注释 */
+    @Volatile
     private var scrollDeltaX = 0
+
+    /** 累计滚动位移 Y —— 跨线程，同上 */
+    @Volatile
     private var scrollDeltaY = 0
 
     /**

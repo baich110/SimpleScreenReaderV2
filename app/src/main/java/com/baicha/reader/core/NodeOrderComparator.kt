@@ -23,7 +23,7 @@ import java.util.IdentityHashMap
  *        - RecyclerView：sortRecycler(parent, children)   // J()
  *
  * 【比较器 n()】
- *   ① 有效性检查（宽高 > 0 或 isImportantForAccessibility）
+ *   ① 有效性检查（宽高 > 0 或节点可见）—— 原误用 isImportantForAccessibility，已修
  *   ② z() 特殊规则（父子包含关系调整）
  *   ③ A() 包含关系处理
  *   ④ o() top 比较 → p() bottom 比较
@@ -246,6 +246,60 @@ object NodeOrderComparator {
         return cls.contains("RecyclerView")
     }
 
+    /**
+     * 节点是否可见 —— 对应天坦
+     * `w7/AccessibilityNodeInfoUtils.java:570~577` 的 `isVisible`
+     *
+     * ★★ 本轮修正（P2）：原来这里用的是 `isImportantForAccessibility`
+     *
+     * 【源码原文】
+     * ```java
+     * public static boolean isVisible(NodeInfo nodeInfo) {
+     *     if (nodeInfo == null) return false;
+     *     if (nodeInfo.isVisibleToUser()) return true;
+     *     return NodeNavigator.isInRecyclerView(nodeInfo)
+     *         && EventUtils.getNodeType(nodeInfo) != 15;
+     * }
+     * ```
+     *
+     * 【为什么 isImportantForAccessibility 不能用】
+     *   我用可读版全项目 grep 确认：**天坦从未调用过
+     *   `isImportantForAccessibility`**（只有 `o0/NodeInfo` 里的包装定义，
+     *   无任何业务调用点）。而它在真实设备上**几乎恒为 true** ——
+     *   用它代替可见性判定，等于把天坦所有「不可见节点」分支
+     *   **全部短路掉**：无效节点照样参与排序、大块判定永远成立。
+     *
+     * 【第二支为何需要】不可见但属于 RecyclerView 的节点
+     *   （被回收但仍在树里）天坦仍视为「可参与排序」——
+     *   条件是它不是 type 15（网格容器）。
+     */
+    private fun isVisible(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        if (trackVisible(node)) return true
+        // 不可见但属于 RecyclerView 且非网格容器 → 仍算可见
+        return isRecyclerView(node) && NodeRoleHelper.roleOf(node) != ROLE_TYPE_15
+    }
+
+    /**
+     * **裸** `isVisibleToUser` —— 不带任何回退。
+     *
+     * 【为什么要和 [isVisible] 分开】
+     *   天坦有两个不同的可见性判定，混用会引入偏差：
+     *     · `nodeInfo.isVisibleToUser()`（裸）
+     *       用在 `d7/C1417r.java:172~173` 的排序有效性判定
+     *     · `AccessibilityNodeInfoUtils.isVisible()`（带 RecyclerView 回退）
+     *       用在 `w7/AccessibilityNodeInfoUtils.java:570~577`
+     *   本文件两处都出现，必须各用各的。
+     */
+    private fun trackVisible(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        return try {
+            node.isVisibleToUser
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
     // ==================== 布局分析：l() ====================
 
     /** 布局分析结果 —— 对应天坦 C0330a */
@@ -301,7 +355,7 @@ object NodeOrderComparator {
 
             if (node.childCount == 1) {
                 val child = node.getChild(0)
-                if (child == null || !child.isImportantForAccessibility) {
+                if (child == null || !isVisible(child)) {
                     boundsMap[node] = rect
                 } else {
                     val childRect = Rect()
@@ -320,7 +374,7 @@ object NodeOrderComparator {
                     rawBoundsMap[node] = Rect(rect)
                     for (i in 0 until node.childCount) {
                         val c = node.getChild(i) ?: continue
-                        if (c.isImportantForAccessibility) {
+                        if (isVisible(c)) {
                             c.getBoundsInScreen(rect)
                             break
                         }
@@ -334,7 +388,7 @@ object NodeOrderComparator {
             // ★ 天坦是一整个取反条件（大块），不是拆开的 isSmall
             val isBig = rect.width() >= screenWidth * 0.5 ||
                     rect.height() >= threshold03H ||
-                    !node.isImportantForAccessibility ||
+                    !isVisible(node) ||
                     (!lastRect.isEmpty &&
                             (!intersectsHorizontally(lastRect, rect) || overlapsVertically(lastRect, rect)))
 
@@ -420,11 +474,17 @@ object NodeOrderComparator {
         val ra = boundsMap[a]
         val rb = boundsMap[b]
 
+        // ★ 注意：这里天坦用的是**裸 isVisibleToUser**，不是带回退的 isVisible()
+        //   依据 `d7/C1417r.java:172~173`：
+        //     `rect != null && ((rect.width() > 0 && rect.height() > 0)
+        //                       || nodeInfo.isVisibleToUser())`
+        //   而 `AccessibilityNodeInfoUtils.isVisible()`（带 RecyclerView 回退）
+        //   是**另一个函数**，两处语义不同 —— 不能混用。
         val validA = NodeBoundsComparator.isValid(
-            ra?.let { Bounds(it) }, a.isImportantForAccessibility
+            ra?.let { Bounds(it) }, trackVisible(a)
         )
         val validB = NodeBoundsComparator.isValid(
-            rb?.let { Bounds(it) }, b.isImportantForAccessibility
+            rb?.let { Bounds(it) }, trackVisible(b)
         )
 
         // 边界缺失 → 交给纯引擎按「无效」处理
@@ -481,12 +541,34 @@ object NodeOrderComparator {
             val rect = Rect()
             node.getBoundsInScreen(rect)
 
-            // 用「内容高度」修正边界
-            // 天坦 J()：rect2 = new Rect(); wVar2.j(rect2) 是 contentBounds
+            // 用「内容高度」修正边界 —— 对应天坦 `d7/C1417r.java:311~328` 的 `J()`
+            //
+            // ★★ 本轮修正（P2）：原来这里调的是 `getBoundsInScreen` ——
+            //   与上一行 `:542 node.getBoundsInScreen(rect)` 是**同一个 API**，
+            //   于是下面 `contentRect.height() != rect.height()` **恒为 false**，
+            //   整段边界修正逻辑**永远不会执行**（死代码）。
+            //
+            // 【天坦原文】
+            // ```java
+            // nodeInfo2.getBoundsInScreen(rect3);      // 屏幕边界
+            // nodeInfo2.getBoundsInParent(rect2);      // ★ 父坐标系边界（内容边界）
+            // if (rect2.height() != rect3.height()) {  // 两者高度不同才修正
+            //     Rect rect4 = new Rect(rect3);
+            //     if (Math.abs(rect.top - rect3.top) < f23911g) {
+            //         rect4.top -= rect2.height() - rect3.height();
+            //     } else {
+            //         rect4.bottom += rect2.height() - rect3.height();
+            //     }
+            //     rect3.set(rect4);
+            // }
+            // ```
+            // 关键：`getBoundsInParent` 取的是**父坐标系**下的边界，
+            // 当节点有内边距/滚动偏移时，它与屏幕边界高度不同 ——
+            // 这正是需要修正的场景。用同一个 API 调用两次必然相等。
             val contentRect = Rect()
             try {
                 @Suppress("DEPRECATION")
-                node.getBoundsInScreen(contentRect)
+                node.getBoundsInParent(contentRect)
             } catch (e: Throwable) {
                 contentRect.set(rect)
             }
@@ -573,4 +655,8 @@ object NodeOrderComparator {
         val minH = Math.min(r1.height(), r2.height())
         return minH > 0 && overlap >= minH * 0.6
     }
+
+    /** 天坦 `EventUtils.getNodeType() == 15`（网格容器） */
+    private const val ROLE_TYPE_15 = 15
+
 }
