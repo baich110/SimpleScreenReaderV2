@@ -797,7 +797,9 @@ class ReaderAccessibilityService : AccessibilityService() {
         log("触摸: $spoken")
         speech.speak(spoken, interrupt = true)
         // 记录触摸探索动作（供屏幕状态恢复的竞态判定）
-        eventHandler.recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_TOUCH_EXPLORATION)
+        eventHandler.recordFocusAction(
+            ScreenStateRecovery.FOCUS_SOURCE_TOUCH_EXPLORATION, focus.getFocused()
+        )
         focus.focusForTouch(node)
         playFocusSound(node)
     }
@@ -917,7 +919,12 @@ class ReaderAccessibilityService : AccessibilityService() {
      */
     private fun moveFocusInternal(forward: Boolean): Boolean {
         // 记录逻辑导航动作（供屏幕状态恢复的竞态判定）
-        eventHandler.recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION)
+        //
+        // 【注意】此处只记时间戳 —— 目标节点要等遍历完成后才知道。
+        // 带节点的完整记录在下面焦点设上之后补记（见 applyFocus 之后）。
+        eventHandler.recordFocusAction(
+            ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION
+        )
 
         // ★ 窗口导航模式：直接跨窗口，不做窗口内遍历
         //
@@ -982,6 +989,10 @@ class ReaderAccessibilityService : AccessibilityService() {
             haptic.boundary()
             return false
         }
+        // 焦点已设上 → 补记带节点信息的完整历史（A6）
+        eventHandler.recordFocusAction(
+            ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION, node
+        )
         speakNode(node, if (forward) "下一焦点" else "上一焦点")
         autoScroll.ensureVisible(node, if (forward) 1 else 2)
         return true
@@ -1180,15 +1191,41 @@ class ReaderAccessibilityService : AccessibilityService() {
     private fun restoreInitialFocus(force: Boolean) {
         val root = rootInActiveWindow ?: return
 
-        // ① 先试路径恢复 —— 这是本能力的核心价值
-        val restored = NodePathResolver.resolve(root, lastFocusPath)
+        // ⓪ 优先用**本窗口的历史记录**的路径（A6）
+        //
+        // 【为什么优先于全局 lastFocusPath】
+        //   lastFocusPath 是「最后一次聚焦的节点」，可能来自**别的窗口**。
+        //   例如：在 A 应用聚焦某处 → 切到 B 应用 → B 触发恢复，
+        //   这时用全局路径会在 B 的树里找一个属于 A 的节点（找不到，
+        //   或错误命中同文本的节点）。
+        //   按 windowId 查历史能拿到「本窗口上次焦点在哪」。
+        //
+        // 对应 TalkBack `getLastFocusActionRecordInWindow()`（:253）——
+        // 白茶此前只有全局单值，正是 A6 要补的能力。
+        val windowId = try {
+            root.windowId
+        } catch (e: Throwable) {
+            -1
+        }
+        val windowPath = if (windowId >= 0) {
+            eventHandler.focusHistory.lastInWindow(windowId)?.nodePath
+        } else {
+            null
+        }
+
+        // ① 路径恢复：先试本窗口历史，再退回全局
+        val restored = NodePathResolver.resolve(root, windowPath)
+            ?: NodePathResolver.resolve(root, lastFocusPath)
         if (restored != null && ShouldFocusNode.shouldFocus(restored)) {
             if (focus.applyFocus(restored, force = true)) {
                 eventHandler.recordFocusAction(
-                    ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION
+                    ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION, restored
                 )
                 eventHandler.speakNode(restored, "恢复焦点(路径)")
-                log("恢复焦点：按路径找回成功")
+                log(
+                    "恢复焦点：按路径找回成功" +
+                        if (windowPath != null) "（本窗口历史）" else "（全局路径）"
+                )
                 return
             }
         }
@@ -1217,7 +1254,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         if (first != null) {
             if (focus.applyFocus(first)) {
                 eventHandler.recordFocusAction(
-                    ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION
+                    ScreenStateRecovery.FOCUS_SOURCE_LOGICAL_NAVIGATION, first
                 )
                 eventHandler.speakNode(first, "恢复焦点")
             }

@@ -130,10 +130,56 @@ class AccessibilityEventHandler(
     @Volatile
     var onWindowChangedHook: (() -> Unit)? = null
 
-    /** 记录一次焦点动作 */
-    fun recordFocusAction(source: Int) {
-        lastFocusActionTime = SystemClock.uptimeMillis()
+    /**
+     * 焦点动作历史（A6）—— 对标 TalkBack `AccessibilityFocusActionHistory`
+     *
+     * 【为什么在事件处理器而不是服务】焦点的产生与记录都在事件侧，
+     * 服务只负责消费（恢复时查询）。
+     */
+    val focusHistory = FocusActionHistory()
+
+    /**
+     * 记录一次焦点动作。
+     *
+     * 【A6 变更】原来只存「时间戳 + 来源」两个标量。
+     * 现在同时写入历史 —— 支持：
+     *   · 追溯「上次焦点在哪」（可跨窗口）
+     *   · 竞态判定从「只比时间」升级为「比对节点 + 时间」
+     *   · 将来「回到上一个焦点」的手势
+     *
+     * @param source 动作来源（见 [FocusActionRecord] 常量）
+     * @param node   目标节点；为 null 时仍记录时间戳（保持旧行为）
+     */
+    fun recordFocusAction(source: Int, node: AccessibilityNodeInfo? = null) {
+        val now = SystemClock.uptimeMillis()
+        lastFocusActionTime = now
         lastFocusActionSource = source
+
+        if (node == null) return
+
+        focusHistory.record(
+            FocusActionRecord(
+                nodePath = NodePath.of(node),
+                windowId = try {
+                    node.windowId
+                } catch (e: Throwable) {
+                    -1
+                },
+                source = source,
+                actionTime = now,
+                role = try {
+                    NodeRoleHelper.roleOf(node)
+                } catch (e: Throwable) {
+                    NodeRoleHelper.ROLE_NONE
+                },
+                isEditable = try {
+                    node.isEditable
+                } catch (e: Throwable) {
+                    false
+                },
+                textFingerprint = NodePath.fingerprintOf(node)
+            )
+        )
     }
 
     /** 窗口变化时重置内部状态 */
@@ -572,7 +618,7 @@ class AccessibilityEventHandler(
         val spoken = text ?: roleName!!
         log("触摸: $spoken")
         speech.speak(spoken, interrupt = true)
-        recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_TOUCH_EXPLORATION)
+        recordFocusAction(ScreenStateRecovery.FOCUS_SOURCE_TOUCH_EXPLORATION, node)
         focus.focusForTouch(node)
         playFocusSound(node)
     }
