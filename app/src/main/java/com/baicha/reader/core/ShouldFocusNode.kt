@@ -359,10 +359,52 @@ object ShouldFocusNode {
      * k(node) = H(node) || N(node) —— 天坦 AbstractC3688i.k()
      */
     private fun k(node: AccessibilityNodeInfo): Boolean {
-        val h = node.isFocusable || hasAction(node, 16)
-        val nn = node.isSelected || hasAction(node, 32)
-        return h || nn
+        // ★★ 本轮修正（用**可读版反编译**核对）
+        //
+        // 【对应函数】`w7/NodeUtils.java:142~146` 的 `isFocusableOrSelectable`：
+        //   ```java
+        //   public static final boolean isFocusableOrSelectable(NodeInfo nodeInfo) {
+        //       return AccessibilityNodeInfoUtils.isActionableForAccessibility(nodeInfo)
+        //           || AccessibilityNodeInfoUtils.isLongClickable(nodeInfo);
+        //   }
+        //   ```
+        // 展开（逐层到 `w7/AccessibilityNodeInfoUtils.java`）：
+        //   · `isActionableForAccessibility`（`:414~419`）
+        //       = `isClickable || hasActionMask(16)`
+        //   · `isLongClickable` = `isLongClickable`
+        // ⇒ **`(isClickable || hasAction(16)) || isLongClickable`**
+        //
+        // 【我原来的实现】`(isFocusable || hasAction(16)) || (isSelected || hasAction(32))`
+        //   —— 两处都错：
+        //     · 第一项应是 **isClickable**，我写成了 isFocusable
+        //     · 第二项应是 **isLongClickable**，我写成了 isSelected/action32
+        //
+        // 【影响】该函数用在 `FocusFinder.shouldFocus()` 第 395 行
+        //   （可读版）——「可聚焦且无子节点」分支的收尾判定：
+        //     `return NodeUtils.isFocusableOrSelectable(nodeInfo) && !hasFocusableChild(nodeInfo);`
+        //   判据错了会让该分支的节点接受/拒绝整体偏离天坦。
+        //
+        // 【为什么之前没发现】旧版反编译里这两个函数都叫 `k`（一个静态
+        //   一个实例），极难分辨；可读版把它们分别命名后才看清。
+        return isActionableForAccessibility(node) || node.isLongClickable
     }
+
+    /**
+     * `AccessibilityNodeInfoUtils.isActionableForAccessibility(node)`
+     *
+     * `w7/AccessibilityNodeInfoUtils.java:414~419`：
+     * ```java
+     * return nodeInfo.isClickable() || hasActionMask(nodeInfo, 16);
+     * ```
+     * 注意用的是 **hasActionMask**（位掩码 + actionList 双路），
+     * 不是单纯扫 actionList —— 见 [hasActionMask] 与 [hasAction] 的差别。
+     */
+    private fun isActionableForAccessibility(node: AccessibilityNodeInfo): Boolean =
+        // 天坦白话：`isClickable() || hasActionMask(nodeInfo, 16)`
+        // 而 `matchActionMask(node, id)` = 位掩码命中 **或** actionList 命中
+        //   （`NodeUtils.java:277~283`）——
+        // 白茶拆成两个函数 hasActionMask / hasAction，此处按天坦语义取「或」
+        node.isClickable || hasActionMask(node, 16) || hasAction(node, 16)
 
     /**
      * `AbstractC3688i.i(node)` —— **不是** isClickable/isLongClickable
@@ -670,6 +712,9 @@ object ShouldFocusNode {
      * 某些节点只填了位掩码而 actionList 为空。
      */
     private fun y(node: AccessibilityNodeInfo, id1: Int, id2: Int): Boolean =
+        // 对应 `NodeUtils.java:285~289` 的 `matchActionMask2`：
+        //   `(actions & i9) == i9 || (actions & i10) == i10
+        //    || hasAction(i9) || hasAction(i10)`
         hasActionMask(node, id1) || hasActionMask(node, id2) ||
             hasAction(node, id1) || hasAction(node, id2)
 

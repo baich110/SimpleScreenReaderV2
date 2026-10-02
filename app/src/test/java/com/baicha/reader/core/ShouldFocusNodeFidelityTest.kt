@@ -208,4 +208,96 @@ class ShouldFocusNodeFidelityTest {
         assertTrue("需要「可点击」判定 k()", code.contains("fun k("))
         assertTrue("需要「可选中」判定 nn()", code.contains("fun nn("))
     }
+
+    // ==================== ⑦ 可读版反编译核对后的修正 ====================
+
+    /**
+     * ★★ `k()` 必须是 `isActionableForAccessibility || isLongClickable`
+     *
+     * 【依据】可读版反编译 `w7/NodeUtils.java:142~146` 的
+     * `isFocusableOrSelectable`：
+     *   return AccessibilityNodeInfoUtils.isActionableForAccessibility(nodeInfo)
+     *       || AccessibilityNodeInfoUtils.isLongClickable(nodeInfo);
+     * 展开 = `(isClickable || hasAction(16)) || isLongClickable`
+     *
+     * 【我原来的实现】(isFocusable || hasAction(16)) || (isSelected || hasAction(32))
+     * —— 两处都错。该函数用在 `FocusFinder.shouldFocus()` 可读版第 395 行的
+     * 收尾判定，错了会让该分支的接受/拒绝整体偏离天坦。
+     */
+    @Test
+    fun k_function_matches_isFocusableOrSelectable() {
+        assertTrue(
+            "k() 应实现为 isActionableForAccessibility || isLongClickable",
+            code.contains("isActionableForAccessibility(node) || node.isLongClickable")
+        )
+        assertFalse(
+            "k() 不该用 isFocusable 起头（那是另一个函数 isFocusable）",
+            code.contains("val h = node.isFocusable || hasAction(node, 16)")
+        )
+    }
+
+    /**
+     * ★ `isActionableForAccessibility` = `isClickable || hasAction(16)`
+     * 依据 `w7/AccessibilityNodeInfoUtils.java:414~419`
+     */
+    @Test
+    fun isActionableForAccessibility_matches_source() {
+        assertTrue(
+            "应含 isClickable 判定",
+            code.contains("node.isClickable || hasActionMask(node, 16)")
+        )
+    }
+
+    /**
+     * ★ `y()` / `z()` 必须是「位掩码 OR actionList」双路
+     *
+     * 依据 `w7/NodeUtils.java:277~297`：
+     *   matchActionMask  = (actions & id) == id || hasAction(id)
+     *   matchActionMask2 = 两个 id 各查两路
+     *   matchActionMask3 = 三个 id 各查两路
+     *
+     * 我原来只实现 actionList 扫描，**整条位掩码路径丢失**。
+     */
+    @Test
+    fun y_and_z_use_both_bitmask_and_action_list() {
+        // ★ 注意：不能只断言「字符串出现」—— 变异测试暴露过这个漏洞：
+        //   把 y() 的位掩码两项删掉后，断言仍然通过（因为别处也出现这些串）。
+        //   必须**限定在 y()/z() 函数体内部**再断言。
+        val yBody = extractFunctionBody("private fun y(node: AccessibilityNodeInfo, id1: Int, id2: Int): Boolean")
+        val zBody = extractFunctionBody(
+            "private fun z(node: AccessibilityNodeInfo, id1: Int, id2: Int, id3: Int): Boolean"
+        )
+
+        assertTrue("y() 函数体里必须查位掩码：$yBody", yBody.contains("hasActionMask(node, id1)"))
+        assertTrue("y() 函数体里必须查 actionList：$yBody", yBody.contains("hasAction(node, id1)"))
+        assertTrue("z() 函数体里必须查位掩码：$zBody", zBody.contains("hasActionMask(node, id3)"))
+        assertTrue("z() 函数体里必须查 actionList：$zBody", zBody.contains("hasAction(node, id3)"))
+        assertTrue("必须有 hasActionMask 实现", code.contains("fun hasActionMask("))
+    }
+
+    /**
+     * 抽取某个函数从签名到下一个同级声明之间的代码体
+     *
+     * 【为什么要这个 helper】只看「全文件是否含某字符串」会让
+     * 变异测试失效 —— 把目标函数的某一行删掉后，断言可能因为
+     * 别处也出现该串而继续通过。
+     */
+    private fun extractFunctionBody(signature: String): String {
+        val start = code.indexOf(signature)
+        if (start < 0) return ""
+        val end = code.indexOf("\n    private fun ", start + signature.length)
+            .let { if (it < 0) code.length else it }
+        return code.substring(start, end)
+    }
+
+    /**
+     * ★ `hasActionMask` 的语义必须是 `(actions and id) == id`
+     */
+    @Test
+    fun hasActionMask_uses_bit_and_comparison() {
+        assertTrue(
+            "位掩码判定必须是 (node.actions and id) == id",
+            code.contains("(node.actions and id) == id")
+        )
+    }
 }
