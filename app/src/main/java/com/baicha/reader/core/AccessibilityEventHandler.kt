@@ -206,6 +206,34 @@ class AccessibilityEventHandler(
         lastHoverIdentity = -1
         lastScrollNodeKey = -1
         lastScrollWindowId = -1
+
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮修复：补上增量朗读监听状态的清理（抄漏 clear()）】
+        // ══════════════════════════════════════════════════════════
+        //
+        // `watchedNode` + `textMonitor` 的监听表此前**不随窗口变化清理**，
+        // 而项目里其他状态**都清了**：
+        //   · `FocusManager.onWindowChanged()` → 清 focusNode / anchorNode
+        //   · `autoScroll.resetScrollState()` → 清滚动快照
+        //   · `voiceScroll.reset()`
+        //   · `CacheRegistry.invalidate(WINDOW)`
+        // 唯独这里漏了 —— 属目标里点名的错误模式⑤「抄漏 clear()」。
+        //
+        // 【后果①：跨窗口残留】若窗口变化后不再产生焦点事件
+        //   （切到无焦点元素的界面、或用户随即锁屏），
+        //   `watched` 仍持有上一窗口的节点 ——
+        //   `IdentityHashMap` 是**强引用**，该节点无法回收。
+        //
+        // 【后果②：播报后台页面内容（更严重）】
+        //   上一窗口的节点若之后文本又变（后台页面仍在更新，
+        //   如聊天页收到新消息、股票页刷新），
+        //   `onTextChanged(旧节点)` 会命中 entry 并播报那句增量 ——
+        //   用户在当前页面上听到**另一个页面的内容**，完全无从理解来源。
+        //   对视障用户，这是高度困惑的噪音。
+        //
+        // 已由 `NodeTextMonitorWindowResetTest` 实测确认两条后果。
+        watchedNode = null
+        textMonitor.unwatchAll()
     }
 
     // ==================== 主入口 ====================
