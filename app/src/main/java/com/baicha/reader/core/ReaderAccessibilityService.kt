@@ -599,6 +599,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         lastHoverIdentity = -1
         dispatcher.resetFocusHash()
         focus.onWindowChanged()
+        autoScroll.resetScrollState()
         CacheRegistry.invalidate(CacheRegistry.Level.WINDOW)
 
         // 播报页面标题
@@ -630,34 +631,33 @@ class ReaderAccessibilityService : AccessibilityService() {
         lastScrollNodeKey = nodeKey
         lastScrollWindowId = windowId
 
-        // ③ 滚动音效（速率随速度变化）
-        val deltaY = event.scrollDeltaY
-        val rate = if (deltaY != 0) {
-            Math.pow(2.0, (deltaY / 50.0) - 1).toFloat().coerceIn(0.5f, 2.0f)
-        } else 1.0f
-        sound.scroll(rate)
+        // ③ 滚动音效（速率随速度动态变化）—— 对应天坦 M6/r.e()
+        sound.scroll(autoScroll.computeEarconRate(event))
 
         // ④ ★ 标记滚动状态（供 FocusManager 的"滚动中导航"拦截使用）
-        val scrollDir = if (deltaY > 0) 1 else if (deltaY < 0) -1
-        else if (event.scrollDeltaX > 0) 1 else if (event.scrollDeltaX < 0) -1 else 0
+        //
+        // 方向来自 AutoScrollManager 判定好的三级结果
+        // （比直接用 scrollDeltaY 可靠 —— 该字段在很多 App 上恒为 -1）
+        val scrollDir = when (autoScroll.lastDetectedDirection) {
+            ScrollDirectionDetector.FORWARD -> 1
+            ScrollDirectionDetector.BACKWARD -> -1
+            else -> 0
+        }
         if (scrollDir != 0) {
             focus.onScrollStart(scrollDir)
         }
 
-        // ⑤ 播报滚动位置
-        val total = event.itemCount
-        if (total > 0 && event.toIndex >= 0) {
-            val from = event.fromIndex
-            val to = event.toIndex
-            val msg = if (from == to || to < 0 || to + 1 > total) {
-                "第 ${from + 1} 项，共 $total 项"
-            } else {
-                "第 ${from + 1} 到 ${to + 1} 项，共 $total 项"
-            }
+        // ⑤ 播报滚动位置 —— 走统一格式化（对应天坦 M6/r.f()）
+        val msg = ScrollPositionFormatter.format(
+            fromIndex = event.fromIndex,
+            toIndex = event.toIndex,
+            itemCount = event.itemCount
+        )
+        if (msg != null) {
             log("滚动: $msg")
             speech.speak(msg, interrupt = true)
         } else {
-            log("滚动")
+            log("滚动（无位置信息）")
         }
     }
 

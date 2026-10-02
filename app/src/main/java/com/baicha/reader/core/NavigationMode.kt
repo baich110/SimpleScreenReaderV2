@@ -246,89 +246,49 @@ class NavigationManager {
     }
 
     /**
-     * 构建某导航的过滤器
+     * 构建某导航的过滤器 —— 用可组合的 [NodeFilter]（对应天坦 `w7/M`）
+     *
+     * 【为什么改用 NodeFilter 而不是裸 lambda】
+     *   ① 组合语义清晰：`NodeFilter.HEADING.and(NodeFilter.VISIBLE)`
+     *   ② 可加缓存：`.cached()` 把结果挂到 NodeCache
+     *   ③ 可诊断：每个过滤器有 name，日志可读
      */
     private fun buildFilter(mode: NavigationMode): (AccessibilityNodeInfo) -> Boolean {
-        return when (mode) {
-            // 过滤类：在基础可聚焦判定之上再加条件
-            NavigationMode.LINKS -> { node ->
-                ShouldFocusNode.shouldFocus(node) && hasLinkAction(node)
-            }
+        val filter: NodeFilter = when (mode) {
+            NavigationMode.LINKS -> LINK
+            NavigationMode.HEADINGS -> NodeFilter.HEADING
+            NavigationMode.CONTROLS -> NodeFilter.CONTROL
+            NavigationMode.SCROLLABLE_WIDGET -> NodeFilter.SCROLLABLE
+            else -> NodeFilter.FOCUSABLE
+        }
+        return filter.asPredicate()
+    }
 
-            NavigationMode.HEADINGS -> { node ->
-                ShouldFocusNode.shouldFocus(node) && isHeading(node)
-            }
-
-            NavigationMode.CONTROLS -> { node ->
-                ShouldFocusNode.shouldFocus(node) && isControl(node)
-            }
-
-            NavigationMode.SCROLLABLE_WIDGET -> { node ->
-                isScrollable(node)
-            }
-
-            // 其他（粒度/默认/遍历结构）→ 用基础判定
-            else -> { node ->
-                ShouldFocusNode.shouldFocus(node)
+    /** 链接过滤器 —— 天坦 A0.d()：含 2048 动作或 WebView 角色 */
+    private val LINK: NodeFilter = object : NodeFilter() {
+        override fun accept(node: AccessibilityNodeInfo?): Boolean {
+            if (node == null) return false
+            if (NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_WEB_VIEW) return true
+            return try {
+                node.actionList.any { it.id == 2048 }
+            } catch (e: Throwable) {
+                false
             }
         }
+
+        override val name: String get() = "链接"
     }
 
     // ==================== 节点条件判定 ====================
-
-    /** 是否含链接动作 —— 天坦 A0.d()（含 2048 动作） */
-    private fun hasLinkAction(node: AccessibilityNodeInfo): Boolean = try {
-        node.actionList.any { it.id == 2048 } ||
-                NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_WEB_VIEW
-    } catch (e: Throwable) {
-        false
-    }
-
-    /**
-     * 是否标题 —— 对应天坦 AbstractC3693m.L()
-     *
-     * 判定依据：无障碍 heading 属性
-     */
-    private fun isHeading(node: AccessibilityNodeInfo): Boolean = try {
-        node.isHeading
-    } catch (e: Throwable) {
-        false
-    }
-
-    /**
-     * 是否交互控件 —— 对应天坦 11 个过滤器里的 f39050j
-     *
-     * 天坦用 role 判定：1 按钮 / 7 图片按钮 / 4 编辑框 / 2 复选框 /
-     * 9 单选 / 13 开关 / 11 开关 / 3 下拉 / 10 滑块
-     */
-    private fun isControl(node: AccessibilityNodeInfo): Boolean {
-        val role = NodeRoleHelper.roleOf(node)
-        return when (role) {
-            NodeRoleHelper.ROLE_BUTTON,
-            NodeRoleHelper.ROLE_IMAGE_BUTTON,
-            NodeRoleHelper.ROLE_EDIT_TEXT,
-            NodeRoleHelper.ROLE_CHECK_BOX,
-            NodeRoleHelper.ROLE_RADIO_BUTTON,
-            NodeRoleHelper.ROLE_TOGGLE_BUTTON,
-            NodeRoleHelper.ROLE_SWITCH,
-            NodeRoleHelper.ROLE_DROP_DOWN_LIST,
-            NodeRoleHelper.ROLE_SEEK_CONTROL -> true
-            else -> false
-        }
-    }
-
-    /** 是否可滚动 */
-    private fun isScrollable(node: AccessibilityNodeInfo): Boolean {
-        if (node.isScrollable) return true
-        return try {
-            node.actionList.any {
-                it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ||
-                        it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-            }
-        } catch (e: Throwable) {
-            false
-        }
-    }
+    //
+    // 【重构说明】原先这里有 4 个手写判定方法：
+    //   hasLinkAction / isHeading / isControl / isScrollable
+    // 现已统一收敛到 `NodeFilter` 的预置过滤器（HEADING / CONTROL / SCROLLABLE
+    // 与本节自定义的 LINK），好处：
+    //   ① 可组合（and/or/not），不再每处手写 `&&` 拼接
+    //   ② 可加缓存（`.cached()`）
+    //   ③ 有 name，日志可读
+    // 删除这 4 个方法是为了避免「两套判定并存」导致的行为漂移。
 
     /**
      * 当前导航是否为「粒度类」

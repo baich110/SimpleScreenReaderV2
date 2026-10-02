@@ -192,18 +192,59 @@ class AutoScrollManager(
     }
 
     /**
-     * 处理滚动事件 —— 1:1 抄天坦 C2121b.i()
+     * 上一次滚动事件快照 —— 对应天坦 `M6/r.c f6112h`
      *
-     * 滚动事件来了 → 110ms 后检查是否滚动完成 → 继续处理
+     * 【为什么需要】
+     *   判断滚动方向不能只看单次事件：很多 App 的 `scrollDeltaY` 恒为 -1，
+     *   必须靠「与上次快照对比」才能得出方向。
      */
-    fun onScrollEvent(event: android.view.accessibility.AccessibilityEvent) {
-        val dx = event.scrollDeltaX
-        val dy = event.scrollDeltaY
-        if (dx != 0) scrollDeltaX += dx
-        if (dy != 0) scrollDeltaY += dy
+    @Volatile
+    private var lastSnapshot: ScrollEventSnapshot? = null
 
+    /** 最近一次判定的滚动方向 */
+    @Volatile
+    var lastDetectedDirection: Int = ScrollDirectionDetector.UNKNOWN
+        private set
+
+    /**
+     * 处理滚动事件 —— 对应天坦 `M6/r.e()` + `C2121b.i()`
+     *
+     * 【本实现相对原版的修正】
+     *   原版只用 `event.scrollDeltaY` 推方向 —— 而该字段在很多 App 上
+     *   恒为 -1（无效），导致方向判定永远失败、滚动音效速率固定。
+     *
+     *   现在改用 `ScrollDirectionDetector` 的**三级 fallback**：
+     *     ① 与上次快照比 fromIndex/toIndex（最可靠）
+     *     ② 退回比 scrollX/scrollY
+     *     ③ 最后才用 delta 兜底
+     *
+     * @return 本次判定的滚动方向（供调用方播报/调音效）
+     */
+    fun onScrollEvent(event: android.view.accessibility.AccessibilityEvent): Int {
+        val current = try {
+            ScrollEventSnapshot(event)
+        } catch (e: Throwable) {
+            return ScrollDirectionDetector.UNKNOWN
+        }
+
+        // ① 判定方向（三级 fallback）
+        val direction = ScrollDirectionDetector.detect(current, lastSnapshot)
+        lastDetectedDirection = direction
+
+        // ② 累加滚动量（用于"是否真的动了"的判定）
+        val dx = current.deltaX
+        val dy = current.deltaY
+        if (dx != 0 && dx != -1) scrollDeltaX += dx
+        if (dy != 0 && dy != -1) scrollDeltaY += dy
+
+        // ③ 保存快照供下次比较（天坦 f6112h = cVar）
+        lastSnapshot = current
+
+        // ④ 延迟检查滚动是否结束
         handler.removeCallbacks(settleRunnable)
         handler.postDelayed(settleRunnable, SCROLL_SETTLE_MS)
+
+        return direction
     }
 
     private val settleRunnable = Runnable {
@@ -211,8 +252,39 @@ class AutoScrollManager(
         scrollDeltaX = 0
         scrollDeltaY = 0
         if (moved) {
-            ReaderLog.d(TAG, "autoScroll: scroll settled")
+            ReaderLog.d(TAG, "滚动结束")
         }
+    }
+
+    /**
+     * 重置滚动状态 —— 窗口变化时调用
+     *
+     * 上次快照跨窗口保留会导致方向判定错误（拿旧窗口的索引比新窗口的）。
+     */
+    fun resetScrollState() {
+        lastSnapshot = null
+        lastDetectedDirection = ScrollDirectionDetector.UNKNOWN
+        scrollDeltaX = 0
+        scrollDeltaY = 0
+    }
+
+    /**
+     * 计算滚动音效速率 —— 对应天坦 `M6/r.e()` 的
+     * `Math.pow(2.0, (速度/50) - 1)`
+     *
+     * @param event 滚动事件
+     * @return 速率（0.5 ~ 2.0）
+     */
+    fun computeEarconRate(event: android.view.accessibility.AccessibilityEvent): Float {
+        val delta = if (event.scrollDeltaY != 0 && event.scrollDeltaY != -1) {
+            event.scrollDeltaY
+        } else if (event.scrollDeltaX != 0 && event.scrollDeltaX != -1) {
+            event.scrollDeltaX
+        } else {
+            0
+        }
+        if (delta == 0) return 1.0f
+        return Math.pow(2.0, (delta / 50.0) - 1).toFloat().coerceIn(0.5f, 2.0f)
     }
 
     /**
@@ -223,6 +295,7 @@ class AutoScrollManager(
         currentTask?.cancel()
         currentTask = null
         isScrolling = false
+        // 注意：不清 lastSnapshot —— 停止自动滚动不等于窗口切换
     }
 
     // ==================== 工具 ====================
