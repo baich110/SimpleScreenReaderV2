@@ -94,7 +94,10 @@ abstract class NodeFilter {
         override fun accept(node: AccessibilityNodeInfo?): Boolean {
             if (node == null) return false
             val c = NodeOrderComparator.cache ?: return inner.accept(node)
-            return c.shouldFocus(node) { inner.accept(node) }
+            // 【修正】原来用 `c.shouldFocus(...)` —— 那是 ShouldFocusNode 的专用缓存，
+            // 会让过滤器的结果覆盖可聚焦判定，造成**静默的数据污染**。
+            // 改用 NodeCache 里独立的 filterCache。
+            return c.filterAccept(node) { inner.accept(node) }
         }
 
         override val name: String get() = "缓存(${inner.name})"
@@ -175,15 +178,52 @@ abstract class NodeFilter {
             override val name: String get() = "网格"
         }
 
-        /** 输入法 —— 对应天坦 `F()`（排除输入法节点） */
+        /**
+         * 输入法 —— 对应天坦 `F()`（排除输入法节点）
+         *
+         * 【修正】原来用 `pkg.contains("ime")` —— 太宽，会误伤任何包名含
+         * "ime" 的应用（如 `com.time.app`、`com.optime.xxx`）。
+         *
+         * 改为两级判定：
+         *   ① 精确匹配已知输入法包名后缀 / 系统输入法 API
+         *   ② 退化为「包名以 inputmethod 结尾」这类强特征
+         *
+         * 完整实现应查 `InputMethodManager.getInputMethodList()`，
+         * 但那需要 Context —— 这里用包名特征做保守判定。
+         */
         val IME: NodeFilter = object : NodeFilter() {
             override fun accept(node: AccessibilityNodeInfo?): Boolean {
                 if (node == null) return false
-                val pkg = node.packageName?.toString().orEmpty()
-                return pkg.contains("inputmethod") || pkg.contains("ime")
+                val pkg = node.packageName?.toString()?.lowercase().orEmpty()
+                if (pkg.isEmpty()) return false
+                // ① 强特征：包名含 inputmethod
+                if (pkg.contains("inputmethod")) return true
+                // ② 已知输入法
+                if (pkg in KNOWN_IME_PACKAGES) return true
+                // ③ 后缀特征（避免 contains("ime") 误伤）
+                return pkg.endsWith(".ime") || pkg.endsWith("ime")
             }
+
             override val name: String get() = "输入法"
         }
+
+        /** 已知输入法包名（小写）—— 覆盖主流输入法 */
+        private val KNOWN_IME_PACKAGES = setOf(
+            "com.baidu.input",
+            "com.sohu.inputmethod.sogou",
+            "com.tencent.qqpinyin",
+            "com.iflytek.inputmethod",
+            "com.google.android.inputmethod.latin",
+            "com.android.inputmethod.latin",
+            "com.miui.securityinputmethod",
+            "com.baidu.input_mi",
+            "com.sohu.inputmethod.sogou.xiaomi",
+            "com.tencent.qqpinyin.mi",
+            "com.touchtype.swiftkey",
+            "com.cootek.smartinputv5",
+            "com.baiye.inputmethod",
+            "com.example.inputmethod"
+        )
 
         /** 交互控件 —— 对应天坦 `f39050j`（9 种 role） */
         val CONTROL: NodeFilter = object : NodeFilter() {

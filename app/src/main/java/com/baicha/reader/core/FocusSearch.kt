@@ -109,14 +109,25 @@ object FocusSearch {
         // 根自身满足 → 直接用（省掉一次遍历）
         if (accept(root)) return root
 
-        val start = if (direction == TraversalDirection.BACKWARD) {
-            TraversalDirection.BACKWARD
+        // 【修正】原实现无论方向如何都走 `searchFocus(root, direction)`，
+        // 而 `searchFocus` 内部调用 `traversal.next(root, BACKWARD)` ——
+        // root 没有"前一个节点"，所以 **BACKWARD 永远返回 null**。
+        //
+        // 天坦的做法（C1427v.c）是先调 `traversal.c(root, direction)`
+        // 让**策略自己定位起点**，再从起点向后搜索。
+        // 这里对齐：BACKWARD 时用策略的 start() 拿最后一个。
+        return if (direction == TraversalDirection.BACKWARD) {
+            // 反向：让策略给出"最后一个"作为起点
+            val last = traversal.start(root, TraversalDirection.BACKWARD)
+            if (last == null) return null
+            if (accept(last)) last
+            else searchFocus(traversal, last, TraversalDirection.BACKWARD, accept)
         } else {
-            TraversalDirection.FORWARD
+            val first = traversal.start(root, TraversalDirection.FORWARD)
+            if (first == null) return null
+            if (accept(first)) first
+            else searchFocus(traversal, first, TraversalDirection.FORWARD, accept)
         }
-
-        // 从根开始按方向找第一个
-        return searchFocus(traversal, root, start, accept)
     }
 
     /**

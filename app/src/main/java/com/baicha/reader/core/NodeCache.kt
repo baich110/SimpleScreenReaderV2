@@ -48,7 +48,9 @@ class NodeCache(
     /** 可聚焦判定缓存上限 */
     private val focusCapacity: Int = 1024,
     /** 文本合成缓存上限 */
-    private val textCapacity: Int = 512
+    private val textCapacity: Int = 512,
+    /** 通用过滤器缓存上限 */
+    private val filterCapacity: Int = 512
 ) {
 
     companion object {
@@ -123,7 +125,45 @@ class NodeCache(
         return result
     }
 
-    // ==================== ③ 文本合成缓存 ====================
+    // ==================== ③ 过滤器结果缓存（独立于可聚焦判定）====================
+
+    /**
+     * 通用过滤器缓存 —— **与 focusCache 隔离**
+     *
+     * 【为什么必须隔离】
+     *   `focusCache` 是 `ShouldFocusNode.shouldFocus()` 的专用缓存。
+     *   如果自定义过滤器（如 `NodeFilter.CachedFilter`）也往里写，
+     *   就会用「过滤器的结果」覆盖「可聚焦判定的结果」——
+     *   而这两者的语义完全不同，导致遍历时读到错误的判定。
+     *
+     *   这是一个**静默的数据污染 bug**：不会报错，但遍历行为会随机错乱。
+     */
+    private val filterCache =
+        java.util.IdentityHashMap<AccessibilityNodeInfo, CacheEntry<Boolean>>(64)
+
+    /**
+     * 通用过滤器判定（带缓存）
+     *
+     * @param node 节点
+     * @param evaluator 未命中时的求值
+     */
+    fun filterAccept(
+        node: AccessibilityNodeInfo,
+        evaluator: () -> Boolean
+    ): Boolean {
+        val gen = generation
+        filterCache[node]?.let {
+            if (it.gen == gen) return it.value
+        }
+        val result = evaluator()
+        if (filterCache.size >= filterCapacity) {
+            trimMap(filterCache)
+        }
+        filterCache[node] = CacheEntry(result, gen)
+        return result
+    }
+
+    // ==================== ④ 文本合成缓存 ====================
 
     private val textCache = java.util.IdentityHashMap<AccessibilityNodeInfo, CacheEntry<String?>>(128)
 
@@ -173,6 +213,7 @@ class NodeCache(
     fun invalidateFocus() {
         focusCache.clear()
         textCache.clear()
+        filterCache.clear()
     }
 
     /**
@@ -182,6 +223,7 @@ class NodeCache(
         childrenCache.clear()
         focusCache.clear()
         textCache.clear()
+        filterCache.clear()
         generation = 0
     }
 
@@ -199,5 +241,6 @@ class NodeCache(
     // ==================== 诊断 ====================
 
     fun stats(): String =
-        "子节点 ${childrenCache.size} / 判定 ${focusCache.size} / 文本 ${textCache.size} / 代数 $generation"
+        "子节点 ${childrenCache.size} / 判定 ${focusCache.size} / " +
+                "文本 ${textCache.size} / 过滤 ${filterCache.size} / 代数 $generation"
 }

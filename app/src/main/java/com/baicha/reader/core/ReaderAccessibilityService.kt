@@ -112,6 +112,10 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var gestureActions: GestureActionHandler
         private set
 
+    /** 语音输入滚动追踪器（识别输入法引发的滚动） */
+    lateinit var voiceScroll: VoiceScrollTracker
+        private set
+
     /** 朗读替换引擎（两级作用域 + 正则） */
     lateinit var replacement: ReadReplacementEngine
         private set
@@ -205,6 +209,16 @@ class ReaderAccessibilityService : AccessibilityService() {
         }
         gestureChain = GestureChain()
         replacement = ReadReplacementEngine()
+        voiceScroll = VoiceScrollTracker().apply {
+            // 麦克风占用检测复用音频焦点管理器
+            isMicrophoneInUse = {
+                try {
+                    audioFocus.shouldMute()
+                } catch (e: Throwable) {
+                    false
+                }
+            }
+        }
         navigation = NavigationManager().apply {
             onModeChanged = { mode ->
                 // 切换导航后清缓存（过滤器变了，判定结果不再有效）
@@ -600,6 +614,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         dispatcher.resetFocusHash()
         focus.onWindowChanged()
         autoScroll.resetScrollState()
+        voiceScroll.reset()
         CacheRegistry.invalidate(CacheRegistry.Level.WINDOW)
 
         // 播报页面标题
@@ -647,11 +662,22 @@ class ReaderAccessibilityService : AccessibilityService() {
             focus.onScrollStart(scrollDir)
         }
 
-        // ⑤ 播报滚动位置 —— 走统一格式化（对应天坦 M6/r.f()）
+        // ⑤ 识别语音输入触发的滚动 —— 对应天坦 M6/r.h()
+        //
+        // 用户在语音输入时，输入法会自动滚列表（候选词翻页等）。
+        // 这类滚动不该播报位置，否则会盖住用户正在说的话。
+        val userAction = voiceScroll.identify(event.eventTime, node)
+        if (voiceScroll.shouldSuppressAnnouncement(userAction)) {
+            log("滚动（语音输入触发，静默）")
+            return
+        }
+
+        // ⑥ 播报滚动位置 —— 走统一格式化（对应天坦 M6/r.f()）
         val msg = ScrollPositionFormatter.format(
             fromIndex = event.fromIndex,
             toIndex = event.toIndex,
-            itemCount = event.itemCount
+            itemCount = event.itemCount,
+            isPager = node?.let { NodeRoleHelper.roleOf(it) == NodeRoleHelper.ROLE_PAGER } ?: false
         )
         if (msg != null) {
             log("滚动: $msg")

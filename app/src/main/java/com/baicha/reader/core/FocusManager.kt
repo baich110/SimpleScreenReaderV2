@@ -323,13 +323,30 @@ class FocusManager(
             return if (applyFocus(actual)) actual else null
         }
 
-        // 走到头 → 循环（回到另一端）
+        // ① 走到头 → 循环（回到另一端）
         //
         // 【修正】加「已尝试节点」身份集合，避免策略差异导致的反复横跳。
         val wrap = if (forward) findFirstFocusable(root, strategyType)
         else findLastFocusable(root, strategyType)
         if (wrap != null && wrap !== current && !isSameAsAny(wrap, current, target)) {
             return if (applyFocus(wrap)) wrap else null
+        }
+
+        // ② ★ 本窗口内彻底走不出去 → 跨窗口兜底
+        //
+        // 【对应的缺口】原来这里直接 return null。
+        //   后果：焦点一旦在本窗口遍历到尽头，就再也动不了 ——
+        //   弹窗/输入法/浮层场景下表现为「焦点卡死、找不到焦点」。
+        //
+        //   天坦 M6/h.F() 与 TalkBack searchTargetInNextOrPreviousWindow 都在
+        //   这个位置做跨窗口尝试。见 WindowTraversal 的类注释。
+        val crossWindow = WindowTraversal.navigateToNextWindow(
+            service = service,
+            forward = forward
+        )
+        if (crossWindow != null) {
+            ReaderLog.i(TAG, "跨窗口导航 → ${desc(crossWindow)}")
+            return if (applyFocus(crossWindow)) crossWindow else null
         }
 
         return null

@@ -106,8 +106,12 @@ object NodeBoundsCalculator {
         }
 
         // 写缓存（带容量控制）
+        //
+        // 【修正】原来是 `boundsMap.clear()` 全清 ——
+        // 会导致「刚算完的边界立刻被清掉」，下一次又重算，形成抖动。
+        // 改为与 NodeCache 一致的「淘汰一半」策略。
         if (boundsMap.size >= MAX_CACHE) {
-            boundsMap.clear()
+            trimHalf()
         }
         boundsMap[node] = bounds
         return bounds
@@ -188,6 +192,21 @@ object NodeBoundsCalculator {
     fun clear() {
         boundsMap.clear()
         calculatingNodes.clear()
+    }
+
+    /**
+     * 淘汰一半 —— 与 `NodeCache.trimMap` 策略一致
+     *
+     * 比全清温和：保留近期计算的边界，避免「清完立刻重算」的抖动。
+     */
+    private fun trimHalf() {
+        var remove = boundsMap.size / 2
+        val it = boundsMap.keys.iterator()
+        while (remove > 0 && it.hasNext()) {
+            it.next()
+            it.remove()
+            remove--
+        }
     }
 
     /** 缓存条目数（诊断） */
