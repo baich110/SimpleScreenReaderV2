@@ -118,15 +118,6 @@ class AccessibilityEventHandler(
     private var lastScrollNodeKey = -1
     private var lastScrollWindowId = -1
 
-    /** 屏幕状态 */
-    @Volatile
-    private var screenOn = true
-    private var lastScreenCheckTime = 0L
-
-    /** 屏幕状态提供者（由服务注入） */
-    @Volatile
-    var isScreenOnProvider: () -> Boolean = { true }
-
     /** 窗口变化后的回调（由服务注入，做缓存清理等） */
     @Volatile
     var onWindowChangedHook: (() -> Unit)? = null
@@ -238,24 +229,56 @@ class AccessibilityEventHandler(
     }
 
     // ==================== 主入口 ====================
-
-    /**
-     * 事件入口（无障碍线程）—— **必须极快**
-     */
-    fun onEvent(event: AccessibilityEvent) {
-        val et = event.eventType
-
-        // ① 屏幕状态（1 秒缓存）
-        updateScreenState()
-
-        // ② 滚动事件立即反馈（音效要跟手）
-        if (et == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
-            autoScroll.onScrollEvent(event)
-        }
-
-        // ③ 过滤 + 入队由 EventDispatcher 负责（在服务里）
-        //    本方法只处理「已入队事件的分发」
-    }
+    //
+    // ══════════════════════════════════════════════════════════
+    // 【★ 本轮删除：这里原有一个 `onEvent(event)`，是**死代码陷阱**】
+    // ══════════════════════════════════════════════════════════
+    //
+    // 原代码：
+    // ```kotlin
+    //   fun onEvent(event: AccessibilityEvent) {
+    //       updateScreenState()
+    //       if (et == TYPE_VIEW_SCROLLED) autoScroll.onScrollEvent(event)
+    //   }
+    // ```
+    //
+    // 【问题一：零调用点】真实事件链在**服务**里：
+    // ```
+    //   ReaderAccessibilityService.onAccessibilityEvent(event)
+    //     ① updateScreenState()        ← 服务自己的实现
+    //     ② if SCROLLED: autoScroll.onScrollEvent(event)
+    //     ③ dispatcher.onEvent(event)  ← 过滤 + 入队
+    //   eventQueue.consumer = { eventHandler.handleEvent(event) }  ← 主线程消费
+    // ```
+    // `eventHandler.onEvent()` **全项目无人调用**。
+    //
+    // 【问题二：同名不同行为 —— 这才是真危害】
+    // 它调的 `updateScreenState()` 是**本类自己那份**，而那份
+    // **不写** `dispatcher.isScreenOn`：
+    // | 实现 | 写 dispatcher.isScreenOn |
+    // |---|---|
+    // | `ReaderAccessibilityService.updateScreenState()` | **是** ✔ |
+    // | `AccessibilityEventHandler.updateScreenState()` | **否** |
+    //
+    // 而 `EventDispatcher` 靠 `isScreenOn` 做**息屏过滤**（规则 1、2）：
+    // ```kotlin
+    //   if (type == TYPE_VIEW_ACCESSIBILITY_FOCUSED && !isScreenOn) return true
+    //   if (!isScreenOn) { ... return true }
+    // ```
+    //
+    // ⇒ 将来若有人「顺手」把服务的调用改成 `eventHandler.onEvent()`，
+    //   `dispatcher.isScreenOn` **永远是默认值 true** →
+    //   **息屏后的 14 条过滤规则全部失效** →
+    //   锁屏后读屏还在大量处理事件（耗电 + 误播报，用户听到
+    //   「锁屏了还在自言自语」）。
+    //   而**编译能过、名字对得上**，改动者不会察觉。
+    //
+    // 【问题三：阅读误导】方法名 `onEvent` + 注释「事件入口」，
+    // 让人以为入口在这里，排障时方向错。
+    //
+    // 【处置】连同本类的 `updateScreenState()` / `screenOn` /
+    // `isScreenOnProvider` 一并删除（它们构成只被彼此引用的死代码三角）。
+    // 唯一入口回到服务侧，且由 `DeadEventPathTest` 守住。
 
     /**
      * 事件分发（主线程）—— 21 种事件类型
@@ -908,20 +931,17 @@ class AccessibilityEventHandler(
         }
 
 
-    private fun updateScreenState() {
-        val now = SystemClock.uptimeMillis()
-        if (now - lastScreenCheckTime < 1000) return
-        lastScreenCheckTime = now
-
-        val on = isScreenOnProvider()
-        if (on != screenOn) {
-            screenOn = on
-            log(if (on) "屏幕亮起" else "屏幕关闭")
-        }
-    }
-
+    /**
+     * 诊断字符串
+     *
+     * 【★ 本轮改动】原来还带「屏幕亮/灭」—— 那个状态由**服务**维护
+     * （它才是写 `dispatcher.isScreenOn` 的一方），
+     * 本类的 `screenOn` 是死代码，已随 `onEvent()` 一并删除。
+     * 屏幕状态请查 `ReaderAccessibilityService` 的事件链日志
+     * （「屏幕亮起」/「屏幕关闭」）。
+     */
     fun stats(): String =
-        "焦点动作 $lastFocusActionTime / 屏幕${if (screenOn) "亮" else "灭"}"
+        "焦点动作 $lastFocusActionTime / 历史 ${focusHistory.size()}"
 
     private val UNTAGGED: String
         get() = "未加标签"

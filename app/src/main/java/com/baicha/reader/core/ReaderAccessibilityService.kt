@@ -517,11 +517,6 @@ class ReaderAccessibilityService : AccessibilityService() {
         //   否则触摸探索的事件会打断朗读流。
         //   原来该字段无人置 true，规则 4 永不成立。
         dispatcher.fullScreenReadState = { continuousReader.state.isActive }
-        // ★ 编辑状态转发（本轮补齐天坦的 TextEditingState 守卫）
-        //   编辑态下不做焦点去重，否则输入框内相同内容会被判重丢弃
-        eventHandler.onEditingStateChanged = { editing ->
-            dispatcher.isEditingText = editing
-        }
         dispatcher.fullScreenReadInterrupt = { type, time, isBar ->
             continuousReader.onEvent(type, time, isBar)
         }
@@ -545,7 +540,11 @@ class ReaderAccessibilityService : AccessibilityService() {
             screenRecovery = screenRecovery,
             textMonitor = textMonitor
         ).apply {
-            isScreenOnProvider = { isScreenOn() }
+            // 【★ 本轮删除】原来这里注入 `isScreenOnProvider` ——
+            //   那是给 Handler 的**死代码** `updateScreenState()` 用的，
+            //   而那份实现**不写** `dispatcher.isScreenOn`。
+            //   真正生效的是本类自己的 `updateScreenState()`（见事件回调），
+            //   它会把状态写进 `dispatcher.isScreenOn`（息屏过滤的前提）。
             onWindowChangedHook = {
                 // 服务侧的窗口变化清理
                 lastSpokenIdentity = -1
@@ -556,6 +555,18 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         // ---- 事件消费：队列 → 事件处理器 ----
         eventQueue.consumer = { event -> eventHandler.handleEvent(event) }
+
+        // ★ 编辑状态转发（补齐天坦的 TextEditingState 守卫）
+        //   编辑态下不做焦点去重，否则输入框内相同内容会被判重丢弃
+        //
+        // 【P0 时序修复 2026-10-03】这段赋值原来被放在 `eventHandler = ...`
+        // 之前（原 :522），而 `eventHandler` 是 lateinit —— 服务一连接就抛
+        // `UninitializedPropertyAccessException`，整个无障碍服务启动即崩溃。
+        // 真机表现：开启服务后立刻掉线，所有功能 0 可用。
+        // 教训：lateinit 的赋值语句必须排在初始化之后，不能只看"逻辑顺序"。
+        eventHandler.onEditingStateChanged = { editing ->
+            dispatcher.isEditingText = editing
+        }
 
         // ---- 音频焦点委托 ----
         speech.onRequestAudioFocus = { audioFocus.requestFocus() }
