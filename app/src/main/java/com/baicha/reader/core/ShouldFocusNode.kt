@@ -595,7 +595,24 @@ object ShouldFocusNode {
      * `isScreenReaderFocusable || isFocusable`。
      */
     private fun isFocusableLike(node: AccessibilityNodeInfo): Boolean =
-        isScreenReaderFocusable(node) || node.isFocusable
+        // ★★ P1 修复（本轮）：**不能** OR 上 isFocusable
+        //
+        // 【天坦原文】`o0/w.java:1019~1021` 的 `n0()`：
+        //   ```java
+        //   public boolean n0() {
+        //       return Build.VERSION.SDK_INT >= 28
+        //           ? this.f34743a.isScreenReaderFocusable()   // ← 只有这一个
+        //           : i(1);
+        //   }
+        //   ```
+        // 而 `isFocusable` 是**另一个函数** `g0()`（`o0/w.java:931~933`）。
+        // 两者语义不同：
+        //   · `isScreenReaderFocusable` = 「读屏应该聚焦它」
+        //   · `isFocusable`            = 「输入焦点可以用它」
+        // 后者包含大量读屏不该停留的中间容器 ——
+        // OR 进来会让 `l()` 的「不可聚焦」判定变宽松，
+        // 从而漏判「不可见含文本的非可操作子节点」。
+        isScreenReaderFocusable(node)
 
     /**
      * `AbstractC3688i.j(node)` —— 「可操作」
@@ -608,9 +625,72 @@ object ShouldFocusNode {
      * ```
      */
     private fun isActionableLike(node: AccessibilityNodeInfo): Boolean =
-        node.isClickable || node.isLongClickable ||
-            hasAction(node, 1, 16, 32, 2048) ||
-            node.isScrollable
+        // ★★ P1 修复（本轮）：拆成与天坦一致的两路判定
+        //
+        // 【天坦原文】`w7/AbstractC3688i.java:125~128` 的 `j()`：
+        //   ```java
+        //   return wVar.g0()                       // isFocusable
+        //       || wVar.a0()                       // isClickable
+        //       || wVar.l0()                       // isLongClickable
+        //       || z(wVar, 1, 16, 32)              // ← 三动作组
+        //       || y(wVar, 1024, 2048);            // ← 双动作组
+        //   ```
+        // 【我原来的错误】写成 `hasAction(1,16,32,2048)` ——
+        // 把**两组**合成一次 OR：
+        //   · `z(1,16,32)` 与 `y(1024,2048)` 都含「位掩码 + actionList」两路，
+        //     合并后位掩码路径全丢（见 y()/z() 的注释）
+        //   · 且 `y` 里那个 1024 在合并后虽未丢失，
+        //     但语义被摊平，无法与天坦逐项对照
+        //
+        // 【顺带】`node.isScrollable` 我原来加在这里 ——
+        //   天坦的 `j()` 没有它（滚动性由 action 位体现）。
+        //   去掉以免判定过于宽松。
+        node.isFocusable ||          // g0()
+            node.isClickable ||      // a0()
+            node.isLongClickable ||  // l0()
+            z(node, 1, 16, 32) ||    // z(1,16,32)
+            y(node, ACTION_NEXT_HTML_ELEMENT, ACTION_PREVIOUS_HTML_ELEMENT)  // y(1024,2048)
+
+    /**
+     * `AbstractC3688i.y(node, id1, id2)` —— **双路判定**
+     *
+     * 天坦 `w7/AbstractC3688i.java:259~263`：
+     * ```java
+     * public static final boolean y(o0.w wVar, int i9, int i10) {
+     *     int iH = wVar != null ? wVar.h() : 0;
+     *     return (iH & i9) == i9 || (iH & i10) == i10   // ① action 位掩码
+     *         || w(wVar, i9) || w(wVar, i10);           // ② actionList 扫描
+     * }
+     * ```
+     * ① `h()` = `AccessibilityNodeInfo.getActions()`（位掩码，`o0/w.java:939`）
+     * ② `w(node, id)` = 遍历 `node.f()`（actionList）比对 id（`:239~249`）
+     *
+     * 【我原来的错误】只做了 ②（`hasAction` 扫 actionList），
+     * **整个漏掉了 ① 位掩码路径** —— 两者是不同的数据源，
+     * 某些节点只填了位掩码而 actionList 为空。
+     */
+    private fun y(node: AccessibilityNodeInfo, id1: Int, id2: Int): Boolean =
+        hasActionMask(node, id1) || hasActionMask(node, id2) ||
+            hasAction(node, id1) || hasAction(node, id2)
+
+    /** `AbstractC3688i.z(node, id1, id2, id3)` —— 三动作版 */
+    private fun z(node: AccessibilityNodeInfo, id1: Int, id2: Int, id3: Int): Boolean =
+        hasActionMask(node, id1) || hasActionMask(node, id2) || hasActionMask(node, id3) ||
+            hasAction(node, id1) || hasAction(node, id2) || hasAction(node, id3)
+
+    /**
+     * `o0.w.h()` 的位掩码判定 —— `(actions & id) == id`
+     *
+     * 天坦 `AbstractC3688i.x()`（`:252~257`）就是这个：
+     * ```java
+     * if (((wVar != null ? wVar.h() : 0) & i9) == i9) return true;
+     * ```
+     */
+    private fun hasActionMask(node: AccessibilityNodeInfo, id: Int): Boolean = try {
+        (node.actions and id) == id
+    } catch (e: Throwable) {
+        false
+    }
 
     /** p() 的缓存 —— 天坦 `f39013h`；也是互递归终止的必要条件 */
     private val pCache = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(64)
@@ -643,9 +723,25 @@ object ShouldFocusNode {
      */
     private fun hasText(node: AccessibilityNodeInfo): Boolean {
         if (node.collectionInfo != null) return false
-        return !node.text.isNullOrEmpty() ||
-                !node.contentDescription.isNullOrEmpty() ||
-                !node.hintText.isNullOrEmpty()
+        // 逐项对应天坦 `AbstractC3693m.C()`（`:337~342`）：
+        //   ```java
+        //   return (TextUtils.isEmpty(wVar.L())
+        //        && TextUtils.isEmpty(wVar.v())
+        //        && TextUtils.isEmpty(wVar.A())) ? false : true;
+        //   ```
+        // 三个取值函数逐一核实（`o0/w.java`）：
+        //   · `L()`（`:682`）→ `getText()`            ⇒ Kotlin `node.text`
+        //   · `v()`（`:1161`）→ `getContentDescription()` ⇒ `node.contentDescription`
+        //   · `A()`（`:583`）→ `getHintText()`        ⇒ `node.hintText`
+        //
+        // 【为什么这里要保持显式顺序】核查发现同文件别处（微信特判）
+        // 把 L/v 的映射写反过。本函数是 OR 结构，即使写反结果也不变
+        // —— 属于**沉默错误**：不报错、结果对，但一旦有人改成
+        // AND 或调整顺序就会立刻出错。故此处显式标注对应关系。
+        val hasMainText = !node.text.isNullOrEmpty()              // L()
+        val hasContentDesc = !node.contentDescription.isNullOrEmpty()  // v()
+        val hasHint = !node.hintText.isNullOrEmpty()              // A()
+        return hasMainText || hasContentDesc || hasHint
     }
 
     /**
