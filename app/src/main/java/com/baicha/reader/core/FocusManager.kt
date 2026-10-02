@@ -296,12 +296,16 @@ class FocusManager(
         strategyType: Int = TraversalStrategyFactory.TYPE_DEFAULT,
         filter: ((AccessibilityNodeInfo) -> Boolean)? = null
     ): AccessibilityNodeInfo? {
+        // ★ 性能基线埋点（审查报告「目标 D」）
+        //   放在最外层，覆盖全部退出路径 —— 与下面的 try/finally 同理
+        val perfStart = PerfCounters.begin()
         // ★ 对应天坦：C3678d.d() 在 M6.h.D() 每条退出路径上调用（26 处）
         //   用 try/finally 一次覆盖全部退出路径，比 26 处手动调用更可靠
         return try {
             moveFocusInternal(direction, strategyType, filter)
         } finally {
             ShouldFocusNode.resetOperationScope()
+            PerfCounters.endNav(perfStart)
         }
     }
 

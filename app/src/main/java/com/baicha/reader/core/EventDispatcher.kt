@@ -95,15 +95,20 @@ class EventDispatcher(
      * 在**无障碍线程**执行，必须极快。只做过滤 + 入队。
      */
     fun onEvent(event: AccessibilityEvent) {
+        PerfCounters.eventHandled()
         // ① 焦点去重（最便宜，先做）
         if (isDuplicateFocus(event)) {
             droppedCount++
+            // ★ 性能基线：丢弃要计数 —— 丢弃是静默的，
+            //   用户只会感觉「漏读了」，有计数才能判断丢得凶不凶
+            PerfCounters.eventDropped()
             return
         }
 
         // ② 规则过滤
         if (shouldDropEvent(event)) {
             droppedCount++
+            PerfCounters.eventDropped()
             return
         }
 

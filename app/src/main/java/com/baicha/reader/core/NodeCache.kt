@@ -113,6 +113,7 @@ class NodeCache(
     ): Boolean {
         val gen = generation
         focusCache[node]?.let {
+            PerfCounters.cacheHit()
             if (it.gen == gen) return it.value
         }
 
@@ -122,6 +123,7 @@ class NodeCache(
             trimMap(focusCache)
         }
         focusCache[node] = CacheEntry(result, gen)
+        PerfCounters.cacheMiss()
         return result
     }
 
