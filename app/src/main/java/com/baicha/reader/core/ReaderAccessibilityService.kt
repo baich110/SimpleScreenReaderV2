@@ -155,6 +155,14 @@ class ReaderAccessibilityService : AccessibilityService() {
         private set
 
     /**
+     * 系统状态播报（静音/屏幕/锁屏/解锁）。
+     *
+     * 对标 TalkBack `RingerModeAndScreenMonitor` 与天坦 `W6/h`。
+     */
+    lateinit var systemState: SystemStateAnnouncer
+        private set
+
+    /**
      * 最近一次聚焦的节点路径 —— 用于跨屏幕状态/窗口变化的焦点恢复。
      *
      * 【为什么存路径而不是存节点引用】
@@ -344,6 +352,16 @@ class ReaderAccessibilityService : AccessibilityService() {
         autoScroll = AutoScrollManager(this, focus)
         webNavigator = WebElementNavigator()
         imeAdapter = ImeAdapter(this)
+        // ★ 系统状态播报（A1）—— 注册广播
+        //
+        // 播报走 speech，与朗读替换/静音闸门共享同一条路径，
+        // 保证静音时系统播报也不会出声。
+        systemState = SystemStateAnnouncer(
+            context = this,
+            speak = { text, interrupt -> speech.speak(text, interrupt = interrupt) },
+            log = { msg -> log(msg) }
+        )
+        systemState.register()
         // ★ 增量文本监控（文本差分）—— 实时更新界面只念变化部分
         textMonitor = NodeTextMonitor().apply {
             enabled = true
@@ -989,6 +1007,7 @@ class ReaderAccessibilityService : AccessibilityService() {
         shutdownSafely("nodeCache") { nodeCache.hardClear() }
         shutdownSafely("boundsCache") { NodeBoundsCalculator.clear() }
         shutdownSafely("gestureChain") { gestureChain.clear() }
+        shutdownSafely("systemState") { systemState.unregister() }
 
         onLogUpdate = null
         synchronized(eventLog) { eventLog.clear() }
