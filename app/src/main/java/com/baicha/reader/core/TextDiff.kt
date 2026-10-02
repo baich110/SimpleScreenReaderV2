@@ -387,8 +387,9 @@ class NodeTextMonitor(private val diffEngine: TextDiffEngine = TextDiffEngine())
      *
      * @return 增量文本（需播报的部分）；null = 无需播报
      */
-    fun onTextChanged(node: android.view.accessibility.AccessibilityNodeInfo): String? {
+    fun onTextChanged(node: android.view.accessibility.AccessibilityNodeInfo?): String? {
         if (!enabled) return null
+        if (node == null) return null
         val entry = watched[node] ?: return null
         val newText = node.text?.toString().orEmpty()
         if (newText == entry.lastText) return null

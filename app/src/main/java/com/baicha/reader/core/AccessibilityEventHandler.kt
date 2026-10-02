@@ -63,7 +63,14 @@ class AccessibilityEventHandler(
     /** 音频焦点管理器（记录前台包名） */
     private val audioFocus: AudioFocusManager,
     /** 屏幕状态恢复 */
-    private val screenRecovery: ScreenStateRecovery
+    private val screenRecovery: ScreenStateRecovery,
+    /**
+     * 增量文本监控（文本差分）
+     *
+     * 【用途】实时更新界面（聊天/股票/弹幕）只念变化部分，不整段重读。
+     * 详见 TextDiff.kt 的类注释。
+     */
+    private val textMonitor: NodeTextMonitor
 ) {
 
     companion object {
@@ -81,6 +88,13 @@ class AccessibilityEventHandler(
     @Volatile
     var lastFocusActionTime = 0L
         private set
+
+    /**
+     * 当前被监听文本变化的节点（增量朗读的基准）
+     *
+     * 只保留一个：无障碍焦点只有一个，多个会互相干扰且无界增长。
+     */
+    private var watchedNode: AccessibilityNodeInfo? = null
 
     @Volatile
     var lastFocusActionSource = 0
@@ -183,6 +197,18 @@ class AccessibilityEventHandler(
 
             // ---------- 32768: 无障碍焦点 ----------
             AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED -> {
+                // ★ 开始监听该节点的文本变化（增量朗读的基准）
+                //
+                // 只在焦点节点上监听：无障碍焦点就是「用户正在关注的那个」，
+                // 只有它的文本变化值得播报。全树监听既浪费又吵。
+                // 上一个焦点取消监听，避免 watched 无界增长。
+                event.source?.let { src ->
+                    if (src !== watchedNode) {
+                        watchedNode?.let { textMonitor.unwatch(it) }
+                        textMonitor.watch(src)
+                        watchedNode = src
+                    }
+                }
                 val text = compose(event.source)
                 log("无障碍焦点: ${text ?: "(无内容)"}")
                 if (!text.isNullOrBlank()) {
@@ -218,8 +244,25 @@ class AccessibilityEventHandler(
                 val node = event.source
                 val text = node?.text?.toString()?.trim().orEmpty()
                 if (text.isNotEmpty()) {
-                    log("文本: $text")
-                    speech.speak(text, interrupt = false)
+                    // ★ 增量朗读（文本差分）
+                    //
+                    // 【为什么不能直接整段重读】
+                    //   实时更新的界面（聊天、股票、弹幕、进度）文本频繁变化：
+                    //     价格 "10.5" → "10.8"
+                    //       整段重读 → 每次都念完整内容，噪音淹没用户
+                    //       增量朗读 → 只念 "10.8" ★
+                    //
+                    // 【为什么首次仍是整段读】
+                    //   差分需要「上一版文本」做基准。没 watch 过就没有基准，
+                    //   此时只能整段读 —— 这也是正确行为（首次出现应完整念）。
+                    val incremental = node?.let { textMonitor.onTextChanged(it) }
+                    if (incremental != null) {
+                        // 已在 onIncrementalText 回调里播报，此处不重复
+                        log("文本(增量): $incremental")
+                    } else {
+                        log("文本: $text")
+                        speech.speak(text, interrupt = false)
+                    }
                 }
             }
 

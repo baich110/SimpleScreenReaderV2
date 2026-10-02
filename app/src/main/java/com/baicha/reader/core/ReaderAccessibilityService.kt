@@ -146,6 +146,10 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var webNavigator: WebElementNavigator
         private set
 
+    /** 增量文本监控（文本差分）—— 实时更新界面只念变化部分 */
+    lateinit var textMonitor: NodeTextMonitor
+        private set
+
     // ==================== 朗读设置 ====================
 
     /** 语序（对应天坦 GlobalConfig.z()） */
@@ -320,6 +324,11 @@ class ReaderAccessibilityService : AccessibilityService() {
         sound = SoundManager(this).apply { preloadAll() }
         autoScroll = AutoScrollManager(this, focus)
         webNavigator = WebElementNavigator()
+        // ★ 增量文本监控（文本差分）—— 实时更新界面只念变化部分
+        textMonitor = NodeTextMonitor().apply {
+            enabled = true
+            onIncrementalText = { delta -> speech.speak(delta, interrupt = false) }
+        }
 
         // ---- 事件处理器（从本类抽出）----
         eventHandler = AccessibilityEventHandler(
@@ -332,7 +341,8 @@ class ReaderAccessibilityService : AccessibilityService() {
             compose = { node -> composeNode(node) },
             log = { msg -> log(msg) },
             audioFocus = audioFocus,
-            screenRecovery = screenRecovery
+            screenRecovery = screenRecovery,
+            textMonitor = textMonitor
         ).apply {
             isScreenOnProvider = { isScreenOn() }
             onWindowChangedHook = {

@@ -12,7 +12,7 @@ import org.junit.Test
  *   M6/h 内部类 `c`（滚动状态）+ 内部类 `a`（恢复回调）
  *   重试上限 100、间隔 25ms、慢速 500ms
  */
-class ScrollFocusRecoveryTest {
+class ScrollFocusStateTest {
 
     /** 构造纯逻辑测试用的状态（节点为 null 不影响这些断言） */
     private fun state(targetType: Int = ScrollFocusState.TYPE_NORMAL) = ScrollFocusState(
