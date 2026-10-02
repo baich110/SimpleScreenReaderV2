@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 完全照抄天坦的 accessibilityservice.xml 配置 -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/service_description"
+    android:summary="@string/service_summary"
+    android:settingsActivity="com.baicha.reader.ui.MainActivity"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackSpoken|feedbackHaptic|feedbackAudible"
+    android:notificationTimeout="0"
+    android:accessibilityFlags="flagDefault|flagRequestTouchExplorationMode|flagReportViewIds|flagRequestFilterKeyEvents|flagRetrieveInteractiveWindows|flagEnableAccessibilityVolume|flagRequestShortcutWarningDialogSpokenFeedback"
+    android:canRetrieveWindowContent="true"
+    android:canRequestTouchExplorationMode="true"
+    android:canRequestFilterKeyEvents="true"
+    android:canControlMagnification="true"
+    android:canPerformGestures="true"
+    android:canRequestFingerprintGestures="true"
+    android:interactiveUiTimeout="10000" />

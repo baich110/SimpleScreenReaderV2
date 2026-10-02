@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">白茶读屏</string>
+    <string name="service_label">白茶读屏</string>
+    <string name="service_description">白茶读屏无障碍服务，提供屏幕朗读与手势导航</string>
+    <string name="service_summary">读出屏幕上的内容</string>
+
+    <string name="status_running">运行中</string>
+    <string name="status_stopped">未运行</string>
+    <string name="btn_open_settings">打开无障碍设置</string>
+    <string name="hint_enable">请在上方列表中找到「白茶读屏」并开启</string>
+    <string name="log_title">事件日志</string>
+    <string name="btn_clear_log">清空</string>
+
+    <!-- 语音设置 -->
+    <string name="btn_tts_settings">语音设置</string>
+    <string name="tts_settings_title">语音设置</string>
+    <string name="tts_engine_label">语音库（引擎）</string>
+    <string name="tts_voice_label">语音（Voice）</string>
+    <string name="tts_rate_label">语速</string>
+    <string name="tts_pitch_label">音调</string>
+    <string name="tts_volume_label">音量</string>
+    <string name="tts_refresh">刷新列表</string>
+    <string name="tts_engine_settings">语音库设置</string>
+    <string name="tts_test_speak">测试朗读</string>
+    <string name="tts_reset">恢复默认</string>
+    <string name="tts_test_text">白茶读屏，语音测试，一二三四五。</string>
+    <string name="tts_engine_default">系统默认</string>
+    <string name="tts_voice_auto">自动</string>
+</resources>
