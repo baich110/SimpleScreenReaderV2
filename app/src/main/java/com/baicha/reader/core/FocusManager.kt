@@ -200,15 +200,59 @@ class FocusManager(
     private var scrollJumpToTop = true
 
     /**
-     * 设置滚动定位方向 —— 由服务在调用 moveFocus 前设置。
+     * 本次导航是否**请求**了滚动定位。
      *
-     * 【为什么不用参数传递】
-     *   moveFocus 的签名已被 3 个调用方使用，加参数会波及全部；
-     *   且方向只在「滚动定位」这一种导航下有意义。
+     * ★★ 本轮修正（真机 P0 —— 用户「左右滑动从来获取不到焦点」的直接成因）
+     *
+     * 【原来的 bug】
+     *   `scrollJump` 钩子在服务启动时注入后**永不撤销**，
+     *   而 `moveFocusInternal` 开头是：
+     *   ```kotlin
+     *   val jump = scrollJump
+     *   if (jump != null) {
+     *       val handled = jump.invoke(scrollJumpToTop)   // ← 每次都触发
+     *       if (handled) return null                      // ← 直接返回，不做遍历
+     *   }
+     *   ```
+     *   即 **hook 非空就每次导航都尝试滚动定位**。
+     *   而 `scrollJumpToTop` 只在切到 SCROLL_TOP/SCROLL_BOTTOM 导航时赋值
+     *   （`else -> {}` 空分支，从不清除）。
+     *
+     *   后果：用户一旦切到过「跳到顶部/底部」导航，
+     *   **此后每一次左右滑动都走滚动定位 → 返回 null → 焦点永远不动**；
+     *   又因 `NavigationStore` 持久化了导航模式，**重启也恢复不了**。
+     *
+     * 【修法】加「一次性请求」标志：
+     *   · 只有**当前导航就是滚动定位**时才置 true（见 requestScrollJump）
+     *   · `moveFocusInternal` 开头检查并**立即消费**它
+     *   · 其他导航切换时显式清除（见 clearScrollJump）
+     */
+    @Volatile
+    private var scrollJumpRequested = false
+
+    /**
+     * 声明「本次导航做滚动定位」—— 由服务在调用 moveFocus 前设置。
+     *
+     * 语义是**一次性请求**：`moveFocusInternal` 消费后自动复位，
+     * 不会泄漏到下一次导航。
      */
     fun setScrollJumpDirection(top: Boolean) {
         scrollJumpToTop = top
+        scrollJumpRequested = true
     }
+
+    /**
+     * 清除滚动定位请求 —— 每当导航模式**不是** SCROLL_TOP/SCROLL_BOTTOM 时调用。
+     *
+     * 【为什么需要显式清除】用户从「跳到顶部」切回「默认」后，
+     * 残留的请求会让下一次滑动变成跳转 —— 这正是原来的 bug。
+     */
+    fun clearScrollJump() {
+        scrollJumpRequested = false
+    }
+
+    /** 仅测试用：当前是否有待消费的滚动定位请求 */
+    internal fun isScrollJumpRequested(): Boolean = scrollJumpRequested
 
     // ==================== 获取焦点 ====================
 
@@ -344,8 +388,13 @@ class FocusManager(
         // 【为什么不做滚动状态判定】
         //   TalkBack 把它当作独立动作（ScrollActionRecord.ACTION_AUTO_SCROLL），
         //   不与逐项导航共用去重窗口。
+        // ★★ 只有**显式请求**时才走滚动定位（本轮 P0 修复）
+        //
+        // 原来是「hook 非空就触发」—— 而 hook 在服务启动时注入后永不撤销，
+        // 导致切到过「跳到顶部/底部」之后每次滑动都变成跳转、焦点不动。
         val jump = scrollJump
-        if (jump != null) {
+        if (jump != null && scrollJumpRequested) {
+            scrollJumpRequested = false   // ★ 一次性消费，绝不泄漏到下一次
             val handled = jump.invoke(scrollJumpToTop)
             if (handled) {
                 ReaderLog.d(TAG, if (scrollJumpToTop) "已跳到顶部" else "已跳到底部")

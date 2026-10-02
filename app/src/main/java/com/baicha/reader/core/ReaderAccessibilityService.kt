@@ -996,10 +996,14 @@ class ReaderAccessibilityService : AccessibilityService() {
         // 对应 TalkBack `performActionScrollToPosition()`。
         // 方向来自当前导航枚举，而不是手势方向 ——
         // 「跳到顶部」是一个动作，向上/向下滑动对它没有意义。
+        // 【本轮 P0 修复】原来 `else -> {}` 是空的 —— 切走之后
+        // `scrollJumpToTop` 残留，而触发条件只看 hook 是否为空，
+        // 于是「切到过跳到顶部」之后每次滑动都变成跳转、焦点不动。
+        // 现在：只有当前导航就是滚动定位时才**请求**，否则显式清除。
         when (navigation.current) {
             NavigationMode.SCROLL_TOP -> focus.setScrollJumpDirection(top = true)
             NavigationMode.SCROLL_BOTTOM -> focus.setScrollJumpDirection(top = false)
-            else -> {}
+            else -> focus.clearScrollJump()   // ★ 关键：清除残留请求
         }
 
         val dir = if (forward) FocusManager.DIR_NEXT else FocusManager.DIR_PREVIOUS

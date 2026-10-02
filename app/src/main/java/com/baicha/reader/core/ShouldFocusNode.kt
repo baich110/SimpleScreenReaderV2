@@ -137,6 +137,17 @@ object ShouldFocusNode {
      */
     fun resetOperationScope() {
         baselineInitialized = false
+        // ★ 本轮修正（P1）：同时清 pCache
+        //
+        // 【为什么】`pCache` 是「子节点是否有内容/可操作」的判定缓存，
+        //   它只被 clear() 清（窗口切换时），而 resetOperationScope()
+        //   每轮导航都调却不清它 → 滚动后持续读**上一轮的判定结果**。
+        //   天坦的对应缓存 `f39013h` 与基准一起在 `d()` 里清。
+        //
+        // 【为什么不放在 clear() 里dedupe】clear() 是窗口级
+        //   （低频），resetOperationScope() 是操作级（每轮导航）——
+        //   两者语义不同，都要清，且这里更需要（导航频率高得多）。
+        pCache.clear()
     }
 
     /**
@@ -161,6 +172,33 @@ object ShouldFocusNode {
 
     fun shouldFocus(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
+
+        // ★★ 本轮修正（真机 P0）：清空「本轮已访问子节点」集合
+        //
+        // 【天坦原文】`w7/FocusFinder.java:386`：
+        // ```java
+        // if (nodeType != 8 && nodeType != 16) {
+        //     f39022g.clear();          // ← 每轮判定前清空
+        //     boolean z11 = ...;
+        // }
+        // ```
+        // `f39022g` 是静态 HashSet，语义是「**本轮判定内**已访问的子节点」。
+        //
+        // 【原来的 bug】`seenChildren` 是单例 `IdentityHashMap`，
+        // **从声明到使用之间没有任何 clear**（全文件仅两处引用：
+        // 声明 :669 与写入 :628）。后果：
+        //   · 集合随服务运行时长单调增长；
+        //   · 一旦某个 child 命中过，后续**任何一轮**判定再遇到它
+        //     都会让整个 `m()` `return false`；
+        //   · 真机表现：**越用越滑不到焦点**，且重启才恢复。
+        //
+        // 【为什么放在 shouldFocus 入口】
+        //   天坦放在判定主体的开头（进入遍历循环之前）。
+        //   白茶把判定委托给 NodeCache 的 `c.shouldFocus { ... }`，
+        //   缓存命中时**不会**执行 lambda ⇒ 若把 clear 放在 lambda 内部，
+        //   缓存命中路径就不会清 —— 所以必须放在这里，早于缓存查询。
+        seenChildren.clear()
+
         val c = cache
         if (c != null) {
             return c.shouldFocus(node) { r(node, false, 0) }

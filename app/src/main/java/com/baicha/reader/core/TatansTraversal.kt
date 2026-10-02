@@ -85,6 +85,9 @@ import android.view.accessibility.AccessibilityNodeInfo
 class TatansTraversal(private val root: AccessibilityNodeInfo?) {
 
     companion object {
+        /** 窗口根上溯深度上限（防畸形树死循环） */
+        private const val MAX_WINDOW_ROOT_DEPTH = 64
+
         private const val TAG = "TatansTraversal"
 
         /** 索引缓存（天坦 f23911m/f23912n/f23913o） */
@@ -635,9 +638,81 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
     // ==================== o() 取父节点 ====================
 
     /**
-     * 取父节点 —— 1:1 抄天坦 o(node, parent)
+     * 取父节点 —— 对应天坦 `d7/C1421r.java:890~903` 的 `o(node, parent)`
+     *
+     * ★★ 本轮修正（真机「焦点卡死」的成因之一）
+     *
+     * 【天坦原文】
+     * ```java
+     * public final NodeInfo o(NodeInfo nodeInfo, NodeInfo nodeInfo2) {
+     *     if (nodeInfo2 != null) {
+     *         return nodeInfo2;
+     *     }
+     *     NodeInfo windowRoot = AccessibilityNodeInfoUtils.getWindowRoot(nodeInfo);
+     *     if (windowRoot != null && !Intrinsics.areEqual(windowRoot, nodeInfo)) {
+     *         return windowRoot;          // ← 窗口根回退
+     *     }
+     *     if (windowRoot == null) return null;
+     *     windowRoot.x0();
+     *     return null;
+     * }
+     * ```
+     * 它是**两参数**函数。调用方传的是 `o(node, node.parent)`：
+     *   · `node.parent != null` → 直接返回它（Kotlin 原来抄对了）
+     *   · `node.parent == null` → **回退到 `getWindowRoot(node)`**，
+     *     而不是返回 null（Kotlin 原来**漏了这一整支**）
+     *
+     * 【为什么这一支重要】当焦点需要在窗口顶部继续「上溯找下一个兄弟」时
+     * （典型场景：**弹窗 / 浮层 / 输入法窗口的最后一个可聚焦元素**），
+     * 天坦回退到窗口根继续找 → 能跨出当前子树继续遍历；
+     * 直接返回 null 会让上溯链在窗口边界**断掉** →
+     * 焦点卡死、滑动无反应（正是用户报的现象类型）。
+     *
+     * 【注意】`previous()` 里 `:187` 那处 `node.parent ?: return null`
+     * **不改** —— 天坦 `C1421r.java:1262` 那里就是裸 `getParent()`，
+     * 未走 `o()`。两处语义不同，不能统一。
      */
-    private fun getParent(node: AccessibilityNodeInfo): AccessibilityNodeInfo? = node.parent
+    private fun getParent(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val direct = try {
+            node.parent
+        } catch (e: Throwable) {
+            null
+        }
+        if (direct != null) return direct
+
+        // 窗口根回退 —— 对应 `AccessibilityNodeInfoUtils.getWindowRoot(node)`
+        val windowRoot = getWindowRoot(node) ?: return null
+        // 天坦：若窗口根就是本节点，返回 null（避免自环）
+        if (windowRoot === node) return null
+        return windowRoot
+    }
+
+    /**
+     * `AccessibilityNodeInfoUtils.getWindowRoot(node)` —— 沿 parent 一路上溯到顶
+     *
+     * 天坦实现在 `w7/AccessibilityNodeInfoUtils`（可读版）。
+     * 语义：从 node 出发不断取 parent，直到 parent 为 null，
+     * 返回最后那个非 null 节点（即窗口根）。
+     *
+     * 【防环】加访问集合与深度上限 —— 无障碍树理论上无环，
+     * 但异常 App 可能构造出畸形树，读屏不能因此死循环。
+     */
+    private fun getWindowRoot(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var cur: AccessibilityNodeInfo = node
+        var depth = 0
+        val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(8)
+        while (depth < MAX_WINDOW_ROOT_DEPTH) {
+            if (seen.put(cur, true) != null) return cur   // 检测到环，返回当前
+            val p = try {
+                cur.parent
+            } catch (e: Throwable) {
+                null
+            } ?: return cur
+            cur = p
+            depth++
+        }
+        return cur
+    }
 
     // ==================== 排序与可聚焦判定 ====================
 
@@ -704,4 +779,5 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
     /** 天坦 AbstractC3693m.b0(node) = o0.w.v0(node) —— 取节点副本 */
     private fun obtain(node: AccessibilityNodeInfo): AccessibilityNodeInfo =
         AccessibilityNodeInfo.obtain(node)
+
 }

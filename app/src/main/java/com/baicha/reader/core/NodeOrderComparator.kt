@@ -206,13 +206,41 @@ object NodeOrderComparator {
      * 是否 RecyclerView —— 1:1 抄天坦 a.x(node)
      */
     private fun isRecyclerView(node: AccessibilityNodeInfo): Boolean {
+        // ★★ 本轮修正（可读版对照，报告 B-4）—— 角色码 5/8 原本**完全对调**
+        //
+        // 【天坦原文】`d7/C1421r.java:566~581` 的 `x(nodeInfo)`：
+        // ```java
+        // public final boolean x(NodeInfo nodeInfo) {
+        //     int nodeType = EventUtils.getNodeType(nodeInfo);
+        //     if (nodeType == 5) {                          // 5 = GRID
+        //         NodeInfo.g gVarS = nodeInfo.s();
+        //         return gVarS != null && gVarS.a() == 1;   // columnCount == 1
+        //     }
+        //     if (nodeType == 8) {                          // 8 = LIST
+        //         return true;                              // 无条件
+        //     }
+        //     CharSequence className = nodeInfo.getClassName();
+        //     if (className == null) return false;
+        //     return E.U(className.toString(), "RecyclerView", false, 2, null);
+        // }
+        // ```
+        // 【我原来的实现】把两个分支的**行为整个对调**了，且漏了 columnCount == 1：
+        //   · ROLE_GRID → 无条件 true（天坦是 columnCount==1 才 true）
+        //   · ROLE_LIST → collectionInfo != null（天坦是无条件 true）
+        //
+        // 【连锁影响】这是排序总闸 —— `needsSort` → 污染
+        //   findDown / findNextSibling / findLastDescendant / sortChildren
+        //   四处遍历分支的选择，进而影响整个焦点遍历顺序。
+        //   真机表现：长列表滚动时焦点乱跳、GridView 完全不排序。
         val role = NodeRoleHelper.roleOf(node)
-        if (role == NodeRoleHelper.ROLE_LIST) {
-            // 天坦：w.g.a() == 1 表示垂直列表
-            val collection = node.collectionInfo
-            return collection != null
+        if (role == NodeRoleHelper.ROLE_GRID) {
+            // 天坦 `gVarS.a()` = columnCount
+            val collection = node.collectionInfo ?: return false
+            return collection.columnCount == 1
         }
-        if (role == NodeRoleHelper.ROLE_GRID) return true
+        if (role == NodeRoleHelper.ROLE_LIST) {
+            return true   // 无条件 —— 列表一定走 RecyclerView 专用排序
+        }
 
         val cls = node.className?.toString() ?: return false
         return cls.contains("RecyclerView")
