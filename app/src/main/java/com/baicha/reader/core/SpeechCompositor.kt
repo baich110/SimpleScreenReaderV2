@@ -344,7 +344,39 @@ object SpeechCompositor {
         // 密码
         if (node.isPassword) append(sb, "密码")
 
+        // ★ 进度值 —— 两方对标后新增（选天坦）
+        //
+        // TalkBack 与天坦的换算数学完全相同，
+        // 但天坦多了三路分派（按 RangeInfo 类型）。
+        // 详见 ProgressSpeech 类注释。
+        appendProgress(sb, node)
+
         return if (sb.isEmpty()) null else sb.toString()
+    }
+
+    /**
+     * 追加进度值 —— 对应天坦 `z6/C4421m.java:565~585` 的三路分派
+     *
+     * 【为什么放状态段而不是主文本】
+     *   进度是「当前状态」而非「节点身份」。
+     *   读屏语序里状态跟在文本后面（「音量，已停用，百分之四十五」），
+     *   与天坦一致。
+     */
+    private fun appendProgress(sb: StringBuilder, node: AccessibilityNodeInfo) {
+        val info = try {
+            node.rangeInfo
+        } catch (e: Throwable) {
+            null
+        } ?: return   // 无区间信息 → 不念进度
+
+        val percent = ProgressSpeech.percentOf(
+            rangeType = info.type,
+            current = info.current,
+            min = info.min,
+            max = info.max
+        ) ?: return
+
+        append(sb, ProgressSpeech.format(percent))
     }
 
     private inline fun append(sb: StringBuilder, t: String) {
