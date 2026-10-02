@@ -207,6 +207,12 @@ class SpeechEngine(
             override fun onStart(utteranceId: String?) {
                 // 找到对应项触发 onStart
                 val q = if (channel == CHANNEL_A) channelA else channelB
+                val currentId = q.current()?.id
+                // ★ 本轮修复：先确认这条回调属于**当前项**
+                if (!UtteranceGuard.matchesCurrent(utteranceId, currentId)) {
+                    ReaderLog.d(TAG, "忽略陈旧的 onStart: $utteranceId（当前=$currentId）")
+                    return
+                }
                 q.current()?.onStart?.invoke()
             }
 
@@ -215,18 +221,50 @@ class SpeechEngine(
                 //   若两个通道都空闲才真正算「结束」，
                 //   否则 A 通道读完但 B 通道还在播时会提前解锁
                 if (!isSpeaking()) notifySpeaking(false)
-                mainHandler.post { onUtteranceDone(channel) }
+
+                // ★★ 本轮修复：**必须**先确认这条回调属于当前项
+                //
+                // 【原实现的缺陷】三个回调全部忽略 utteranceId，
+                // 直接 `onUtteranceDone(channel)` —— 而后者操作的是
+                // **队首当前项**，不一定是刚完成那条。
+                //
+                // 后果：引擎切换（旧实例仍异步回调）、stop() 后残留回调、
+                // QUEUE_FLUSH 打断 —— 这三种场景下旧回调会把**新项**
+                // 误判为完成，用户**漏听一条内容**且日志显示一切正常。
+                //
+                // 【在哪个线程判断】本回调在 TTS 线程，
+                // 而 `q.current()` 是线程安全的（SpeechQueue 内部有锁），
+                // 故可以在这里安全读取；不一致则**不投递**主线程任务。
+                val q = if (channel == CHANNEL_A) channelA else channelB
+                val currentId = q.current()?.id
+                if (!UtteranceGuard.matchesCurrent(utteranceId, currentId)) {
+                    ReaderLog.d(TAG, "忽略陈旧的 onDone: $utteranceId（当前=$currentId）")
+                    return
+                }
+                mainHandler.post { onUtteranceDone(channel, utteranceId) }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
                 ReaderLog.w(TAG, "TTS 播报出错: $utteranceId")
-                mainHandler.post { onUtteranceDone(channel) }
+                val q = if (channel == CHANNEL_A) channelA else channelB
+                val currentId = q.current()?.id
+                if (!UtteranceGuard.matchesCurrent(utteranceId, currentId)) {
+                    ReaderLog.d(TAG, "忽略陈旧的 onError: $utteranceId（当前=$currentId）")
+                    return
+                }
+                mainHandler.post { onUtteranceDone(channel, utteranceId) }
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
                 ReaderLog.w(TAG, "TTS 播报出错: $utteranceId code=$errorCode")
-                mainHandler.post { onUtteranceDone(channel) }
+                val q = if (channel == CHANNEL_A) channelA else channelB
+                val currentId = q.current()?.id
+                if (!UtteranceGuard.matchesCurrent(utteranceId, currentId)) {
+                    ReaderLog.d(TAG, "忽略陈旧的 onError: $utteranceId code=$errorCode（当前=$currentId）")
+                    return
+                }
+                mainHandler.post { onUtteranceDone(channel, utteranceId) }
             }
         })
 
@@ -403,7 +441,7 @@ class SpeechEngine(
         }
 
         try {
-            val utteranceId = "baicha_${item.id}"
+            val utteranceId = UtteranceGuard.idOf(item.id)
 
             // ★★ TTS 修复：按 item 的语义选择 QUEUE_FLUSH / QUEUE_ADD
             //
@@ -438,8 +476,33 @@ class SpeechEngine(
     /**
      * 单条播报完成
      */
-    private fun onUtteranceDone(channel: Int) {
+    /**
+     * 单条播报完成
+     *
+     * 【★ 本轮修复：新增 `utteranceId` 参数做第二道防线】
+     *
+     * 回调线程已经用 [UtteranceGuard] 拦过陈旧回调，但这里**再校验一次**：
+     * 从 TTS 回调到主线程执行之间有一段延迟（`mainHandler.post`），
+     * 期间队列可能已经变化（用户滑动 → 清空 → 新入队）。
+     * 若不复核，就仍可能把**别的项**判为完成。
+     *
+     * 两道防线的成本可忽略（一次 Long 比较），
+     * 而漏读一条内容的代价对用户是实实在在的信息丢失。
+     */
+    private fun onUtteranceDone(channel: Int, utteranceId: String? = null) {
         val queue = if (channel == CHANNEL_A) channelA else channelB
+
+        // 第二道防线：主线程执行时再确认一次
+        val callbackItemId = UtteranceGuard.itemIdOf(utteranceId)
+        val currentId = queue.current()?.id
+        if (callbackItemId != null && currentId != null && callbackItemId != currentId) {
+            ReaderLog.d(
+                TAG,
+                "主线程复核：完成回调属于项 $callbackItemId，但当前是项 $currentId → 忽略"
+            )
+            return
+        }
+
         val item = queue.current()
         queue.onCurrentDone()
         item?.onDone?.invoke()
