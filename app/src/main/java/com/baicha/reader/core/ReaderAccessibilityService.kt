@@ -284,7 +284,18 @@ class ReaderAccessibilityService : AccessibilityService() {
             }
         )
         screenRecovery = ScreenStateRecovery(
-            getCurrentFocus = { focus.getFocused() },
+            // ★ 必须用 getAccessibilityFocusStrict（**不回退输入焦点**）
+            //
+            // 依据 TalkBack `FocusProcessorForScreenStateChange.java:176~177`：
+            //   accessibilityFocusMonitor.getAccessibilityFocus(useInputFocusIfEmpty = false)
+            //
+            // 不能用 getFocused()：它内部第一步就是
+            // monitor.getAccessibilityFocus(useInputFocusIfEmpty = true)，
+            // 多了一条「退回输入焦点」的回退链。于是「窗口是否已有无障碍焦点」
+            // 这个问题的答案会被输入焦点污染 —— 编辑框场景下会误判
+            // 「已有有效焦点」而不恢复焦点，用户从锁屏/切窗口回来时
+            // 焦点丢失且无任何提示（对盲人用户等于失去导航）。
+            getCurrentFocus = { focus.getAccessibilityFocusStrict() },
             getActiveWindowId = {
                 try {
                     windows?.firstOrNull { it.isActive }?.id ?: -1

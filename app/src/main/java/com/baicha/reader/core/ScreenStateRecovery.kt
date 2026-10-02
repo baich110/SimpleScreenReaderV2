@@ -61,7 +61,46 @@ import android.view.accessibility.AccessibilityWindowInfo
  * TalkBack 用「切换开始时间 vs 用户最近操作时间」的比较来避免这个竞态。
  */
 class ScreenStateRecovery(
-    /** 取当前焦点 —— 由服务注入（对应 TalkBack AccessibilityFocusMonitor） */
+    /**
+     * 取「纯无障碍焦点」—— 对应 TalkBack
+     * `accessibilityFocusMonitor.getAccessibilityFocus(useInputFocusIfEmpty = false)`
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮修复：这里原来接的是 `focus.getFocused()`】
+     * ══════════════════════════════════════════════════════════
+     *
+     * TalkBack `FocusProcessorForScreenStateChange.java:172~185`：
+     * ```java
+     *   private boolean hasValidAccessibilityFocusInWindow(AccessibilityWindowInfo window) {
+     *     if (!window.isAccessibilityFocused()) { ... return false; }
+     *     AccessibilityNodeInfoCompat currentFocus =
+     *         accessibilityFocusMonitor.getAccessibilityFocus(useInputFocusIfEmpty = false);
+     *     return (currentFocus != null)
+     *         && AccessibilityNodeInfoUtils.isVisible(currentFocus)
+     *         && (currentFocus.getWindowId() == window.getId());
+     *   }
+     * ```
+     *
+     * 注意那个 **`false`**。而白茶原来接的是 `FocusManager.getFocused()`，
+     * 它内部第一步就是
+     * `monitor.getAccessibilityFocus(useInputFocusIfEmpty = true)`
+     * —— **多了一条「退回输入焦点」的回退链**。
+     *
+     * 【为什么多这一条是错的】本方法问的是「当前窗口**是否已经有无障碍焦点**」：
+     *   · 若把「输入焦点」也算作「已有无障碍焦点」，
+     *     那么在**编辑框**场景（唯一有输入焦点的地方）会判定为
+     *     `FAIL_HAS_VALID_FOCUS` → **不恢复焦点**。
+     *   · 真机表现：从锁屏/切窗口回来时，如果光标停在某个输入框里，
+     *     读屏**不把焦点还给用户**，用户滑一下也不知道自己在哪 ——
+     *     一个盲人用户此时等于失去了导航能力。
+     *   · TalkBack 用一个明确的 `false` 把这条回退**关掉**，正是为了
+     *     让「有没有无障碍焦点」这个问题得到**严格的答案**。
+     *
+     * 【修复方式】新增本钩子，只做「无障碍焦点」查询；
+     * 服务侧接 `FocusManager.getAccessibilityFocusStrict()`。
+     * 原 `getCurrentFocus` 保留给其他用途（未来若有），
+     * 但本类的语义已收紧。
+     */
     private val getCurrentFocus: () -> AccessibilityNodeInfo?,
     /** 取当前活动窗口 ID */
     private val getActiveWindowId: () -> Int,

@@ -274,8 +274,68 @@ class FocusManager(
     @Volatile
     var monitor: FocusMonitor? = null
 
+    /**
+     * 取「纯无障碍焦点」—— **不回退到输入焦点**
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【为什么需要与 [getFocused] 分开的两个入口】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 两者回答的是**不同的问题**：
+     *
+     * | 入口 | 问题 | 回退到输入焦点 |
+     * |---|---|---|
+     * | [getFocused] | 「当前焦点是谁？」（用于导航/播报） | **要**（编辑框场景必须有） |
+     * | 本方法 | 「当前窗口**有没有**无障碍焦点？」 | **不要**（否则答案不严格） |
+     *
+     * 【依据】TalkBack 在屏幕状态恢复里明确传 `false`：
+     * `FocusProcessorForScreenStateChange.java:176~177`
+     * ```java
+     *   AccessibilityNodeInfoCompat currentFocus =
+     *       accessibilityFocusMonitor.getAccessibilityFocus(useInputFocusIfEmpty = false);
+     * ```
+     *
+     * 【用错会怎样】若恢复判定用 [getFocused]（含输入焦点回退），
+     * 在编辑框场景会误判「已有有效焦点」→ 不恢复 →
+     * 用户从锁屏回来时焦点丢失，且**没有任何提示**。
+     */
+    fun getAccessibilityFocusStrict(): AccessibilityNodeInfo? {
+        // ① 监控器严格查询（useInputFocusIfEmpty = false）
+        val m = monitor
+        if (m != null) {
+            m.getAccessibilityFocus(useInputFocusIfEmpty = false)?.let { return it }
+        }
+
+        // ② 直接问系统要无障碍焦点（不含输入焦点）
+        //
+        // 【注意】**不能**退到 `focusNode` 缓存 —— 缓存里可能存着
+        // 上一次由输入焦点回退得到的节点，那样等于绕过了本方法的语义。
+        try {
+            service.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)?.let {
+                if (isValid(it)) return it
+            }
+        } catch (e: Throwable) {
+            // ignore
+        }
+
+        try {
+            service.rootInActiveWindow
+                ?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                ?.let { if (isValid(it)) return it }
+        } catch (e: Throwable) {
+            // ignore
+        }
+
+        return null
+    }
+
     fun getFocused(): AccessibilityNodeInfo? {
-        // ★ 优先走监控器的多级回退链（对应 TalkBack）
+        // ★ 优先走监控器的多级回退链（对应 TalkBack）—— useInputFocusIfEmpty = true
+        //
+        // 【为什么这里是 true 而 [getAccessibilityFocusStrict] 是 false】
+        // 两者回答不同问题：导航/播报问「焦点是谁」（编辑框场景必须能靠
+        // 输入焦点回退找到），恢复判定问「窗口**有没有**无障碍焦点」
+        // （答案必须严格，不能被输入焦点污染）。
         val m = monitor
         if (m != null) {
             val node = m.getAccessibilityFocus(useInputFocusIfEmpty = true)

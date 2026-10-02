@@ -72,7 +72,16 @@ open class FakeNode(
      * 它是角色判定的第一依据（查 NODE_ROLE_MAP + 继承链检查），
      * 不提供就无法测角色/排序相关逻辑。
      */
-    var fakeClassName: CharSequence? = null
+    var fakeClassName: CharSequence? = null,
+
+    /** 是否持有**输入**焦点 —— `FocusMonitor` 回退链第②级的判定输入 */
+    var fakeInputFocused: Boolean = false,
+
+    /** 是否可编辑 —— `FocusMonitor` 的 `requireEditable` 校验输入 */
+    var fakeEditable: Boolean = false,
+
+    /** 所属窗口 ID —— 屏幕状态恢复要求「焦点节点属于当前窗口」 */
+    var fakeWindowId: Int = -1
 ) : AccessibilityNodeInfo() {
 
     private val childList = ArrayList<FakeNode>(4)
@@ -122,6 +131,12 @@ open class FakeNode(
     override fun getPackageName(): CharSequence? = fakePackageName
 
     override fun getClassName(): CharSequence? = fakeClassName
+
+    override fun isFocused(): Boolean = fakeInputFocused
+
+    override fun isEditable(): Boolean = fakeEditable
+
+    override fun getWindowId(): Int = fakeWindowId
 
     override fun hashCode(): Int = nodeId
 
