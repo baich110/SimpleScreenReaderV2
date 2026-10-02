@@ -1234,8 +1234,75 @@ object ShouldFocusNode {
         return tempRect == base
     }
 
+    /**
+     * 「有其中任一动作」—— **双路判定**（位掩码 + 动作表）
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮修复：原来只查了 actionList，漏了位掩码路径】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 原实现：
+     * ```kotlin
+     *   node.actionList.any { it.id in ids }
+     * ```
+     * 只走**动作表**一条路。
+     *
+     * 【天坦的两组函数必须分清】`w7/NodeUtils.java`：
+     * ```java
+     *   // :263~274  hasAction —— **只**扫 actionList
+     *   public static final boolean hasAction(NodeInfo nodeInfo, int i9) {
+     *       List actionList = nodeInfo.getActionList();
+     *       ... 遍历比对 id ...
+     *   }
+     *
+     *   // :276~282  matchActionMask —— **位掩码 OR 动作表**
+     *   public static final boolean matchActionMask(NodeInfo nodeInfo, int i9) {
+     *       if (((nodeInfo != null ? nodeInfo.getActions() : 0) & i9) == i9) return true;
+     *       return hasAction(nodeInfo, i9);
+     *   }
+     *
+     *   // :285~289  matchActionMask2 —— 两个动作，各自双路
+     *   public static final boolean matchActionMask2(NodeInfo nodeInfo, int i9, int i10) {
+     *       int actions = nodeInfo != null ? nodeInfo.getActions() : 0;
+     *       return (actions & i9) == i9 || (actions & i10) == i10
+     *           || hasAction(nodeInfo, i9) || hasAction(nodeInfo, i10);
+     *   }
+     * ```
+     *
+     * 【为什么单 id 版本的 hasAction **不应**混进来】
+     * 本文件里 `hasActionMask` 已单独实现位掩码路径，
+     * 而 `y()` / `z()` 等已显式把两者 OR 起来 ——
+     * 那是**正确**的 `matchActionMask2/3` 移植，**不能改**。
+     * 所以这里只修**这个 vararg 版本**，让它与调用方的期望一致。
+     *
+     * 【本函数的调用方期望什么】逐条核对（全部按
+     * `matchActionMask*`（双路）语义使用）：
+     * | 行 | 用途 | 天坦对应 |
+     * |---|---|---|
+     * | :287 | 滑块角色（4096/8192/SET_PROGRESS） | `matchActionMask3` 语义 |
+     * | :399 | `n(node, true)` 的 `hasAction(1,16,32)` | `matchActionMask3` |
+     * | :402 | `n(node, false)` 的 `hasAction(16,32)` | `matchActionMask2` |
+     * | :1184 | WebView 判定（4096/8192） | `NodeUtils.hasAction4096` = `matchActionMask2` |
+     *
+     * 注意 :1184 的依据最直接 —— 天坦自己写的就是：
+     * ```java
+     *   public static final boolean hasAction4096(NodeInfo nodeInfo) {
+     *       return matchActionMask2(nodeInfo, 4096, SoundTouch.f23227h);
+     *   }
+     * ```
+     * `matchActionMask2` 是**双路**，而白茶只做了单路
+     * ⇒ **WebView 判定会漏掉「只填位掩码」的节点**，
+     * 使 `findWebViewRoot()` 等分支大面积失活。
+     *
+     * 【真机后果】网页内容、滑块、部分可点击元素的判定偏严 →
+     * 那些节点被判「不可聚焦」→ **用户滑不到**（漏读内容）。
+     */
     private fun hasAction(node: AccessibilityNodeInfo, vararg ids: Int): Boolean {
         return try {
+            // ① 位掩码路径 —— `(actions & id) == id`
+            val actions = node.actions
+            if (ids.any { (actions and it) == it }) return true
+            // ② 动作表路径 —— 遍历 actionList
             node.actionList.any { it.id in ids }
         } catch (e: Throwable) {
             false
