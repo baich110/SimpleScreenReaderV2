@@ -136,18 +136,27 @@ object ShouldFocusNode {
      * 【性能】只重置基准，不动 tempRect（那两个是纯临时缓冲）。
      */
     fun resetOperationScope() {
+        // 对应天坦 `FocusFinder.clearCache()`（`w7/FocusFinder.java:188~193`）：
+        // ```java
+        // public final void clearCache() {
+        //     f39023h.clear();   // p 判定缓存
+        //     f39017b = null;    // 基准矩形（= 我的 baselineInitialized）
+        //     HashSet hashSet = f39022g;
+        //     AccessibilityNodeInfoUtils.recycleAll(hashSet);
+        //     hashSet.clear();   // 已访问子节点集合（= 我的 seenChildren）
+        // }
+        // ```
+        // 天坦在 `M6/h.D()` 的 **26 条退出路径**上调用它（已 grep 确认 26 处）。
+        //
+        // 【本轮补齐第三项】原来只清基准，上一轮补了 pCache，
+        //   但**漏了 seenChildren** —— 而天坦三样都清。
+        //   `seenChildren` 不清的后果：命中过的子节点在后续轮次
+        //   会让整个 `m()` 返回 false（越用判定越严）。
+        //   （虽然 `shouldFocus()` 入口也清了，但天坦两处都清 ——
+        //     退出路径清理能覆盖「缓存命中、未走入口 clear」的分支。）
         baselineInitialized = false
-        // ★ 本轮修正（P1）：同时清 pCache
-        //
-        // 【为什么】`pCache` 是「子节点是否有内容/可操作」的判定缓存，
-        //   它只被 clear() 清（窗口切换时），而 resetOperationScope()
-        //   每轮导航都调却不清它 → 滚动后持续读**上一轮的判定结果**。
-        //   天坦的对应缓存 `f39013h` 与基准一起在 `d()` 里清。
-        //
-        // 【为什么不放在 clear() 里dedupe】clear() 是窗口级
-        //   （低频），resetOperationScope() 是操作级（每轮导航）——
-        //   两者语义不同，都要清，且这里更需要（导航频率高得多）。
         pCache.clear()
+        seenChildren.clear()
     }
 
     /**
