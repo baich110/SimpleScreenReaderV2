@@ -53,7 +53,20 @@ enum class DiffOp {
 data class DiffSegment(
     @JvmField val op: DiffOp,
     @JvmField val text: String
-)
+) {
+    /**
+     * 保持原有的简洁格式 `EQUAL('你好')`
+     *
+     * 【为什么显式覆盖】`data class` 会自动生成
+     * `DiffSegment(op=EQUAL, text=你好)` —— 比原来冗长。
+     * 测试与日志里按原格式断言/阅读，故显式覆盖回原格式。
+     *
+     * 【注】我一开始以为 data class 自动生成的格式与原来一致，
+     * 实测**不一致**（`ValueSemanticsTest.diffSegment_toStringFormat`
+     * 立刻失败暴露了这点）。已补上这个覆盖。
+     */
+    override fun toString(): String = "$op('$text')"
+}
 
 /**
  * 文本差分引擎 —— 对应天坦 w7/F（833 行）

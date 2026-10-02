@@ -37,6 +37,53 @@ class ReadReplacement(
     override fun toString(): String =
         "ReadReplacement(${if (isRegExp) "正则" else "文本"} '$phrase' → '$replacement'" +
                 (if (packageName != null) " @$packageName" else " 全局") + ")"
+
+    // ==================== 值语义 ====================
+    //
+    // ══════════════════════════════════════════════════════════
+    // 【★ 本轮修复：补上 equals/hashCode（原来没有值语义）】
+    // ══════════════════════════════════════════════════════════
+    //
+    // 五个字段全是 `val`、无身份语义 —— 是**值类型**。
+    // 但原来没有 equals/hashCode，继承自 `Any`（引用相等），于是：
+    // ```kotlin
+    //   ReadReplacement("的", "") == ReadReplacement("的", "")   // false ❗
+    // ```
+    //
+    // 【危害】`ReadReplacementStore.load()` / `loadWithBuiltin()` 都是
+    // **公开 API**，返回 `List<ReadReplacement>`。
+    // 任何按内容比较的代码（去重、判断"规则是否已存在"、
+    // 测试断言）都会**静默拿到错误结果** —— 永远 false、不报错。
+    // 例如「用户重复添加同一条规则时提示已存在」会永远提示不出来。
+    //
+    // 【与 DiffSegment / LogRecord 属同一类缺陷】本轮做的系统性排查：
+    // 「只有 val 字段却写成普通 class」→ 全项目 3 处，均已修。
+    //
+    // 【为什么不全改成 data class】本类有 `init` 校验与手写
+    // `toString()`（比自动生成的可读），故显式实现 equals/hashCode。
+    //
+    // 【优先级字段参与比较吗】参与 —— 两条 phrase 相同但 priority 不同
+    // 的规则**不是**同一条规则（后者会覆盖前者的生效顺序），
+    // 视为不同是正确的。
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ReadReplacement) return false
+        return phrase == other.phrase &&
+                replacement == other.replacement &&
+                isRegExp == other.isRegExp &&
+                packageName == other.packageName &&
+                priority == other.priority
+    }
+
+    override fun hashCode(): Int {
+        var result = phrase.hashCode()
+        result = 31 * result + replacement.hashCode()
+        result = 31 * result + isRegExp.hashCode()
+        result = 31 * result + (packageName?.hashCode() ?: 0)
+        result = 31 * result + priority
+        return result
+    }
 }
 
 /**

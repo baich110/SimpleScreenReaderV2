@@ -189,6 +189,34 @@ enum class LogCategory {
  * 结构化后 [RateLimitedRingBuffer.filter] 是 O(1) 字段比较。
  * （文本导出仍然是字符串，见 [render]。）
  */
+/**
+ * 一条日志记录 —— **值类型**
+ *
+ * ══════════════════════════════════════════════════════════
+ * 【★ 本轮修复：改为 data class（原来没有值语义）】
+ * ══════════════════════════════════════════════════════════
+ *
+ * 全部字段都是 `val`、无身份语义 —— 是值类型，但原来写成普通 `class`，
+ * 于是 `equals`/`hashCode` 继承自 `Any`（引用相等）：
+ * ```kotlin
+ *   LogRecord(INFO, FOCUS, "t", "同一句") == LogRecord(INFO, FOCUS, "t", "同一句")  // false ❗
+ * ```
+ *
+ * 【危害】`LogRecord` 是**公开 API 的返回值类型**
+ * （`ReaderLog` 的查询/导出接口都返回它）。
+ * 使用者/测试一旦按内容比较就会**静默拿到错误结果**（永远 false），
+ * 不报错、不崩溃 —— 目标里点名的模式⑨「静默失败」。
+ *
+ * 【与 DiffSegment 同一类缺陷】本轮做出的一类系统性排查：
+ * 「只有 val 字段却写成普通 class」→ 扫描全项目发现 3 处
+ * （`DiffSegment` 已修、`LogRecord`、`ReadReplacement`）。
+ *
+ * 【注意】这里**不能用 data class 自动生成的 toString** ——
+ * 原实现手写了 `toString()`（含时间戳格式化），功能上更完整，
+ * 故保留手写版本（data class 允许覆盖自动生成的 toString）。
+ *
+ * 【兼容性】主构造器与字段类型均不变，生产代码零改动。
+ */
 class LogRecord(
     val level: LogLevel,
     val category: LogCategory,
@@ -207,6 +235,40 @@ class LogRecord(
 
     /** 唯一键：同一分类 + 同一消息模式的记录才参与聚合 */
     val limiterKey: String get() = "${category.name}|$pattern"
+
+    // ==================== 值语义 ====================
+    //
+    // 【为什么不直接改成 data class】本类手写了 `toString()`
+    // （含时间戳格式化，比 data class 生成的更可读），
+    // 而 data class 会自动生成 toString 覆盖它 —— 为保留手写版，
+    // 这里显式实现 equals/hashCode。
+    //
+    // 【为什么必须实现】见类注释：缺值语义会让「按内容比较」静默返回 false。
+    //
+    // 【字段覆盖】除 `timeMillis` 外全部参与比较 ——
+    // 时间戳是**记录时刻**而非记录内容：同一句日志在不同时刻产生，
+    // 内容相同就应视为相同（聚合/去重都按内容）。
+    // 注意 `throwable` 用其 **toString 文本**参与比较：
+    // Throwable 本身是引用相等，同一异常的不同实例内容相同却不等。
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is LogRecord) return false
+        return level == other.level &&
+                category == other.category &&
+                tag == other.tag &&
+                message == other.message &&
+                throwable?.toString() == other.throwable?.toString()
+    }
+
+    override fun hashCode(): Int {
+        var result = level.hashCode()
+        result = 31 * result + category.hashCode()
+        result = 31 * result + tag.hashCode()
+        result = 31 * result + message.hashCode()
+        result = 31 * result + (throwable?.toString()?.hashCode() ?: 0)
+        return result
+    }
 
     /** 渲染为一行文本 */
     fun render(compact: Boolean = false): String {
