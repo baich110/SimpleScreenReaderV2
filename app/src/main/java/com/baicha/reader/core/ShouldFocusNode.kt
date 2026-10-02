@@ -229,8 +229,48 @@ object ShouldFocusNode {
             return webView?.isVisibleToUser == true
         }
 
-        // ③ 可见性
-        if (!node.isVisibleToUser) return false
+        // ③ 可见性 —— **必须用天坦的 isVisible()，不是裸 isVisibleToUser**
+        //
+        // ══════════════════════════════════════════════════════════
+        // 【★★★ 真机 P0 根因：这一行让「左右滑动找不到焦点」】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 【真机现象】（用户实装后的原话）
+        //   > 左右滑动还是失效，它只能获取到一个两个焦点，
+        //   > 而且很多焦点它都（获取不到）
+        //   > 它的焦点就完全弄拿不到。天坦把它引导过去，它都不读
+        //
+        // 【日志】「连续 9 次手势，零导航输出」+「能工作的只有
+        //   编辑框/全屏输入这类强焦点节点」。
+        //
+        // 【根因】原来用**裸** `node.isVisibleToUser` 直接判否。
+        // 而天坦 `w7/AccessibilityNodeInfoUtils.java:570~578`：
+        // ```java
+        //   public static boolean isVisible(NodeInfo nodeInfo) {
+        //       if (nodeInfo == null) { return false; }
+        //       if (nodeInfo.isVisibleToUser()) { return true; }
+        //       return NodeNavigator.isInRecyclerView(nodeInfo)
+        //           && EventUtils.getNodeType(nodeInfo) != 15;
+        //   }
+        // ```
+        // **第二条兜底**是关键：`isVisibleToUser()` 返回 false 时，
+        // 只要该节点**属于 RecyclerView 且不是 type 15**，
+        // 仍视为可见。
+        //
+        // 【为什么真机上这条兜底决定成败】
+        //   `isVisibleToUser` 在 MIUI/Android 16 上有**大量假阴性**：
+        //     · RecyclerView 列表项的子节点在未完全进入视口时返回 false
+        //     · 滚动中 / 动画中 / 自绘 UI 返回 false
+        //     · 被父容器裁剪的文本节点返回 false
+        //   而这些节点**内容是可读的、也该能被聚焦**。
+        //   一律判否 ⇒ 遍历找不到任何候选 ⇒ `moveFocus` 返回 null ⇒
+        //   `haptic.boundary()`（只震动、无日志）⇒
+        //   用户听到的正是「获取不到焦点的那种震动反馈」。
+        //
+        // 【与「触摸探索能读」不矛盾】
+        //   触摸探索**不经过 shouldFocus** —— 它直接对触摸到的节点播报。
+        //   所以「触摸能读、滑动不能」这个反常组合正是本行的指纹。
+        if (!isVisible(node)) return false
 
         // ④ 初始化边界基准 —— 对应天坦 f39007b / f39008c
         //
@@ -434,6 +474,77 @@ object ShouldFocusNode {
         // 【为什么之前没发现】旧版反编译里这两个函数都叫 `k`（一个静态
         //   一个实例），极难分辨；可读版把它们分别命名后才看清。
         return isActionableForAccessibility(node) || node.isLongClickable
+    }
+
+    /**
+     * 天坦 `AccessibilityNodeInfoUtils.isVisible(node)` —— **带 RecyclerView 兜底**
+     *
+     * 依据 `w7/AccessibilityNodeInfoUtils.java:570~578`（原样摘录）：
+     * ```java
+     *   public static boolean isVisible(NodeInfo nodeInfo) {
+     *       if (nodeInfo == null) { return false; }
+     *       if (nodeInfo.isVisibleToUser()) { return true; }
+     *       return NodeNavigator.isInRecyclerView(nodeInfo)
+     *           && EventUtils.getNodeType(nodeInfo) != 15;
+     *   }
+     * ```
+     *
+     * 【两条支路】
+     *   ① `isVisibleToUser()` —— 直接可见
+     *   ② **兜底**：属于 RecyclerView 且不是 type 15（网格容器）→ 仍算可见
+     *
+     * 【为什么必须有支路②】`isVisibleToUser` 在真机上有大量假阴性
+     * （列表项未完全进入视口、滚动中、被父容器裁剪、自绘 UI）。
+     * 少了它，遍历会把整片列表判为「不可见」→ 找不到焦点。
+     *
+     * 【`isInRecyclerView` 的实现】对应 `w7/NodeNavigator.java:106~114`：
+     * ```java
+     *   public static boolean isInRecyclerView(NodeInfo nodeInfo) {
+     *       if (nodeInfo == null) return false;
+     *       return isInWebView(nodeInfo) || isInListView(nodeInfo);
+     *   }
+     * ```
+     *   · `isInWebView` → `isInScrollView` → `hasActionMask2(1024, 2048)`
+     *     （位掩码 **OR** actionList 双路）
+     *   · `isInListView` → `pkg.startsWith("org.mozilla.")`
+     *
+     * 【为什么不用类名判 RecyclerView】天坦不看类名 ——
+     * 它靠 HTML 元素动作（1024/2048）识别「这是可滚动的网页/列表内容」。
+     * 用类名反而会漏掉 `androidx.recyclerview` 之外的实现。
+     */
+    private fun isVisible(node: AccessibilityNodeInfo): Boolean {
+        if (node.isVisibleToUser) return true
+        return isInRecyclerView(node) && !isType15(node)
+    }
+
+    /**
+     * 天坦 `NodeNavigator.isInRecyclerView(nodeInfo)`
+     *
+     * 依据 `w7/NodeNavigator.java:106~114` + `NodeUtils.matchActionMask2`：
+     * ```java
+     *   isInRecyclerView = isInWebView(node) || isInListView(node)
+     *   isInWebView      = isInScrollView = hasActionMask2(node, 1024, 2048)
+     *   isInListView     = pkg.startsWith("org.mozilla.")
+     * ```
+     *
+     * `matchActionMask2`（`NodeUtils.java:285~289`）是**双路**：
+     * ```java
+     *   int actions = nodeInfo.getActions();
+     *   return (actions & i9) == i9 || (actions & i10) == i10
+     *       || hasAction(nodeInfo, i9) || hasAction(nodeInfo, i10);
+     * ```
+     */
+    private fun isInRecyclerView(node: AccessibilityNodeInfo): Boolean {
+        // isInListView
+        val pkg = try {
+            node.packageName?.toString().orEmpty()
+        } catch (e: Throwable) {
+            ""
+        }
+        if (pkg.startsWith("org.mozilla.")) return true
+
+        // isInWebView → isInScrollView → matchActionMask2(1024, 2048)
+        return hasAction(node, ACTION_NEXT_HTML_ELEMENT, ACTION_PREVIOUS_HTML_ELEMENT)
     }
 
     /**
@@ -1311,4 +1422,5 @@ object ShouldFocusNode {
 
     /** ACTION_SET_PROGRESS */
     private const val SET_PROGRESS_ACTION = 16908349
+
 }

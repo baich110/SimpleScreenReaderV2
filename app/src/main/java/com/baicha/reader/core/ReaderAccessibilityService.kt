@@ -1005,6 +1005,16 @@ class ReaderAccessibilityService : AccessibilityService() {
      * 焦点移动 —— 供手势链调用
      */
     private fun moveFocusInternal(forward: Boolean): Boolean {
+        // ★ 导航入口日志（本轮补）—— 用于区分「没走到这里」与「走到了但失败」
+        //
+        // 【为什么要这一行】真机上出现过「手势事件到达、但零导航日志」的情况，
+        // 当时无法判断是**手势链没派发**还是**导航内部失败**。
+        // 有了这一行，下次真机日志可直接二分：
+        //   有「导航入口」→ 问题在 moveFocus 内部（看 `焦点` 分类）
+        //   无「导航入口」→ 问题在手势链（看 `手势` 分类的 `未消费`）
+        ReaderLog.d(TAG, "导航入口: ${if (forward) "下一个" else "上一个"}" +
+                " / 模式=${navigation.current.label}")
+
         // 记录逻辑导航动作（供屏幕状态恢复的竞态判定）
         //
         // 【注意】此处只记时间戳 —— 目标节点要等遍历完成后才知道。
@@ -1077,6 +1087,34 @@ class ReaderAccessibilityService : AccessibilityService() {
             strategyType = navigation.strategyTypeCode(),
             filter = navigation.filter()
         ) ?: run {
+            // ══════════════════════════════════════════════════════════
+            // 【★ 本轮补日志：这条路原来是**完全静默**的】
+            // ══════════════════════════════════════════════════════════
+            //
+            // 【真机教训】用户实装后的日志里出现过这样的段落：
+            // ```
+            //   05:28:21.204  onGesture(Event): 4
+            //   05:28:22.263  onGesture(Event): 3
+            //   05:28:36.751  onGesture(Event): 4
+            //   ...（连续 9 次手势，一次导航都没有）
+            // ```
+            // 手势事件 100% 到达，但**一行导航日志都没有** ——
+            // 排查者（用户和我）完全无法判断「卡在哪一步」。
+            // 而这**正是目标里点名的错误模式⑨「静默失败」**。
+            //
+            // 【为什么原来静默】`haptic.boundary()` 只震动、不写日志
+            // （见 `HapticFeedback.boundary()`）。所以表现是
+            // 「手机震了一下，然后什么也没有」。
+            //
+            // 【本行补上诊断】至少说清：导航模式是什么、方向是什么。
+            // 若 `焦点` 分类里已有 `❌ 下一焦点 | 失败 ← xxx` 的
+            // FocusTrace 行，那说明 moveFocus 内部已给出原因；
+            // 若**没有**该行，则说明根本没走到 moveFocus
+            // （那问题在更上游，看 `手势` 分类的 `未消费` 日志）。
+            log(
+                "导航未找到焦点：${navigation.current.label} / " +
+                        if (forward) "下一个" else "上一个"
+            )
             haptic.boundary()
             return false
         }

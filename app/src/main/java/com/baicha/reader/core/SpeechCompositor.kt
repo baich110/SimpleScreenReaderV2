@@ -241,7 +241,56 @@ object SpeechCompositor {
         val seen = HashSet<String>(4)
         for (i in 0 until limit) {
             val child = node.getChild(i) ?: continue
-            if (!isVisible(child)) continue
+
+            // ══════════════════════════════════════════════════════════
+            // 【★ 本轮修复：删掉 `if (!isVisible(child)) continue`】
+            // ══════════════════════════════════════════════════════════
+            //
+            // 【真机现象】用户实装后日志里 `(无标签) → 兜底播报` **刷屏**：
+            // ```
+            //   下一焦点: (无标签) → 兜底播报
+            //   无障碍焦点: (无内容)
+            //   触摸: (无标签) → 兜底播报
+            // ```
+            // 能正常工作的只有 `全屏输入` / `编辑框` / `菜单`
+            // —— 都是**自身直接带 text** 的节点。
+            // 用户原话：「左右滑动还是失效，只能获取到一两个焦点」。
+            //
+            // 【根因】天坦 `w7/NodeUtils.java:69~87` 的
+            // `getChildTextRecursive()` **没有**可见性判断：
+            // ```java
+            //   for (int i9 = 0; i9 < childCount; i9++) {
+            //       NodeInfo child = nodeInfo.getChild(i9);
+            //       if (child != null) {
+            //           withNodeRecycled(child, ... lambdaCollectText ...);
+            //       }
+            //   }
+            // ```
+            // 只要 child 非 null 就收集它的文本。
+            //
+            // 【为什么过滤会造成大面积失败】`isVisibleToUser` 在真机上有
+            // **大量假阴性**：
+            //   · RecyclerView 列表项的容器/子项常返回 false
+            //   · 滚动中 / 动画中 / 自绘 UI 返回 false
+            //   · 部分国产 ROM 对未完全进入视口的子节点返回 false
+            //   · 被父容器裁剪的文本节点返回 false
+            // 而这些节点**文本是有的**。全被 `continue` 掉 ⇒ 收集结果为空 ⇒
+            // `compose()` 走到「三个核心都空 → return null」⇒
+            // `speakNode` 落到 `(无标签) → 兜底播报`。
+            //
+            // 【更荒诞的副作用】`ShouldFocusNode` 已把「不可见但属于
+            // RecyclerView」的节点视为**可聚焦**（见
+            // `w7/AccessibilityNodeInfoUtils.java:570~577` 的 isVisible 有
+            // RecyclerView 兜底）——于是出现「**判定可聚焦、但读不出内容**」：
+            // 焦点设上去了，却念「未加标签」。
+            //
+            // 【修复】与天坦一致：不按可见性过滤子节点。
+            // 文本本身的可用性由 `!t.isNullOrEmpty()` 与长度上限保证。
+            //
+            // 【为什么不需要担心读到"屏外垃圾"】本函数只在**焦点节点的
+            // 子树**上收集，而那棵树是刚刚通过 `ShouldFocusNode` 判定的
+            // 焦点所在项；收集范围另有 `MAX_CHILD_SCAN` 上限。
+
             val t = child.text?.toString()?.trim()
                 ?: child.contentDescription?.toString()?.trim()
             if (!t.isNullOrEmpty() && t.length < 100 && seen.add(t)) {

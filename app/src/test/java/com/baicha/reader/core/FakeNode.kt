@@ -81,7 +81,42 @@ open class FakeNode(
     var fakeEditable: Boolean = false,
 
     /** 所属窗口 ID —— 屏幕状态恢复要求「焦点节点属于当前窗口」 */
-    var fakeWindowId: Int = -1
+    var fakeWindowId: Int = -1,
+
+    /**
+     * 无障碍内容描述 —— `getContentDescription()`
+     *
+     * 【为什么需要】文本提取链（`SpeechCompositor.extractMainText` /
+     * `collectChildText`）的第二数据源就是它：
+     * ```kotlin
+     *   child.text?.toString()?.trim()
+     *       ?: child.contentDescription?.toString()?.trim()
+     * ```
+     * 没有它就无法测「节点只有 contentDescription 时能否读出内容」。
+     */
+    var fakeContentDescription: CharSequence? = null,
+
+    /**
+     * 是否**可获得**焦点 —— `isFocusable()`
+     *
+     * 【为什么必须有这个字段】`ShouldFocusNode.n(node, true)` 的第一项
+     * 就是它：
+     * ```kotlin
+     *   return isScreenReaderFocusable(node) || node.isFocusable ||
+     *          node.isClickable || node.isLongClickable || hasAction(node, 1, 16, 32)
+     * ```
+     * 而 `isReturnDefaultValues` 让未重写的 `isFocusable()` 恒返回 **false** ——
+     * 没有这个字段，`shouldFocus()` 在单测里**永远返回 false**，
+     * 等于整个焦点判定层测不了。
+     */
+    var fakeFocusable: Boolean = false,
+
+    /**
+     * 是否「读屏应聚焦」—— `isScreenReaderFocusable()`
+     *
+     * API 28+ 才有；`n()` 的第一项用它。
+     */
+    var fakeScreenReaderFocusable: Boolean = false
 ) : AccessibilityNodeInfo() {
 
     private val childList = ArrayList<FakeNode>(4)
@@ -131,6 +166,25 @@ open class FakeNode(
     override fun getPackageName(): CharSequence? = fakePackageName
 
     override fun getClassName(): CharSequence? = fakeClassName
+
+    override fun getContentDescription(): CharSequence? = fakeContentDescription
+
+    override fun isFocusable(): Boolean = fakeFocusable
+
+    override fun isScreenReaderFocusable(): Boolean = fakeScreenReaderFocusable
+
+    /**
+     * 动作位掩码 —— `getActions()`
+     *
+     * 【为什么必须有】多条判定走**位掩码路径**：
+     *   · `isInRecyclerView` → `hasAction(node, 1024, 2048)`
+     *     （`ShouldFocusNode.isVisible` 的 RecyclerView 兜底依赖它）
+     *   · `hasAction` / `hasActionMask` 的全部位掩码分支
+     * 未重写时恒返回 0 ⇒ 位掩码路径在单测里**永远不生效**。
+     */
+    var fakeActions: Int = 0
+
+    override fun getActions(): Int = fakeActions
 
     override fun isFocused(): Boolean = fakeInputFocused
 

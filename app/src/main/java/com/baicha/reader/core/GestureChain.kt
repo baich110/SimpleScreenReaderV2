@@ -214,6 +214,13 @@ class GestureChain {
         }
 
         // ★ ③ 责任链（跳过未激活的 Actor）
+        //
+        // 【调试开关】进入责任链时记一条 DEBUG，便于真机判断
+        // 「手势到底进没进链」——与上面的「无人消费」配对使用。
+        if (ReaderLog.minLevel.priority <= LogLevel.DEBUG.priority) {
+            val names = actors.joinToString(",") { "${it.name}${if (it.isActive) "" else "(跳过)"}" }
+            ReaderLog.d(TAG, "责任链: ${Gestures.name(gestureId)} → [$names]")
+        }
         val n = actors.size
         for (i in 0 until n) {
             val actor = actors[i]
@@ -231,7 +238,31 @@ class GestureChain {
             }
         }
 
-        // ③ 无人消费 → 交给默认导航（由服务注册为最后一个 Actor）
+        // ③ 无人消费
+        //
+        // ══════════════════════════════════════════════════════════
+        // 【★ 本轮补日志：这条路原来是**完全静默**的】
+        // ══════════════════════════════════════════════════════════
+        //
+        // 【真机教训】用户实装后的日志里，连续 9 次手势
+        // （`onGesture(Event): 3/4`）**一条后续都没有**：
+        // ```
+        //   05:28:21.204  onGesture(Event): 4
+        //   05:28:22.263  onGesture(Event): 3
+        //   05:28:36.751  onGesture(Event): 4
+        //   ...
+        // ```
+        // 排查者无法判断手势**去哪了** —— 是没进链？被 Actor 拒绝？
+        // 还是进了默认导航但导航失败？属目标点名的模式⑨「静默失败」。
+        //
+        // 【本行补上】把「哪些 Actor 被跳过、最后无人消费」说清楚。
+        // 正常情况下 `DefaultNavigationActor` 是兜底，**必然**消费
+        // 单指上/下/左/右滑 —— 所以这里出现日志本身就是异常信号。
+        val activeNames = actors.filter { it.isActive }.joinToString(",") { it.name }
+        ReaderLog.w(
+            TAG,
+            "手势 ${Gestures.name(gestureId)} 无人消费（激活 Actor: $activeNames）"
+        )
         unhandledCount++
         return false
     }
