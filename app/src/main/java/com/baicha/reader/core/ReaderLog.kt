@@ -92,8 +92,40 @@ object ReaderLog {
     /** 手势日志的默认 tag */
     private const val TAG_GESTURE = "手势"
 
-    /** 时间格式 */
-    private val timeFormat = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.CHINA)
+    /**
+     * 时间格式 —— **每线程一份**（`SimpleDateFormat` 非线程安全）
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮修复：原来是一个 static 单例，多线程共用会输出错乱时间】
+     * ══════════════════════════════════════════════════════════
+     *
+     * `java.text.SimpleDateFormat` **不是线程安全的**：
+     * 它用内部一个可变的 `Calendar` 字段做格式化，并发调用时互相踩。
+     *
+     * 【为什么在本项目是真问题】`ReaderLog.log()` 至少从三个线程被调用：
+     *   ① 无障碍线程（`onAccessibilityEvent` 回调）
+     *   ② 主线程（UI、手势、播报回调）
+     *   ③ 写盘线程池
+     * 而真机实测焦点抖动时**一秒 64 条日志** —— 三线程同时格式化完全可能。
+     *
+     * 【实测复现】（`SimpleDateFormatThreadSafetyTest`）
+     * ```
+     *   16 线程 × 20000 次、不同时间值：
+     *     共享一个实例  → 错乱 224015 次
+     *     每线程一实例  → 错乱 0 次
+     * ```
+     * 即**22 万次格式化给出了错误的时间字符串**。
+     *
+     * 【后果】日志里的时间戳不可信 —— 而排障时正是靠时间戳
+     * 判断「谁先谁后」来还原因果。时间错乱会**推出完全相反的结论**
+     * （目标里纪律③「不许被日志带偏」，前提是日志本身没错）。
+     *
+     * 【为什么用 ThreadLocal 而不是加锁】格式化在**热路径**上
+     * （每条日志一次），加锁会让三线程互相等待；
+     * `ThreadLocal` 零竞争，且线程池线程数固定、实例数有界。
+     */
+    private val timeFormat: ThreadLocal<SimpleDateFormat> =
+        ThreadLocal.withInitial { SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.CHINA) }
 
     /** 内存环形缓冲（App 内日志面板用；有上限，见 [MAX_MEMORY_LINES]） */
     private val memoryLog = ArrayDeque<String>(MAX_MEMORY_LINES)
@@ -232,7 +264,7 @@ object ReaderLog {
 
         // ③ 写启动分隔线
         val startLine = "\n" + "=".repeat(70) + "\n" +
-                "白茶读屏启动 ${timeFormat.format(Date())}\n" +
+                "白茶读屏启动 ${timeFormat.get()!!.format(Date())}\n" +
                 "=".repeat(70)
         writeToFile(startLine)
 
@@ -365,9 +397,22 @@ object ReaderLog {
      */
     private fun emit(record: LogRecord) {
         val now = uptimeMillis()
-        val ts = wallClockText()
 
         // ① 限流/聚合 —— 命中则只累加计数，不产出任何文本
+        //
+        // 【★ 本轮修复：时间戳格式化移到限流判定**之后**】
+        //
+        // 原实现第一行就是 `val ts = wallClockText()`，而下面注释写着
+        // 「被聚合掉的第 2…N 条**不生成字符串**，性能收益 64 倍」——
+        // **注释与实现不符**：`wallClockText()` 对**每一条**日志都执行，
+        // 包括那些本该被廉价丢弃的。
+        //
+        // 而 `wallClockText()` 是最贵的部分之一：`SimpleDateFormat.format()`
+        // 要构造 `Date`、驱动 `Calendar` 计算、再拼接字符串。
+        // 真机刷屏时一秒 64 条 ⇒ 64 次无用格式化。
+        //
+        // 移到判定之后，被聚合掉的行真正做到「零字符串产出」，
+        // 与注释描述一致。
         val verdict = limiter.samplePattern(
             record.category,
             record.message,
@@ -381,6 +426,7 @@ object ReaderLog {
         }
 
         // ② 格式化（只对确定要落盘的记录做）
+        val ts = wallClockText()
         val line = format(record, ts)
         val summary = verdict.summary()
 
@@ -431,7 +477,7 @@ object ReaderLog {
 
     /** 墙钟文本 —— 纯 JVM 单测没有 SimpleDateFormat 也没关系，失败时降级为单调秒 */
     private fun wallClockText(): String = try {
-        timeFormat.format(Date())
+        timeFormat.get()!!.format(Date())
     } catch (e: Throwable) {
         (uptimeMillis() / 1000).toString()
     }
