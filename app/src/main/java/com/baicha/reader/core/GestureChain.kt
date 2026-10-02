@@ -70,6 +70,12 @@ class GestureChain {
         /** 双击长按 —— 天坦硬编码优先 */
         const val GESTURE_DOUBLE_TAP_AND_HOLD = 18
 
+        /** 先向下再向上滑 —— 天坦：切换到下一个导航 */
+        const val GESTURE_SWIPE_DOWN_AND_UP = 8
+
+        /** 先向上再向下滑 —— 天坦：切换到上一个导航 */
+        const val GESTURE_SWIPE_UP_AND_DOWN = 7
+
         /** 特殊值：交给当前显示器的处理器 */
         const val GESTURE_SPECIAL = -3
     }
@@ -90,6 +96,15 @@ class GestureChain {
      */
     @Volatile
     var onDoubleTapHold: ((displayId: Int) -> Boolean)? = null
+
+    /**
+     * 导航切换处理器 —— 硬编码优先
+     *
+     * 天坦行为：先下再上滑 = 下一个导航，先上再下滑 = 上一个导航。
+     * 这两个手势专用于导航切换，不参与通用手势映射。
+     */
+    @Volatile
+    var onNavigationSwitch: ((gestureId: Int) -> Boolean)? = null
 
     /** 诊断计数 */
     @Volatile
@@ -136,7 +151,19 @@ class GestureChain {
             }
         }
 
-        // ★ ② 责任链（跳过未激活的 Actor）
+        // ★ ② 导航切换手势（硬编码优先）
+        val navSwitch = onNavigationSwitch
+        if (navSwitch != null &&
+            (gestureId == GESTURE_SWIPE_DOWN_AND_UP || gestureId == GESTURE_SWIPE_UP_AND_DOWN)
+        ) {
+            if (navSwitch.invoke(gestureId)) {
+                handledCount++
+                lastHandledBy = "NavigationSwitch"
+                return true
+            }
+        }
+
+        // ★ ③ 责任链（跳过未激活的 Actor）
         val n = actors.size
         for (i in 0 until n) {
             val actor = actors[i]

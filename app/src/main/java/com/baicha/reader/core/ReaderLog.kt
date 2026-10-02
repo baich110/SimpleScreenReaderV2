@@ -152,10 +152,21 @@ object ReaderLog {
     }
 
     /**
+     * 安全获取单调时间 —— 纯 JVM 单测环境没有 android.os.SystemClock
+     *
+     * 优先用 SystemClock（Android 运行时），失败则回退到 System.nanoTime。
+     */
+    private fun uptimeMillis(): Long = try {
+        SystemClock.uptimeMillis()
+    } catch (e: Throwable) {
+        System.nanoTime() / 1_000_000L
+    }
+
+    /**
      * 核心日志方法
      */
     private fun log(level: String, tag: String, msg: String, tr: Throwable?) {
-        val now = SystemClock.uptimeMillis()
+        val now = uptimeMillis()
         val time = timeFormat.format(Date())
         val thread = Thread.currentThread().name
 

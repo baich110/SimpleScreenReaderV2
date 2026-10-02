@@ -101,6 +101,10 @@ class ReaderAccessibilityService : AccessibilityService() {
     lateinit var gestureChain: GestureChain
         private set
 
+    /** 导航管理器（26 种导航模式的分发） */
+    lateinit var navigation: NavigationManager
+        private set
+
     // ==================== 辅助组件 ====================
 
     lateinit var haptic: HapticFeedback
@@ -174,6 +178,15 @@ class ReaderAccessibilityService : AccessibilityService() {
             volume = TtsEngineManager.getVolume(this@ReaderAccessibilityService)
         }
         gestureChain = GestureChain()
+        navigation = NavigationManager().apply {
+            onModeChanged = { mode ->
+                // 切换导航后清缓存（过滤器变了，判定结果不再有效）
+                nodeCache.invalidateAll()
+                speech.speak(mode.label, interrupt = true)
+                haptic.focus()
+                log("导航 → ${mode.label}")
+            }
+        }
 
         // ---- 辅助组件 ----
         haptic = HapticFeedback(this)
@@ -236,6 +249,18 @@ class ReaderAccessibilityService : AccessibilityService() {
             val ok = focus.longClickTarget()
             if (ok) haptic.longPress() else haptic.error()
             ok
+        }
+
+        // ★ 导航切换手势（天坦训练文案确认）：
+        //    先向下再向上滑 → 下一个导航
+        //    先向上再向下滑 → 上一个导航
+        // 这两个手势不参与通用映射，直接硬处理（与天坦一致）
+        gestureChain.onNavigationSwitch = { gestureId ->
+            when (gestureId) {
+                Gestures.GESTURE_SWIPE_DOWN_AND_UP -> { navigation.next(); true }
+                Gestures.GESTURE_SWIPE_UP_AND_DOWN -> { navigation.previous(); true }
+                else -> false
+            }
         }
 
         // ② 媒体控制（仅播放时激活）
@@ -653,7 +678,8 @@ class ReaderAccessibilityService : AccessibilityService() {
             SpeechCompositor.compose(
                 node = node,
                 order = speechOrder,
-                includeRole = includeRole
+                includeRole = includeRole,
+                granularity = navigation.granularityLevel()
             )
         }
     }
@@ -699,7 +725,12 @@ class ReaderAccessibilityService : AccessibilityService() {
      */
     private fun moveFocusInternal(forward: Boolean): Boolean {
         val dir = if (forward) FocusManager.DIR_NEXT else FocusManager.DIR_PREVIOUS
-        val node = focus.moveFocus(dir) ?: run {
+        // ★ 走当前导航的模式与过滤器
+        val node = focus.moveFocus(
+            direction = dir,
+            strategyType = navigation.strategyTypeCode(),
+            filter = navigation.filter()
+        ) ?: run {
             haptic.boundary()
             return false
         }

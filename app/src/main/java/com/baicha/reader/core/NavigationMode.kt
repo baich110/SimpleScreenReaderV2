@@ -1,0 +1,352 @@
+package com.baicha.reader.core
+
+import android.view.accessibility.AccessibilityNodeInfo
+
+/**
+ * 导航模式 —— 对应天坦 X6/z 的内部类 b（26 种导航）
+ *
+ * 【为什么导航是「框架层」而不是「功能层」】
+ *
+ * 天坦的导航不是一个"设置项"，而是**遍历分发的核心抽象**：
+ *
+ *   用户单指上/下滑 → 切换导航模式
+ *        ↓
+ *   当前导航模式 → 决定用哪种遍历策略 + 哪种过滤器
+ *        ↓
+ *   M6.h.D(direction, ..., strategyType)   ← strategyType 来自导航的类型码
+ *        ↓
+ *   C1427v.h(strategyType, ...)             ← 工厂按类型码建遍历器
+ *
+ * 也就是说：**导航模式 = 遍历策略 + 节点过滤 + 播报格式 的三元组**。
+ * 没有这层，遍历策略就无从选择；所以它属于框架层。
+ *
+ * 【天坦的 26 种（每个带 3 个 int：ordinal / labelRes / typeCode）】
+ *
+ *   0  GRANULARITY_DEFAULT          默认        类型码 0
+ *   1  GRANULARITY_CHARACTERS       字符        类型码 1
+ *   2  GRANULARITY_WORDS            字词        类型码 2
+ *   3  GRANULARITY_SENTENCE         逐句        类型码 3
+ *   4  GRANULARITY_PARAGRAPHS       段落        类型码 4
+ *   5  GRANULARITY_LINES            逐行        类型码 5
+ *   6  GRANULARITY_LINKS            链接        类型码 6
+ *   7  GRANULARITY_HEADINGS         标题        类型码 7
+ *   8  GRANULARITY_CONTROLS         控件        类型码 8
+ *   9  SCROLLABLE_WIDGET            可滚动控件   类型码 12
+ *   10 GUIDEPOST                     路标        类型码 13
+ *   11 SELECTOR_ACTIONS              操作选择器   类型码 30
+ *   12 SELECTOR_EDIT                 编辑        类型码 32
+ *   13 SELECTOR_COPY                 复制        类型码 10
+ *   14 SELECTOR_OCR                  OCR        类型码 14
+ *   15 LIST_TRAVERSAL                列表遍历     类型码 16
+ *   16 ROW_AND_COLUM_TRAVERSAL       行列遍历     类型码 31
+ *   17 VERTICAL_TRAVERSAL            垂直遍历     类型码 17
+ *   18 SPLIT_TRAVERSAL               拆分遍历     类型码 18
+ *   19 CONTINUES_READING             连续朗读     类型码 11
+ *   20 SELECTOR_MAGNIFICATION        放大镜       类型码 19
+ *   21 SELECTOR_TRANSLATE            翻译        类型码 15
+ *   22 WINDOWS_NAVIGATION            窗口导航     类型码 9
+ *   23 SPEECH_RATE                   语速        类型码 20
+ *   24 SPEECH_TIMES                  语速倍数     类型码 21
+ *   25 VOLUME_CONTROL                音量        类型码 22
+ *   26 VIDEO_BROWSE                  视频浏览     类型码 23
+ *
+ * 【本实现的范围】
+ *   框架层建全 26 种的定义 + 分发 + 切换机制。
+ *   其中「节点移动型」导航已接真实遍历策略；
+ *   「工具型」导航（OCR/翻译/放大镜等）依赖功能层，此处标记为待实现，
+ *   但**框架接口已经预留**，功能层直接填实现即可。
+ */
+enum class NavigationMode(
+    /** 中文名（对齐天坦资源表） */
+    val label: String,
+
+    /** 遍历策略类型码（传给 TraversalStrategyFactory） */
+    val typeCode: Int,
+
+    /** 导航类别 */
+    val kind: NavigationKind,
+
+    /** 是否已实现（未实现的框架会跳过，不影响其他导航） */
+    val implemented: Boolean = true
+) {
+
+    // ==================== 粒度类（对当前节点文本细分）====================
+    DEFAULT("默认", 0, NavigationKind.GRANULARITY),
+    CHARACTERS("字符", 1, NavigationKind.GRANULARITY),
+    WORDS("字词", 2, NavigationKind.GRANULARITY),
+    SENTENCE("逐句", 3, NavigationKind.GRANULARITY),
+    PARAGRAPHS("段落", 4, NavigationKind.GRANULARITY),
+    LINES("逐行", 5, NavigationKind.GRANULARITY),
+
+    // ==================== 过滤类（只停在特定节点）====================
+    LINKS("链接", 6, NavigationKind.FILTER),
+    HEADINGS("标题", 7, NavigationKind.FILTER),
+    CONTROLS("控件", 8, NavigationKind.FILTER),
+    SCROLLABLE_WIDGET("可滚动控件", 12, NavigationKind.FILTER),
+
+    // ==================== 特殊标记 ====================
+    GUIDEPOST("路标", 13, NavigationKind.MARKER, implemented = false),
+
+    // ==================== 选择器类（对当前节点做操作）====================
+    SELECTOR_ACTIONS("操作选择器", 30, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_EDIT("编辑", 32, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_COPY("复制选择器", 10, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_OCR("OCR 识别", 14, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_MAGNIFICATION("放大镜", 19, NavigationKind.SELECTOR, implemented = false),
+    SELECTOR_TRANSLATE("翻译", 15, NavigationKind.SELECTOR, implemented = false),
+
+    // ==================== 遍历结构类 ====================
+    LIST_TRAVERSAL("列表遍历", 16, NavigationKind.TRAVERSAL),
+    ROW_AND_COLUMN_TRAVERSAL("行列遍历", 31, NavigationKind.TRAVERSAL),
+    VERTICAL_TRAVERSAL("垂直遍历", 17, NavigationKind.TRAVERSAL),
+    SPLIT_TRAVERSAL("拆分遍历", 18, NavigationKind.TRAVERSAL, implemented = false),
+    WINDOWS_NAVIGATION("窗口导航", 9, NavigationKind.TRAVERSAL, implemented = false),
+
+    // ==================== 自动类 ====================
+    CONTINUES_READING("连续朗读", 11, NavigationKind.AUTO, implemented = false),
+
+    // ==================== 工具类（调节设置）====================
+    SPEECH_RATE("语速", 20, NavigationKind.TOOL, implemented = false),
+    SPEECH_TIMES("语速倍数", 21, NavigationKind.TOOL, implemented = false),
+    VOLUME_CONTROL("音量", 22, NavigationKind.TOOL, implemented = false),
+    VIDEO_BROWSE("视频浏览", 23, NavigationKind.TOOL, implemented = false);
+
+    companion object {
+        /** 按类型码查导航（天坦 b.b() 的等价） */
+        fun fromTypeCode(code: Int): NavigationMode? =
+            values().firstOrNull { it.typeCode == code }
+
+        /** 可切换的导航（已实现的） */
+        val switchable: List<NavigationMode> by lazy { values().filter { it.implemented } }
+
+        /**
+         * 循环切换到下一个导航 —— 天坦的单指上/下滑切换
+         *
+         * 只在「已实现」的导航间循环，避免切到空实现导致"卡住"。
+         */
+        fun next(current: NavigationMode): NavigationMode {
+            val list = switchable
+            if (list.isEmpty()) return DEFAULT
+            val idx = list.indexOf(current)
+            return if (idx < 0) list.first()
+            else list[(idx + 1) % list.size]
+        }
+
+        fun previous(current: NavigationMode): NavigationMode {
+            val list = switchable
+            if (list.isEmpty()) return DEFAULT
+            val idx = list.indexOf(current)
+            return if (idx < 0) list.first()
+            else list[(idx - 1 + list.size) % list.size]
+        }
+    }
+}
+
+/**
+ * 导航类别 —— 决定这个导航"怎么工作"
+ */
+enum class NavigationKind {
+    /** 粒度：对当前节点的文本细分后朗读 */
+    GRANULARITY,
+
+    /** 过滤：遍历时只停在满足条件的节点 */
+    FILTER,
+
+    /** 遍历结构：换一种树遍历方式 */
+    TRAVERSAL,
+
+    /** 选择器：对当前节点执行某种操作 */
+    SELECTOR,
+
+    /** 自动：自动连续朗读 */
+    AUTO,
+
+    /** 工具：调节语音/音量等设置 */
+    TOOL,
+
+    /** 标记：用户自定义的路标 */
+    MARKER
+}
+
+/**
+ * 导航管理器 —— 对应天坦 X6/z（2133 行）的框架部分
+ *
+ * 【职责】
+ *   ① 持有当前导航模式
+ *   ② 切换导航（手势触发）
+ *   ③ 为当前导航提供「遍历过滤器」
+ *   ④ 为当前导航提供「文本处理方式」
+ *
+ * 【高性能设计】
+ *   ① **过滤器缓存**：每种导航的过滤器只建一次，切换时复用
+ *   ② **无锁读**：current 是 @Volatile，读路径无锁
+ *   ③ **切换零分配**：枚举 + 缓存查表
+ */
+class NavigationManager {
+
+    /** 当前导航模式 */
+    @Volatile
+    var current: NavigationMode = NavigationMode.DEFAULT
+        private set
+
+    /** 切换回调（用于播报导航名） */
+    @Volatile
+    var onModeChanged: ((NavigationMode) -> Unit)? = null
+
+    /** 各导航的过滤器缓存（惰性构建，切换时复用） */
+    private val filterCache = HashMap<NavigationMode, (AccessibilityNodeInfo) -> Boolean>(8)
+
+    /**
+     * 切换导航
+     */
+    fun setMode(mode: NavigationMode): Boolean {
+        if (mode == current) return false
+        if (!mode.implemented) {
+            ReaderLog.d("NavigationMode", "${mode.label} 尚未实现，拒绝切换")
+            return false
+        }
+        current = mode
+        onModeChanged?.invoke(mode)
+        ReaderLog.i("NavigationMode", "切换到：${mode.label}（类型码 ${mode.typeCode}）")
+        return true
+    }
+
+    /** 下一个导航 */
+    fun next(): NavigationMode {
+        val m = NavigationMode.next(current)
+        setMode(m)
+        return current
+    }
+
+    /** 上一个导航 */
+    fun previous(): NavigationMode {
+        val m = NavigationMode.previous(current)
+        setMode(m)
+        return current
+    }
+
+    /**
+     * 取当前导航对应的遍历策略类型码
+     *
+     * 这个码会传给 TraversalStrategyFactory 决定用哪种遍历器。
+     */
+    fun strategyTypeCode(): Int = current.typeCode
+
+    /**
+     * 取当前导航的遍历过滤器
+     *
+     * 不同导航只停在不同的节点上：
+     *   - 链接导航 → 只停在含链接的节点
+     *   - 标题导航 → 只停在标题节点
+     *   - 控件导航 → 只停在交互控件
+     *   - 默认     → 全部可聚焦节点
+     */
+    fun filter(): (AccessibilityNodeInfo) -> Boolean {
+        return filterCache.getOrPut(current) { buildFilter(current) }
+    }
+
+    /**
+     * 构建某导航的过滤器
+     */
+    private fun buildFilter(mode: NavigationMode): (AccessibilityNodeInfo) -> Boolean {
+        return when (mode) {
+            // 过滤类：在基础可聚焦判定之上再加条件
+            NavigationMode.LINKS -> { node ->
+                ShouldFocusNode.shouldFocus(node) && hasLinkAction(node)
+            }
+
+            NavigationMode.HEADINGS -> { node ->
+                ShouldFocusNode.shouldFocus(node) && isHeading(node)
+            }
+
+            NavigationMode.CONTROLS -> { node ->
+                ShouldFocusNode.shouldFocus(node) && isControl(node)
+            }
+
+            NavigationMode.SCROLLABLE_WIDGET -> { node ->
+                isScrollable(node)
+            }
+
+            // 其他（粒度/默认/遍历结构）→ 用基础判定
+            else -> { node ->
+                ShouldFocusNode.shouldFocus(node)
+            }
+        }
+    }
+
+    // ==================== 节点条件判定 ====================
+
+    /** 是否含链接动作 —— 天坦 A0.d()（含 2048 动作） */
+    private fun hasLinkAction(node: AccessibilityNodeInfo): Boolean = try {
+        node.actionList.any { it.id == 2048 } ||
+                NodeRoleHelper.roleOf(node) == NodeRoleHelper.ROLE_WEB_VIEW
+    } catch (e: Throwable) {
+        false
+    }
+
+    /**
+     * 是否标题 —— 对应天坦 AbstractC3693m.L()
+     *
+     * 判定依据：无障碍 heading 属性
+     */
+    private fun isHeading(node: AccessibilityNodeInfo): Boolean = try {
+        node.isHeading
+    } catch (e: Throwable) {
+        false
+    }
+
+    /**
+     * 是否交互控件 —— 对应天坦 11 个过滤器里的 f39050j
+     *
+     * 天坦用 role 判定：1 按钮 / 7 图片按钮 / 4 编辑框 / 2 复选框 /
+     * 9 单选 / 13 开关 / 11 开关 / 3 下拉 / 10 滑块
+     */
+    private fun isControl(node: AccessibilityNodeInfo): Boolean {
+        val role = NodeRoleHelper.roleOf(node)
+        return when (role) {
+            NodeRoleHelper.ROLE_BUTTON,
+            NodeRoleHelper.ROLE_IMAGE_BUTTON,
+            NodeRoleHelper.ROLE_EDIT_TEXT,
+            NodeRoleHelper.ROLE_CHECK_BOX,
+            NodeRoleHelper.ROLE_RADIO_BUTTON,
+            NodeRoleHelper.ROLE_TOGGLE_BUTTON,
+            NodeRoleHelper.ROLE_SWITCH,
+            NodeRoleHelper.ROLE_DROP_DOWN_LIST,
+            NodeRoleHelper.ROLE_SEEK_CONTROL -> true
+            else -> false
+        }
+    }
+
+    /** 是否可滚动 */
+    private fun isScrollable(node: AccessibilityNodeInfo): Boolean {
+        if (node.isScrollable) return true
+        return try {
+            node.actionList.any {
+                it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ||
+                        it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            }
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * 当前导航是否为「粒度类」
+     *
+     * 粒度类导航不改变遍历，只改变文本朗读方式。
+     */
+    fun isGranularityMode(): Boolean = current.kind == NavigationKind.GRANULARITY
+
+    /**
+     * 取当前导航对应的粒度级别（用于 SpeechCompositor）
+     */
+    fun granularityLevel(): GranularityNavigator.Level = when (current) {
+        NavigationMode.CHARACTERS -> GranularityNavigator.Level.CHARACTER
+        NavigationMode.WORDS -> GranularityNavigator.Level.WORD
+        NavigationMode.LINES -> GranularityNavigator.Level.LINE
+        else -> GranularityNavigator.Level.DEFAULT
+    }
+
+    fun stats(): String =
+        "当前 ${current.label}（类型码 ${current.typeCode}，${current.kind}）"
+}

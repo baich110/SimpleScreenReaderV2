@@ -92,7 +92,8 @@ object SpeechCompositor {
         order: SpeechOrder = SpeechOrder.TEXT_FIRST,
         includeRole: Boolean = true,
         includeState: Boolean = true,
-        includePosition: Boolean = true
+        includePosition: Boolean = true,
+        granularity: GranularityNavigator.Level = GranularityNavigator.currentLevel
     ): String? {
         if (node == null) return null
         if (!isVisible(node)) return null
@@ -117,7 +118,7 @@ object SpeechCompositor {
         val posText = if (includePosition) positionText(node) else null
 
         // ⑤ 应用粒度切分（对主文本）
-        val processedMain = applyGranularity(mainText)
+        val processedMain = applyGranularity(mainText, granularity)
 
         // 去重 + 拼接
         val seen = HashSet<String>(8)
@@ -361,9 +362,8 @@ object SpeechCompositor {
     // ==================== 粒度应用 ====================
 
     /** 应用粒度切分 */
-    private fun applyGranularity(text: String?): String? {
+    private fun applyGranularity(text: String?, level: GranularityNavigator.Level): String? {
         if (text.isNullOrEmpty()) return text
-        val level = GranularityNavigator.currentLevel
         if (level == GranularityNavigator.Level.DEFAULT) return text
 
         val segments = GranularityNavigator.split(text, level)

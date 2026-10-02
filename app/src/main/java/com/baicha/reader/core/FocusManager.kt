@@ -216,7 +216,11 @@ class FocusManager(
      * @param strategyType 遍历策略类型（对应导航模式）
      * @return 设上焦点的节点；null = 无
      */
-    fun moveFocus(direction: Int, strategyType: Int = TraversalStrategyFactory.TYPE_DEFAULT): AccessibilityNodeInfo? {
+    fun moveFocus(
+        direction: Int,
+        strategyType: Int = TraversalStrategyFactory.TYPE_DEFAULT,
+        filter: ((AccessibilityNodeInfo) -> Boolean)? = null
+    ): AccessibilityNodeInfo? {
         // ★ ① 滚动中拦截（天坦行为）
         if (isScrolling && isScrollStateFresh()) {
             if (isSameScrollDirection(direction)) {
@@ -263,14 +267,14 @@ class FocusManager(
         val forward = isForward(direction)
 
         // ★ ③ 搜索（走策略）
-        var target = searchFocus(current, forward, strategyType, root)
+        var target = searchFocus(current, forward, strategyType, root, filter)
 
         // ★ ④ 搜索失败 → 递归重试（天坦 C1423r.s() 机制）
         if (target == null) {
             retryCount++
             ReaderLog.d(TAG, "搜索无果 → 重试一次")
             // 重试时强制用默认策略（避免策略本身导致的死路）
-            target = searchFocus(current, forward, TraversalStrategyFactory.TYPE_DEFAULT, root)
+            target = searchFocus(current, forward, TraversalStrategyFactory.TYPE_DEFAULT, root, filter)
         }
 
         if (target != null && target != current) {
@@ -299,10 +303,11 @@ class FocusManager(
         start: AccessibilityNodeInfo,
         forward: Boolean,
         strategyType: Int,
-        root: AccessibilityNodeInfo
+        root: AccessibilityNodeInfo,
+        customFilter: ((AccessibilityNodeInfo) -> Boolean)? = null
     ): AccessibilityNodeInfo? {
-        val strategy = TraversalStrategyFactory.create(strategyType, root) {
-            ShouldFocusNode.shouldFocus(it)
+        val strategy = TraversalStrategyFactory.create(strategyType, root) { node ->
+            if (customFilter != null) customFilter(node) else ShouldFocusNode.shouldFocus(node)
         }
         return try {
             strategy.next(

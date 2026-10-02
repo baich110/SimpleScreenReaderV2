@@ -297,8 +297,10 @@ object GestureMap {
         // 双指反向滑动
         Gestures.GESTURE_SWIPE_LEFT_AND_RIGHT -> GestureAction.BACK
         Gestures.GESTURE_SWIPE_RIGHT_AND_LEFT -> GestureAction.RECENTS
-        Gestures.GESTURE_SWIPE_UP_AND_DOWN -> GestureAction.HOME
-        Gestures.GESTURE_SWIPE_DOWN_AND_UP -> GestureAction.NOTIFICATIONS
+        // ★ 手势 7/8 已改作「导航切换」（天坦行为：先下再上=下一个导航，先上再下=上一个导航）
+        // 由 GestureChain.onNavigationSwitch 硬编码处理，这里返回 NONE 避免冲突
+        Gestures.GESTURE_SWIPE_UP_AND_DOWN -> GestureAction.NONE
+        Gestures.GESTURE_SWIPE_DOWN_AND_UP -> GestureAction.NONE
 
         // 直角滑动
         Gestures.GESTURE_SWIPE_LEFT_AND_UP -> GestureAction.BACK

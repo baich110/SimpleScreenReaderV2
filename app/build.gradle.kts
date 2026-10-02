@@ -39,6 +39,14 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        unitTests {
+            // 让未 mock 的 Android 框架方法（Log/SystemClock 等）返回默认值而非抛异常，
+            // 这样纯逻辑类可以在 JVM 单测里直接构造与验证。
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
