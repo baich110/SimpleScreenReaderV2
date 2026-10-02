@@ -324,7 +324,7 @@ class NavigationManager {
      *
      * 这个码会传给 TraversalStrategyFactory 决定用哪种遍历器。
      */
-    fun strategyTypeCode(): Int = current.typeCode
+    fun strategyTypeCode(): Int = current.traversalType
 
     /**
      * 取当前导航的遍历过滤器

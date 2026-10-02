@@ -151,6 +151,62 @@ class NavigationManagerTest {
         assertEquals(16, m.strategyTypeCode())
     }
 
+    /**
+     * ★★ 真正的回归测试 —— 用「导航码 ≠ 遍历器码」的导航
+     *
+     * 【为什么原来那条是假阳性】
+     *   上面 `strategy_type_code_follows_mode` 用的是 LIST_TRAVERSAL，
+     *   而它的 typeCode == traversalType == 16 —— **两个值相等**，
+     *   所以无论函数返回哪个字段，测试都通过。
+     *
+     *   而 `strategyTypeCode()` 当时写的是 `current.typeCode`（错的），
+     *   导致「字词」用 CachedTraversalStrategy（导航码 2 撞 TYPE_CACHED）、
+     *   「控件」用 GridTraversalStrategy（导航码 8 撞 TYPE_GRID）。
+     *
+     *   教训：**测试必须覆盖「两个候选值不相等的特例」** ——
+     *   只测两值相等的场景，等于没测。
+     */
+    @Test
+    fun strategy_type_code_uses_traversal_type_not_navigation_code() {
+        val m = NavigationManager()
+
+        // WORDS：导航码 2 会撞 TYPE_CACHED(2)，必须返回 0
+        m.setMode(NavigationMode.WORDS)
+        assertEquals(
+            "「字词」必须返回默认遍历器码 0，不能返回导航码 2",
+            TraversalStrategyFactory.TYPE_DEFAULT,
+            m.strategyTypeCode()
+        )
+
+        // CONTROLS：导航码 8 会撞 TYPE_GRID(8)，必须返回 0
+        m.setMode(NavigationMode.CONTROLS)
+        assertEquals(
+            "「控件」必须返回默认遍历器码 0，不能返回导航码 8",
+            TraversalStrategyFactory.TYPE_DEFAULT,
+            m.strategyTypeCode()
+        )
+    }
+
+    /**
+     * 穷举全部导航：strategyTypeCode() 必须等于 traversalType，
+     * 且当两者不同时绝不可混淆。
+     *
+     * 这条能一次性防住所有「返回错字段」的回归。
+     */
+    @Test
+    fun strategy_type_code_always_equals_traversal_type() {
+        val m = NavigationManager()
+        NavigationMode.values().filter { it.implemented }.forEach { mode ->
+            m.setMode(mode)
+            assertEquals(
+                "「${mode.label}」strategyTypeCode 应等于 traversalType" +
+                    "（导航码 ${mode.typeCode} / 遍历器码 ${mode.traversalType}）",
+                mode.traversalType,
+                m.strategyTypeCode()
+            )
+        }
+    }
+
     @Test
     fun filter_is_available() {
         val m = NavigationManager()

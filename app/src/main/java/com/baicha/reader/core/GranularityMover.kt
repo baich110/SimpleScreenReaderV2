@@ -135,20 +135,94 @@ object GranularityMover {
      * @return 应朗读的文本；null = 无有效内容
      */
     fun extractTraversedText(event: android.view.accessibility.AccessibilityEvent): String? {
-        // ① 优先用事件自带的文本
-        val textList = event.text
-        if (!textList.isNullOrEmpty()) {
-            val joined = textList.joinToString("").trim()
-            if (joined.isNotEmpty()) return joined
+        // ══════════════════════════════════════════════════════════
+        // 【修正】原来第一优先是「用 event.text」—— 那是错的。
+        //
+        // TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY 的 event.text
+        // 携带的是**整个节点的文本**，不是当前粒度单元。
+        // 直接用它，等于「用户按『下一个字』，读屏念整段」——
+        // 这正是要修的 bug，用错误的第一优先分支会把它原样保留。
+        //
+        // 【两方一致的做法：只认 fromIndex/toIndex 切片】
+        //   TalkBack `TextEventInterpreter:568` 与 `getSubsequenceWithSpans()`：
+        //     只有 `from >= 0 && to <= textLength` 时才
+        //     `text.subSequence(from, to)`，**从不采信 event.text 当单元**。
+        //   天坦同样按索引切。
+        //
+        // 故这里改为**只走切片路径**，event.text 仅作最后的兜底
+        // （且加了长度校验，避免把整段当单元）。
+        // ══════════════════════════════════════════════════════════
+        val node = event.source
+
+        val fullText = try {
+            node?.text?.toString()
+        } catch (e: Throwable) {
+            null
+        }.orEmpty()
+
+        val eventText = try {
+            event.text?.joinToString("")
+        } catch (e: Throwable) {
+            null
         }
 
-        // ② 退化：用 fromIndex/toIndex 从节点文本里切片
-        val node = event.source ?: return null
-        val fullText = node.text?.toString() ?: return null
-        val from = event.fromIndex
-        val to = event.toIndex
-        if (from < 0 || to < from || to > fullText.length) return null
-        return fullText.substring(from, to).trim().takeIf { it.isNotEmpty() }
+        return sliceUnit(
+            fullText = fullText,
+            from = event.fromIndex,
+            to = event.toIndex,
+            eventText = eventText
+        )
+    }
+
+    /**
+     * 粒度单元切片 —— **纯函数，无 Android 依赖**
+     *
+     * 【为什么抽出来】
+     *   `AccessibilityEvent.obtain()` 在 JVM 单测里返回 null
+     *   （Android SDK 是空壳），导致整个提取逻辑无法测试。
+     *   抽成只吃 String/Int 的纯函数后，判定规则可被逐条锁定。
+     *
+     * 判定顺序（对齐 TalkBack `TextEventInterpreter:568`
+     * 与 `getSubsequenceWithSpans()`）：
+     *   ① 有完整文本 + 索引合法 → 按 [from, to) 切片
+     *   ② event.text 明显短于全文 → 采信它（真机的退化路径）
+     *   ③ 其余 → null（宁可不读，也不念整段）
+     *
+     * 【为什么不采信「event.text == 全文」】
+     *   那就是本 bug 的成因。返回全文等于没修。
+     *
+     * @param fullText  节点完整文本（空串表示取不到）
+     * @param from      选区起点（含）
+     * @param to        选区终点（不含）
+     * @param eventText 事件自带文本（真机上常等于全文）
+     * @return 粒度单元；无有效单元时 null
+     */
+    fun sliceUnit(
+        fullText: String,
+        from: Int,
+        to: Int,
+        eventText: String?
+    ): String? {
+        // ① 索引切片 —— TalkBack 的边界校验：
+        //    from < 0 || text.length < to || to < from → 放弃
+        if (fullText.isNotEmpty() &&
+            from >= 0 && to <= fullText.length && to > from
+        ) {
+            val sliced = fullText.substring(from, to).trim()
+            if (sliced.isNotEmpty()) return sliced
+        }
+
+        // ② event.text 兜底：只有确实短于全文才可能是单元
+        val et = eventText?.trim()
+        if (et.isNullOrEmpty()) return null
+
+        // 取不到全文时无法比较 → 保守采信（真机上比返回 null 更有用）
+        if (fullText.isEmpty()) return et
+
+        // 等于或超过全文长度 → 它是整段，不是单元 → 丢弃
+        if (et.length >= fullText.length) return null
+
+        return et
     }
 
     // ==================== 系统动作常量 ====================

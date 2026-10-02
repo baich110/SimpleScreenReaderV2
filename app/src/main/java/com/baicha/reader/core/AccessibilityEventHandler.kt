@@ -295,8 +295,19 @@ class AccessibilityEventHandler(
 
             // ---------- 16384: 粒度遍历 ----------
             AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY -> {
-                val text = event.text?.joinToString("")?.trim().orEmpty()
-                if (text.isNotEmpty()) {
+                // ★ 用 extractTraversedText 取「当前粒度单元」，而不是整段文本
+                //
+                // 【修的什么 bug】
+                //   原实现直接用 event.text —— 那是**整个节点的文本**，
+                //   于是「用户按下一个字，读屏念整段」。
+                //
+                // 【为什么之前没接线上】
+                //   extractTraversedText 早已写好但无调用方。
+                //   而它原来的第一优先分支也用 event.text，
+                //   直接接线等于把 bug 保留 —— 一并修正为只认索引切片
+                //   （对齐 TalkBack TextEventInterpreter 与天坦）。
+                val text = GranularityMover.extractTraversedText(event)
+                if (!text.isNullOrEmpty()) {
                     log("粒度遍历: $text")
                     speech.speak(text, interrupt = true)
                 }

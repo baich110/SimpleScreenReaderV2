@@ -183,9 +183,19 @@ object NodeRoleHelper {
     }
 
     /**
-     * 角色名 —— 1:1 抄天坦 c(role)
+     * 角色名的**调试表示** —— 仅供日志，**禁止用于播报**
+     *
+     * 【为什么改名】原名 `roleName()` 返回 "ROLE_BUTTON" 这类枚举名
+     * 字符串，看起来像「角色名」，很容易被误用到播报路径上 ——
+     * 读屏念出 "ROLE_BUTTON" 对用户毫无意义。
+     *
+     * 播报请用 `SpeechCompositor.roleName(role, node)`（返回中文）。
+     *
+     * 【本轮核查结论】所有播报调用点用的确实都是 SpeechCompositor
+     * 的中文版本，本方法没有被误用。但它作为公开 API 是隐患，
+     * 故改名并加此警示。
      */
-    fun roleName(role: Int): String = when (role) {
+    fun debugName(role: Int): String = when (role) {
         ROLE_NONE -> "ROLE_NONE"
         ROLE_BUTTON -> "ROLE_BUTTON"
         ROLE_CHECK_BOX -> "ROLE_CHECK_BOX"
