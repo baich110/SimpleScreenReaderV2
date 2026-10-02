@@ -240,6 +240,17 @@ object WindowClassifier {
                  window: android.view.accessibility.AccessibilityWindowInfo?): WindowKind {
         if (window == null) return WindowKind.UNKNOWN
 
+        // ★ API 33+ 先用系统栏 insets 做「是不是系统栏」的粗判，
+        //   再用几何细分「是状态栏还是导航栏」。
+        //
+        // 【为什么要两步，而不是直接用现代判定】
+        //   天坦的现代判定 `E0.i()` 只返回 boolean ——
+        //   它知道「这是系统栏」，但不知道是哪一个。
+        //   而读屏需要区分（状态栏在顶、导航栏在底）。
+        //   所以：现代判定负责**排除误判**（折叠屏/超长屏下几何算错的情况），
+        //   几何判定负责**细分种类**。两条路互补而非替代。
+        val modernSaysSystemBar = isSystemBarModern(service, window)
+
         return try {
             val screen = screenGeometry(service, window) ?: return WindowKind.UNKNOWN
             // 【注意】窗口的边界必须用 out 参数取 ——
@@ -248,12 +259,21 @@ object WindowClassifier {
             val rect = android.graphics.Rect()
             window.getBoundsInScreen(rect)
             val bounds = Bounds(rect)
-            WindowClassifierCore.classify(
+            val geometric = WindowClassifierCore.classify(
                 windowType = window.type,
                 bounds = bounds,
                 screen = screen,
-                hasImeInsets = false   // 由 WindowInsets 路径补充，见下
+                hasImeInsets = false
             )
+
+            // 现代判定说「不是系统栏」但几何说是 → 以现代判定为准
+            // （几何在折叠屏/超长屏上会算错，insets 是权威数据）
+            if (modernSaysSystemBar == false && geometric.isSystemBar) {
+                ReaderLog.d(TAG, "几何判成系统栏但 insets 否定 → 采信 insets")
+                WindowKind.APPLICATION
+            } else {
+                geometric
+            }
         } catch (e: Throwable) {
             ReaderLog.d(TAG, "窗口分类失败：${e.message}")
             WindowKind.UNKNOWN
@@ -314,6 +334,67 @@ object WindowClassifier {
     fun isInputMethod(service: android.accessibilityservice.AccessibilityService,
                       window: android.view.accessibility.AccessibilityWindowInfo?): Boolean =
         classify(service, window) == WindowKind.INPUT_METHOD
+
+    /**
+     * 系统栏判定的现代路径 —— 对应天坦 `E0.i()` 的 API 33+ 分支
+     *
+     * 天坦（E0.java:119~131）：
+     * ```java
+     * if (!K.E()) return e(context, w) || h(context, w);   // 低版本：几何判定
+     * // API 33+：窗口 bounds 与「屏幕减去系统栏 insets 后的区域」不相交
+     * Rect usable = screenBounds.inset(insetsIgnoringVisibility(systemBars()));
+     * return !Rect.intersects(usable, windowBounds);
+     * ```
+     *
+     * 【为什么新版要换判定方式】
+     *   低版本的几何判定写死了比例（屏高/5、屏高*3/4），
+     *   在折叠屏、超长屏、平板、分屏下会算错。
+     *   API 30+ 提供了真实的系统栏 insets，直接比较更准。
+     *
+     * 【为什么用 insetsIgnoringVisibility 而不是 insets】
+     *   天坦用的是 `getInsetsIgnoringVisibility()` ——
+     *   因为系统栏可能被隐藏（沉浸式全屏），
+     *   但窗口区域计算仍需按「它存在时占多少」来算。
+     *   用可见 insets 会让沉浸式下判定失效。
+     */
+    fun isSystemBarModern(
+        service: android.accessibilityservice.AccessibilityService,
+        window: android.view.accessibility.AccessibilityWindowInfo?
+    ): Boolean? {
+        if (window == null) return null
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return null
+
+        return try {
+            val wm = if (window.displayId == android.view.Display.DEFAULT_DISPLAY) {
+                service.getSystemService(android.content.Context.WINDOW_SERVICE)
+                    as? android.view.WindowManager
+            } else {
+                val dm = service.getSystemService(android.content.Context.DISPLAY_SERVICE)
+                    as? android.hardware.display.DisplayManager
+                dm?.getDisplay(window.displayId)?.let { d ->
+                    service.createDisplayContext(d)
+                        .getSystemService(android.content.Context.WINDOW_SERVICE)
+                            as? android.view.WindowManager
+                }
+            } ?: return null
+
+            val metrics = wm.currentWindowMetrics
+            // 屏幕可用区域 = 屏幕 bounds 减去系统栏 insets
+            val usable = android.graphics.Rect(metrics.bounds)
+            val insets = metrics.windowInsets
+                .getInsetsIgnoringVisibility(android.view.WindowInsets.Type.systemBars())
+            usable.inset(insets)
+
+            val winRect = android.graphics.Rect()
+            window.getBoundsInScreen(winRect)
+
+            // 不与可用区域相交 → 是系统栏
+            !android.graphics.Rect.intersects(usable, winRect)
+        } catch (e: Throwable) {
+            // 取不到就返回 null，由调用方回退几何判定
+            null
+        }
+    }
 
     private const val TAG = "WindowClassifier"
 }

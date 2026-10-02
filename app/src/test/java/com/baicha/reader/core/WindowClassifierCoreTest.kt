@@ -293,3 +293,74 @@ class WindowClassifierCoreTest {
         assertFalse(ScreenGeometry(1080, 2400, 2).isLandscape)
     }
 }
+
+/**
+ * 现代（API 33+）系统栏判定与几何判定的组合语义
+ *
+ * 天坦 `E0.i()` 的现代分支只返回 boolean（是/不是系统栏），
+ * 不区分状态栏与导航栏。白茶需要区分，所以采用**两步组合**：
+ *   ① insets 判定负责「排除误判」（折叠屏/超长屏下几何算错）
+ *   ② 几何判定负责「细分种类」（状态栏 vs 导航栏）
+ *
+ * 本测试锁定「几何判定仍能给出具体种类」这一必要性质 ——
+ * 因为组合逻辑依赖它，若几何只返回 boolean 就没法细分了。
+ */
+class SystemBarCompositionTest {
+
+    private val screen = ScreenGeometry(1080, 2400, 0)
+
+    /**
+     * ★ 同样都是「系统栏」，几何必须能区分状态栏与导航栏。
+     * 若两者返回同一个值，组合逻辑就失去了细分能力。
+     */
+    @Test
+    fun geometry_distinguishes_status_from_navigation_bar() {
+        val statusBar = Bounds(0, 0, 1080, 80)
+        val navBar = Bounds(0, 2280, 1080, 2400)
+
+        val statusKind = WindowClassifierCore.classify(
+            WindowClassifierCore.TYPE_SYSTEM, statusBar, screen
+        )
+        val navKind = WindowClassifierCore.classify(
+            WindowClassifierCore.TYPE_SYSTEM, navBar, screen
+        )
+
+        assertEquals(WindowKind.STATUS_BAR, statusKind)
+        assertEquals(WindowKind.NAVIGATION_BAR, navKind)
+        org.junit.Assert.assertNotEquals(
+            "状态栏与导航栏必须能区分，否则反优化判定无法细分种类",
+            statusKind, navKind
+        )
+    }
+
+    /**
+     * 沉浸式全屏场景：系统栏被隐藏，窗口 bounds 撑满全屏。
+     * 几何判定会认为它不是系统栏 —— 这是正确行为
+     * （隐藏的系统栏本来就不该占用焦点序列）。
+     */
+    @Test
+    fun hidden_system_bar_fullscreen_is_not_classified_as_bar() {
+        val fullscreen = Bounds(0, 0, 1080, 2400)
+        val kind = WindowClassifierCore.classify(
+            WindowClassifierCore.TYPE_SYSTEM, fullscreen, screen
+        )
+        assertFalse("撑满全屏的窗口不是系统栏：$kind", kind.isSystemBar)
+    }
+
+    /**
+     * 折叠屏/超长屏：屏高比例规则在极端比例下会失效。
+     * 这里锁定一个「几何判成状态栏」的极端用例，
+     * 说明为什么需要 insets 判定来做第二道校验。
+     */
+    @Test
+    fun extreme_aspect_ratio_can_mislead_geometry() {
+        // 超长屏：2400x1080 旋转后成为「屏高 1080」的情形
+        val tall = ScreenGeometry(widthPixels = 2400, heightPixels = 1080, rotation = 0)
+        // 高度 200 < 1080/5=216，会被判成状态栏
+        val bar = Bounds(0, 0, 2400, 200)
+        assertTrue(
+            "此用例说明几何判定能被高度比例误导 —— 故需 insets 兜底",
+            WindowClassifierCore.isStatusBar(bar, tall)
+        )
+    }
+}
