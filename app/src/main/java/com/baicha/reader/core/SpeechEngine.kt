@@ -106,6 +106,16 @@ class SpeechEngine(
     @Volatile
     var speechGate: (() -> Boolean)? = null
 
+    /**
+     * 朗读开始/结束钩子（A5）—— 由服务注入，用于持有/释放唤醒锁。
+     *
+     * 【为什么放这里而不是放在每个播报调用点】
+     *   播报入口有多个（speak / speakInterrupt / speakInternal），
+     *   在引擎层挂钩能一次覆盖全部路径 ——
+     *   与 speechGate 放在同一层的理由相同。
+     */
+    var onSpeakingStateChanged: ((speaking: Boolean) -> Unit)? = null
+
     // ==================== 语音参数 ====================
 
     @Volatile
@@ -176,6 +186,10 @@ class SpeechEngine(
             }
 
             override fun onDone(utteranceId: String?) {
+                // ★ 朗读完成 → 通知（A5）
+                //   若两个通道都空闲才真正算「结束」，
+                //   否则 A 通道读完但 B 通道还在播时会提前解锁
+                if (!isSpeaking()) notifySpeaking(false)
                 mainHandler.post { onUtteranceDone(channel) }
             }
 
@@ -277,6 +291,10 @@ class SpeechEngine(
         val result = queue.enqueue(item)
 
         if (result.deduped) return
+
+        // ★ 通知「开始朗读」（A5）—— 服务据此持有唤醒锁
+        //   放在 enqueue 成功之后：被去重丢弃的项不算开始
+        notifySpeaking(true)
 
         // 若走 B 通道但引擎未创建 → 懒创建
         if (useChannelB && !readyB) {
@@ -492,6 +510,20 @@ class SpeechEngine(
     }
 
     fun isSpeaking(): Boolean = channelA.isSpeaking || channelB.isSpeaking
+
+    /**
+     * 通知朗读状态变化（A5）。
+     *
+     * 【为什么做异常保护】钩子是外部注入的（服务持有唤醒锁），
+     * 它出错不应影响播报本身。
+     */
+    private fun notifySpeaking(speaking: Boolean) {
+        try {
+            onSpeakingStateChanged?.invoke(speaking)
+        } catch (e: Throwable) {
+            ReaderLog.w("SpeechEngine", "朗读状态回调异常：${e.message}")
+        }
+    }
 
     fun shutdown() {
         stop(clearQueue = true)

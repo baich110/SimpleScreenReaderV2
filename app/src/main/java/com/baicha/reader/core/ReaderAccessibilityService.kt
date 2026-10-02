@@ -155,6 +155,20 @@ class ReaderAccessibilityService : AccessibilityService() {
         private set
 
     /**
+     * TTS 系统设置监听（A5）—— 对标 TalkBack `FailoverTextToSpeech`
+     * 与天坦 `Z6/J`
+     */
+    lateinit var ttsObserver: TtsSettingsObserver
+        private set
+
+    /**
+     * 朗读期间防休眠（A5）—— 对标 TalkBack `ProcessorVolumeStream`
+     * 与天坦 `Z6/J`
+     */
+    lateinit var speechWakeLock: SpeechWakeLock
+        private set
+
+    /**
      * 连续朗读（A4）—— 对标 TalkBack `FullScreenReadActor`
      */
     lateinit var continuousReader: ContinuousReader
@@ -295,6 +309,35 @@ class ReaderAccessibilityService : AccessibilityService() {
             pitch = TtsEngineManager.getPitch(this@ReaderAccessibilityService)
             volume = TtsEngineManager.getVolume(this@ReaderAccessibilityService)
         }
+        // ★ 朗读防休眠（A5）
+        speechWakeLock = SpeechWakeLock(this) { msg -> log(msg) }
+        // 播报开始/结束时持有/释放唤醒锁
+        speech.onSpeakingStateChanged = { speaking ->
+            if (speaking) speechWakeLock.acquire() else speechWakeLock.release()
+        }
+
+        // ★ TTS 系统设置监听（A5）
+        //
+        // 修复的问题：设置只在服务启动时读一次 ——
+        // 用户在系统设置里改语速/引擎后白茶不生效，必须重启服务。
+        ttsObserver = TtsSettingsObserver(
+            context = this,
+            onEngineChanged = { pkg ->
+                // 【核实】TalkBack `FailoverTextToSpeech.updateDefaultEngine()`：
+                //   "TalkBack will use the default TTS engine" ——
+                //   空 pkg 表示回系统默认，同样需要重建引擎。
+                // 天坦 `Z6/J` 亦然（重读字段后重建）。
+                if (speech.enginePackage != pkg) {
+                    speech.setEngine(pkg)
+                    log("TTS 设置变更：引擎切换为 ${pkg ?: "系统默认"}")
+                }
+            },
+            onPitchChanged = { pitch -> speech.pitch = pitch },
+            onRateChanged = { rate -> speech.speechRate = rate },
+            log = { msg -> log(msg) }
+        )
+        ttsObserver.register()
+
         gestureChain = GestureChain()
         // ★ 加载朗读替换规则 —— 修复「引擎建了但从未加载规则」的静默失效
         replacement = ReadReplacementEngine().also { engine ->
@@ -1082,6 +1125,8 @@ class ReaderAccessibilityService : AccessibilityService() {
         shutdownSafely("gestureChain") { gestureChain.clear() }
         shutdownSafely("systemState") { systemState.unregister() }
         shutdownSafely("continuousReader") { continuousReader.shutdown() }
+        shutdownSafely("ttsObserver") { ttsObserver.unregister() }
+        shutdownSafely("speechWakeLock") { speechWakeLock.releaseAll() }
 
         onLogUpdate = null
         synchronized(eventLog) { eventLog.clear() }

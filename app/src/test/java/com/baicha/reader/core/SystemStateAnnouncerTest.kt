@@ -352,5 +352,3 @@ class SystemStateAnnouncerTest {
     }
 }
 
-/** 最小 Context 替身 —— 只用于不触碰系统服务的测试路径 */
-private class NoopContext : android.content.ContextWrapper(null)
