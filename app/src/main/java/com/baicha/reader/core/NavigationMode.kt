@@ -112,7 +112,15 @@ enum class NavigationMode(
     VIDEO_BROWSE("视频浏览", 23, NavigationKind.TOOL, implemented = false);
 
     companion object {
-        /** 按类型码查导航（天坦 b.b() 的等价） */
+        /**
+         * 按类型码查导航 —— 天坦 `b.b()` 的等价
+         *
+         * 用途：从持久化配置恢复导航选择时，
+         * 存的是 typeCode（稳定），恢复时映射回枚举。
+         *
+         * 当前未被调用 —— 因为导航选择的持久化尚未做（属功能层）。
+         * 保留此接口是为了让持久化实现时不必再改本类。
+         */
         fun fromTypeCode(code: Int): NavigationMode? =
             values().firstOrNull { it.typeCode == code }
 
@@ -294,6 +302,15 @@ class NavigationManager {
      * 当前导航是否为「粒度类」
      *
      * 粒度类导航不改变遍历，只改变文本朗读方式。
+     */
+    /**
+     * 当前导航是否为「粒度类」
+     *
+     * 粒度类导航不改变遍历，只改变文本朗读方式。
+     *
+     * 当前未被调用 —— `granularityLevel()` 已覆盖实际需求
+     * （服务直接用级别值，不需要先问"是不是粒度类"）。
+     * 保留是为了语义完整性，供将来做"导航类切换时的差异化处理"。
      */
     fun isGranularityMode(): Boolean = current.kind == NavigationKind.GRANULARITY
 

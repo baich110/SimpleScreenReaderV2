@@ -389,12 +389,26 @@ class AutoScrollManager(
         return direction
     }
 
+    /**
+     * 滚动结束回调 —— 供服务清除「滚动进行中」状态
+     *
+     * 对应天坦 `M6/h` 在滚动 settle 后的收尾。
+     */
+    @Volatile
+    var onScrollSettled: (() -> Unit)? = null
+
     private val settleRunnable = Runnable {
         val moved = scrollDeltaX != 0 || scrollDeltaY != 0
         scrollDeltaX = 0
         scrollDeltaY = 0
         if (moved) {
             ReaderLog.d(TAG, "滚动结束")
+        }
+        // ★ 通知服务：滚动已完成，可清除 isScrolling 状态
+        try {
+            onScrollSettled?.invoke()
+        } catch (e: Throwable) {
+            ReaderLog.w(TAG, "滚动结束回调失败: ${e.message}")
         }
     }
 

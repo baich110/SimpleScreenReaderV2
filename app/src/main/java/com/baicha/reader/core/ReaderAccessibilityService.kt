@@ -250,7 +250,15 @@ class ReaderAccessibilityService : AccessibilityService() {
             volume = TtsEngineManager.getVolume(this@ReaderAccessibilityService)
         }
         gestureChain = GestureChain()
-        replacement = ReadReplacementEngine()
+        // ★ 加载朗读替换规则 —— 修复「引擎建了但从未加载规则」的静默失效
+        replacement = ReadReplacementEngine().also { engine ->
+            try {
+                val n = ReadReplacementStore.loadWithBuiltin(this, engine)
+                if (n > 0) log("朗读替换: 加载 $n 条规则，启用=${engine.enabled}")
+            } catch (e: Throwable) {
+                ReaderLog.w("Service", "朗读替换规则加载失败: ${e.message}")
+            }
+        }
         voiceScroll = VoiceScrollTracker().apply {
             // 麦克风占用检测复用音频焦点管理器
             isMicrophoneInUse = {
@@ -293,6 +301,8 @@ class ReaderAccessibilityService : AccessibilityService() {
 
         // ---- 焦点管理委托 ----
         focus.onCancelScroll = { autoScroll.stop() }
+        // ★ 滚动结束时显式结束「滚动中」状态（避免隐式依赖 TTL）
+        autoScroll.onScrollSettled = { focus.onScrollEnd() }
 
         // ---- ★ 滚动焦点恢复回调 —— 对应天坦 M6/h 内部类 a ----
         //
@@ -1193,6 +1203,23 @@ class ReaderAccessibilityService : AccessibilityService() {
     }
 
     fun currentEngine(): String? = speech.enginePackage
+
+    /**
+     * 重新加载朗读替换规则 —— 供设置界面调用
+     *
+     * 【为什么需要】
+     *   `ReadReplacementEngine` 是内存态，用户改完规则要立即生效；
+     *   同时替换结果被 `NodeCache` 缓存着，必须清掉。
+     */
+    fun reloadReplacementRules() {
+        try {
+            val n = ReadReplacementStore.loadWithBuiltin(this, replacement)
+            CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
+            log("朗读替换: 重新加载 $n 条规则，启用=${replacement.enabled}")
+        } catch (e: Throwable) {
+            ReaderLog.w("Service", "重载替换规则失败: ${e.message}")
+        }
+    }
 
     // ==================== 输入法适配 ====================
 

@@ -253,7 +253,23 @@ class FocusManager(
         filter: ((AccessibilityNodeInfo) -> Boolean)?
     ): AccessibilityNodeInfo? {
         // ★ ① 滚动中拦截（天坦行为）
-        if (isScrolling && isScrollStateFresh()) {
+        //
+        // 【状态机说明】isScrolling 是「滚动进行中」的标志。
+        //   原实现只有「反方向导航」和「窗口变化」两条清除路径 ——
+        //   同方向导航被吞掉后 isScrolling 保持 true，
+        //   靠 isScrollStateFresh() 的 300ms TTL 隐式兜底。
+        //
+        //   这是**隐式依赖**：如果 TTL 被调大或判断被误删，
+        //   isScrolling 会永久为 true → 导航全部被吞（读屏"死机"）。
+        //
+        //   现在改为**显式状态机**：TTL 过期即视为滚动结束，主动清除标志。
+        if (isScrolling && !isScrollStateFresh()) {
+            // TTL 过期 → 滚动已结束，显式收敛状态
+            ReaderLog.d(TAG, "滚动状态超时，自动结束")
+            isScrolling = false
+        }
+
+        if (isScrolling) {
             if (isSameScrollDirection(direction)) {
                 // 同方向 → 直接吞掉
                 blockedByScroll++
