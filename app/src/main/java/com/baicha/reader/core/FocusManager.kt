@@ -63,6 +63,15 @@ class FocusManager(
         const val DIR_RIGHT = TraversalDirection.RIGHT
 
         /** 基础防抖窗口 —— 天坦 110ms */
+        /**
+         * 遍历失败诊断的最大扫描节点数
+         *
+         * 【为什么要有上限】诊断跑在无障碍线程上，
+         * 超大页面无限扫描会被系统熔断（服务被禁用）。
+         * 200 足以判断「是哪一类拒绝占主导」。
+         */
+        private const val DIAG_MAX_NODES = 200
+
         const val BASE_DEBOUNCE_MS = 110L
 
         /**
@@ -577,9 +586,38 @@ class FocusManager(
             // 重试时强制用默认策略（避免策略本身导致的死路）
             target = searchFocus(current, forward, TraversalStrategyFactory.TYPE_DEFAULT, root, filter)
             if (target == null) {
+                // ══════════════════════════════════════════════════════════
+                // 【★ 本轮补：把「遍历无果」拆成**逐层原因**】
+                // ══════════════════════════════════════════════════════════
+                //
+                // 【用户的原话】
+                // > 现在最大的问题是"静默失败" —— 手势进来了，日志什么都不说。
+                // > 请在导航路径上加日志：找到几个候选节点、过滤掉几个、
+                // > **为什么全部被过滤**，让下次真机验证能直接看出原因。
+                //
+                // 【为什么「遍历无果」不够】焦点查找有十几道判定，
+                // 任何一道返回 false 都是同一种表现。光看「遍历无果」
+                // 无法区分是：
+                //   · 可见性拒的？（`isVisible`）
+                //   · 可聚焦判定拒的？（`shouldFocus` 里的 z11/兜底）
+                //   · 自定义过滤器拒的？（`NavigationMode.filter()`）
+                //   · 还是压根没走到（起点为 null / 树为空）
+                //
+                // 【本诊断做什么】从**起点**开始，沿遍历序走一遍，
+                // 统计「访问了几个节点、各种拒绝原因各多少」，
+                // 并给出前几个被拒节点的**具体身份**（文本+角色）。
+                // 这是纯诊断，直接在无果时跑一次，正常路径零开销。
+                val diagnosis = diagnoseTraversalFailure(
+                    current = current,
+                    forward = forward,
+                    strategyType = strategyType,
+                    root = root,
+                    filter = filter
+                )
                 trace.reject(
                     "遍历无果",
-                    "策略重试后仍未找到可聚焦节点（过滤=${filterDescription(filter)}）"
+                    "策略重试后仍未找到可聚焦节点（过滤=${filterDescription(filter)}）" +
+                            "；诊断=$diagnosis"
                 )
                 trace.end()
                 return null
@@ -969,4 +1007,84 @@ class FocusManager(
 
     fun stats(): String =
         "导航 $navCount / 滚动拦截 $blockedByScroll / 重试 $retryCount"
+    // ==================== 遍历失败诊断 ====================
+
+    /**
+     * 遍历无果时，逐层统计「为什么每个候选都被拒」
+     *
+     * 【设计原则】
+     *   ① **只统计，不改行为** —— 诊断代码不参与判定，失败时跑一次
+     *   ② **有上限** —— 最多扫 [DIAG_MAX_NODES] 个节点，
+     *      避免在超大页面上把无障碍线程拖住（会被系统熔断）
+     *   ③ **给出可操作的线索** —— 不只报数字，还给前几个被拒节点的
+     *      「文本 + 角色 + 拒绝原因」，让下次真机日志能直接定位
+     *
+     * 【输出样例】
+     * ```
+     *   访问 37 / 无可聚焦 / 不可见 12 / 过滤器拒 21 / 空节点 4
+     *   首发被拒: 「WLAN」(?)→不可见、「设置」(?)→过滤器拒
+     * ```
+     */
+    private fun diagnoseTraversalFailure(
+        current: AccessibilityNodeInfo?,
+        forward: Boolean,
+        strategyType: Int,
+        root: AccessibilityNodeInfo?,
+        filter: ((AccessibilityNodeInfo) -> Boolean)?
+    ): String {
+        return try {
+            val r = root ?: return "root=null"
+            val traversal = TraversalStrategyFactory.create(strategyType, r) { true }
+            return try {
+                var node: AccessibilityNodeInfo? = current ?: traversal.start(
+                    r, if (forward) TraversalStrategy.DIRECTION_NEXT
+                    else TraversalStrategy.DIRECTION_PREVIOUS
+                )
+                if (node == null) return "起点=null（策略无起点）"
+
+                var visited = 0
+                var invisible = 0
+                var filtered = 0
+                var noContent = 0
+                val samples = ArrayList<String>(3)
+
+                val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>()
+                while (visited < DIAG_MAX_NODES) {
+                    val next = traversal.next(
+                        node!!,
+                        if (forward) TraversalStrategy.DIRECTION_NEXT
+                        else TraversalStrategy.DIRECTION_PREVIOUS
+                    ) ?: break
+                    if (seen.containsKey(next)) break
+                    seen[next] = true
+                    visited++
+
+                    // 逐层归因（顺序与 shouldFocus 内部一致）
+                    val vis = try { next.isVisibleToUser } catch (e: Throwable) { false }
+                    val reason: String? = when {
+                        !vis -> { invisible++; "可见性" }
+                        !ShouldFocusNode.shouldFocus(next) -> { noContent++; "shouldFocus" }
+                        filter != null && !filter.invoke(next) -> { filtered++; "过滤器" }
+                        else -> null
+                    }
+                    if (reason != null && samples.size < 3) {
+                        samples.add("${FocusTrace.describe(next)}→$reason")
+                    }
+                    node = next
+                }
+                traversal.release()
+
+                "访问 $visited（上限 $DIAG_MAX_NODES）" +
+                        " / 不可见 $invisible / 未过可聚焦 $noContent / 过滤器拒 $filtered" +
+                        if (samples.isEmpty()) "" else " / 首发被拒: ${samples.joinToString("、")}"
+            } catch (e: Throwable) {
+                "诊断异常: ${e.message}"
+            } finally {
+                // traversal 已在内部 release
+            }
+        } catch (e: Throwable) {
+            "诊断异常: ${e.message}"
+        }
+    }
+
 }

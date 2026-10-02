@@ -208,11 +208,74 @@ object ShouldFocusNode {
         //   缓存命中路径就不会清 —— 所以必须放在这里，早于缓存查询。
         seenChildren.clear()
 
+        // ══════════════════════════════════════════════════════════════
+        // 【★★★ 真机 P0 根因：这里的 `z9` 必须传 `true`，不是 `false`】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【真机日志】用户第二次抓取（tag 已修正为全量）：
+        // ```
+        //   05:47:54.122 ❌ 下一焦点 | 失败 ← 遍历无果
+        //                 （策略重试后仍未找到可聚焦节点（过滤=自定义过滤器））
+        //   05:48:05.378 ✅ 上一焦点 | 通过 → 「(无文本)」(?)
+        // ```
+        // 能通过的**只有容器节点**（自身无文本），
+        // 而**纯展示文本节点被大面积拒绝** ⇒ 用户
+        // 「只能获取到一个两个焦点，而且很多焦点它都（获取不到）」。
+        //
+        // 【天坦的两条不同路径 —— 这是关键区分】
+        // ① `FocusFinder.shouldFocus(node, z9)`（`w7/FocusFinder.java:337`）
+        //    这是**旧的/内部的**路径，`z9 = false` 时
+        //    `if (!z9) return z11;` **提前返回**，走不到后面的兜底。
+        // ② `AccessibilityNodeInfoUtils.shouldFocusNodeInternal(node, map, z9)`（`:926`）
+        //    这是**公开遍历入口**用的实现。
+        //
+        // 【决定性证据】`AccessibilityNodeInfoUtils.java:894~897`（原样摘录）：
+        // ```java
+        //   public static boolean shouldFocusNodeWithCache(NodeInfo nodeInfo, Map map) {
+        //       return shouldFocusNodeInternal(nodeInfo, map, true);   // ← 传 true
+        //   }
+        // ```
+        // 而 `shouldFocusNodeInternal` 里（`:962~970`）：
+        // ```java
+        //   boolean z11 = isAccessibilityFocusable(nodeInfo)
+        //       || (isTopLevelScrollItem(nodeInfo) && hasSomethingToSpeakInternal(...));
+        //   if (!z9) {
+        //       return z11;                     // ← z9=false 在此提前返回
+        //   }
+        //   if (!z11) {
+        //       recycleAll(hashSet);
+        //       if (hasMatchingDescendant(nodeInfo, new d(map))
+        //           || !(hasText(nodeInfo) || hasStateDescription(nodeInfo))) {
+        //           return false;
+        //       }
+        //       return true;                    // ★★ 「有文本且无聚焦后代」→ 接受
+        //   }
+        //   ...
+        // ```
+        // ⇒ **`z9 = true` 才有「叶子文本节点」兜底**。
+        //
+        // 【我原来传 false 的后果】
+        //   `r(node, false, 0)` 在 `if (!z9) return z11` 处**提前返回**，
+        //   下面那段 `hasTextOrContent && !hasMatchingFocusableDescendant`
+        //   的兜底**永远不可达** ⇒ 纯展示文本节点（`isFocusable=false`、
+        //   `isClickable=false`、无 action、MIUI 上 `isScreenReaderFocusable`
+        //   也为 false）**全部被判不可聚焦**。
+        //
+        // 【实测证据】修复前用探针跑一个带文本的普通 TextView：
+        //   `r(n, false, 0) = false`  ← shouldFocus 走的就是这条
+        //   `r(n, true,  0) = true`   ← 本应如此
+        //
+        // 【为什么必须传 true 而不是「删掉 z9 判断」】
+        //   `z9 = false` 的语义仍被 `hasMatchingFocusableDescendant` 使用
+        //   （对应天坦 `f39030o` → `shouldFocus(node, false)`），
+        //   那是「这个后代**本身**值不值得聚焦」的判断，**不能**带兜底
+        //   （否则任何有文本的后代都会让父容器认为「有聚焦后代」）。
+        //   两条路径语义不同，必须分开传参。
         val c = cache
         if (c != null) {
-            return c.shouldFocus(node) { r(node, false, 0) }
+            return c.shouldFocus(node) { r(node, true, 0) }
         }
-        return r(node, false, 0)
+        return r(node, true, 0)
     }
 
     /**
@@ -393,9 +456,116 @@ object ShouldFocusNode {
                 return k(node) && !hasChildContent(node)
             }
 
-            if (i(node) && !isSystemBar(node)) return true
+            // ══════════════════════════════════════════════════════════
+            // 【★★★ 真机 P0 根因：这里漏了整个 `hasTextOrContent` 兜底分支】
+            // ══════════════════════════════════════════════════════════
+            //
+            // 【天坦原文】`w7/FocusFinder.java:396~398`（原样摘录）：
+            // ```java
+            //   if (NodeUtils.hasTextOrContent(nodeInfo)
+            //       && !AccessibilityNodeInfoUtils.hasMatchingDescendant(nodeInfo, f39030o)) {
+            //       return true;
+            //   }
+            // ```
+            // 其中：
+            //   · `NodeUtils.java:130~133`
+            //       `hasTextOrContent = hasText(node) || hasStateDescription(node)`
+            //   · `f39030o = new a()`（`FocusFinder.java:152`），
+            //     而 `class a`（`:64~71`）的 `accept` 是
+            //       `FocusFinder.f39016a.shouldFocus(nodeInfo, false)`
+            //     ⇒ `hasMatchingDescendant(node, shouldFocus(node,false))`
+            //       即「子树里**有没有**本身就该聚焦的后代」。
+            //
+            // 【这一支的作用】当 `z11 == false`（即 `isActionable` 与
+            // 「顶层滚动项且有可操作子节点」都为假）时，
+            // **只要节点自己有文本或有状态描述，且子树里没有可聚焦后代**，
+            // 就接受它 —— 也就是**「叶子文本节点」的兜底**。
+            //
+            // 【为什么漏了它就无法左右滑动】
+            //   真机上大量节点是**纯展示文本**（TextView）：
+            //     · `isFocusable = false`
+            //     · `isClickable = false`
+            //     · `isScreenReaderFocusable` 视 ROM 而定，MIUI 上常为 false
+            //     · 无 ACTION_FOCUS/CLICK/LONG_CLICK
+            //   ⇒ `n(node, true)` 为 false ⇒ `z11` 为 false
+            //   ⇒ 走到这里若没有本分支，**直接 return false** ⇒ 文本节点全被拒。
+            //
+            // 【与真机日志完全吻合】用户的真机表现：
+            //   > 左右滑动还是失效，它只能获取到一个两个焦点
+            //   > 而且很多焦点它都（获取不到）
+            //   而能通过的是**容器节点**（有 isScreenReaderFocusable 或有子项
+            //   可操作），所以「只能拿到一两个」。
+            //   —— 与「叶子文本节点全被拒」的机制完全一致。
+            //
+            // 【为什么条件是 `!hasMatchingDescendant`】若子树里已经有该聚焦的
+            //   后代，则**应该聚焦那个后代**，而不是把这个容器也算一个焦点
+            //   （否则会出现「焦点停在容器上、内容重复朗读」）。
+            if (hasTextOrContent(node) && !hasMatchingFocusableDescendant(node)) {
+                return true
+            }
         }
 
+        return false
+    }
+
+    /**
+     * 天坦 `NodeUtils.hasTextOrContent(nodeInfo)`
+     *
+     * 依据 `w7/NodeUtils.java:130~133`（原样摘录）：
+     * ```java
+     *   public static final boolean hasTextOrContent(NodeInfo nodeInfo) {
+     *       return AccessibilityNodeInfoUtils.hasText(nodeInfo)
+     *           || AccessibilityNodeInfoUtils.hasStateDescription(nodeInfo);
+     *   }
+     * ```
+     * 注意是 **`hasText`**（不是 `i()` 的 `hasText || hasSpeakableContent`）——
+     * 两者的组成不同，不能互相替代（本项目已有过「同名不同函数混用」的教训）。
+     */
+    private fun hasTextOrContent(node: AccessibilityNodeInfo): Boolean =
+        hasText(node) || hasStateDescription(node)
+
+    /** 天坦 `AccessibilityNodeInfoUtils.hasStateDescription(node)` */
+    private fun hasStateDescription(node: AccessibilityNodeInfo): Boolean = try {
+        !node.stateDescription.isNullOrEmpty()
+    } catch (e: Throwable) {
+        false
+    }
+
+    /**
+     * `AccessibilityNodeInfoUtils.hasMatchingDescendant(node, filter)`
+     *
+     * 天坦这一处传的过滤器是 `f39030o`（`FocusFinder.java:152` 的 `new a()`），
+     * 而 `class a` 的 `accept`（`:64~71`）是：
+     * ```java
+     *   public boolean accept(NodeInfo nodeInfo) {
+     *       if (nodeInfo == null) { return false; }
+     *       return FocusFinder.f39016a.shouldFocus(nodeInfo, false);
+     *   }
+     * ```
+     * ⇒ 即「子树里有没有 `shouldFocus(node, false)` 为真的后代」。
+     *
+     * 【`z9 = false` 的含义】少一层严格判定（不含 `hasFocusableChild` 那条），
+     * 用于「这个后代**本身**是否值得聚焦」的判断。
+     *
+     * 【深度与数量上限】防畸形树导致长时间遍历（读屏在无障碍线程，
+     *   超时会被系统熔断）。
+     */
+    private fun hasMatchingFocusableDescendant(node: AccessibilityNodeInfo): Boolean =
+        hasMatchingFocusableDescendant(node, 0)
+
+    private fun hasMatchingFocusableDescendant(
+        node: AccessibilityNodeInfo,
+        depth: Int,
+        budget: IntArray = intArrayOf(200)
+    ): Boolean {
+        if (depth > MAX_DEPTH || budget[0] <= 0) return false
+        val count = node.childCount
+        for (i in 0 until count) {
+            if (budget[0]-- <= 0) return false
+            val child = node.getChild(i) ?: continue
+            if (r(child, false, depth + 1)) return true
+            if (hasMatchingFocusableDescendant(child, depth + 1, budget)) return true
+        }
         return false
     }
 

@@ -119,10 +119,47 @@ class NodeCache(
 
         val result = evaluator()
 
-        if (focusCache.size >= focusCapacity) {
-            trimMap(focusCache)
+        // ══════════════════════════════════════════════════════════════
+        // 【★★ 真机 P0 候选：**只缓存 true，不缓存 false**】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【问题】原来把 `false` 也缓存下来。而本缓存的失效**只挂在滚动上**：
+        //   · `invalidateFocus()` **全项目只有一个调用点**
+        //     （`ReaderAccessibilityService.kt:496`），
+        //     注册在 `CacheRegistry.Level.SCROLL`；
+        //   · 而 `SCROLL` 级只由 `TYPE_VIEW_SCROLLED` 触发
+        //     （`AccessibilityEventHandler.kt:702`）；
+        //   ⇒ **纯左右滑导航不产生滚动事件 ⇒ focusCache 永不清**。
+        //
+        // 【后果】一次误判 `false` ⇒ 该节点（及其被复用的物理对象）
+        // **整场会话都判否**，直到下次滚动或窗口变化。
+        //
+        // 【为什么 `false` 尤其危险】`true` 是**稳定属性**
+        // （节点是可点的/有文本的，界面不变就一直是）；
+        // 而 `false` 常常是**暂时性**的：
+        //   · 树尚未就绪（窗口刚切换、RecyclerView 正在绑定）
+        //   · 正在滚动/动画中，`isVisibleToUser` 抖动
+        //   · 节点尚未完成布局
+        // 一旦把这种**瞬时 false** 缓存下来，它就变成了永久的。
+        //
+        // 【收益对比】不缓存 false 的代价：每次遇到不可聚焦节点都重新求值 ——
+        // 但那种节点本来就要被跳过，重算的代价远小于「永久误判」。
+        // 而 `true` 仍然缓存（重复访问可聚焦节点是高频场景）。
+        //
+        // 【与池化对象的关系】`AccessibilityNodeInfo` 是系统池化对象
+        // （官方文档：`recycle()` = "Return an instance back to be reused"），
+        // 本项目两端都用池（`AutoScrollManager` 的 `obtain()`、
+        // `ShouldFocusNode:1259` 的 `recycle()`）。
+        // `IdentityHashMap` 按物理对象身份做键 ⇒ 对象复用时会命中
+        // **别的逻辑节点的结果**。不缓存 false 后，最坏情况变成
+        // 「误报 true」—— 那只是多出几个候选（会被后续判定继续过滤），
+        // 远好于「把可聚焦节点永久判死」。
+        if (result) {
+            if (focusCache.size >= focusCapacity) {
+                trimMap(focusCache)
+            }
+            focusCache[node] = CacheEntry(true, gen)
         }
-        focusCache[node] = CacheEntry(result, gen)
         PerfCounters.cacheMiss()
         return result
     }

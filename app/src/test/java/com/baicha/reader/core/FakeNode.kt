@@ -184,7 +184,17 @@ open class FakeNode(
      */
     var fakeActions: Int = 0
 
+    /**
+     * 状态描述 —— `getStateDescription()`（API 30+）
+     *
+     * 天坦 `hasTextOrContent = hasText || hasStateDescription`，
+     * 少了这个字段就测不了「只有状态描述的节点是否可聚焦」。
+     */
+    var fakeStateDescription: CharSequence? = null
+
     override fun getActions(): Int = fakeActions
+
+    override fun getStateDescription(): CharSequence? = fakeStateDescription
 
     override fun isFocused(): Boolean = fakeInputFocused
 

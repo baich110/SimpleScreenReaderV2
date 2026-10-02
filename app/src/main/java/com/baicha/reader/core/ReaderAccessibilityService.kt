@@ -1080,6 +1080,21 @@ class ReaderAccessibilityService : AccessibilityService() {
             else -> focus.clearScrollJump()   // ★ 关键：清除残留请求
         }
 
+        // ★★ 每次导航前失效「可聚焦判定」缓存
+        //
+        // 【为什么必须在这里失效】`invalidateFocus()` 原来**只挂在
+        // `CacheRegistry.Level.SCROLL`** 上，而 SCROLL 只由
+        // `TYPE_VIEW_SCROLLED` 触发 —— **纯左右滑导航不产生滚动事件**，
+        // 于是 `focusCache` 在整段导航过程中**永不清除**。
+        //
+        // 而导航正是「会不会用到这个缓存」的主场景：
+        // 每滑一次都要对沿途节点问几十次 `shouldFocus`。
+        // 一次误判留下的缓存会在后续每一次滑动里被复用。
+        //
+        // 【代价】清一次 Map 是 O(1)（只自增代数），
+        // 单次导航本来就要重算绝大多数节点，缓存跨导航的命中率本就不高。
+        CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
+
         val dir = if (forward) FocusManager.DIR_NEXT else FocusManager.DIR_PREVIOUS
         // ★ 走当前导航的模式与过滤器
         val node = focus.moveFocus(
