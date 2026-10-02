@@ -106,8 +106,18 @@ object FocusSearch {
         val accept: (AccessibilityNodeInfo) -> Boolean =
             filter ?: { ShouldFocusNode.shouldFocus(it) }
 
-        // 根自身满足 → 直接用（省掉一次遍历）
-        if (accept(root)) return root
+        // ★★ 本轮修正（P1）：快路径**必须只用于 FORWARD**
+        //
+        // 【原来的 bug】这行在方向分支**之前**，于是 BACKWARD 时
+        // 「root 自身可聚焦」就直接返回 root —— 而 BACKWARD 的语义是
+        // 「找**最后**一个可聚焦节点」。结果：反向查找永远拿到根节点
+        // （或根可聚焦时的错误结果），而不是页面末尾那个。
+        //
+        // 【真机表现】「跳到最后一个/反向遍历」类操作定位错误。
+        //
+        // 【为什么 FORWARD 可以用快路径】FORWARD 的语义是「找第一个」，
+        // 而根是遍历序的起点 —— 根自身可聚焦时它就是第一个，正确。
+        if (direction == TraversalDirection.FORWARD && accept(root)) return root
 
         // 【修正】原实现无论方向如何都走 `searchFocus(root, direction)`，
         // 而 `searchFocus` 内部调用 `traversal.next(root, BACKWARD)` ——

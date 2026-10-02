@@ -475,6 +475,31 @@ class ReaderAccessibilityService : AccessibilityService() {
             continuousReader.toggle()
             true
         }
+        // ★★ 系统手势注入（本轮修复 P1）
+        //
+        // 【原来漏了注入】`GestureActionHandler` 的 `performGlobalAction`
+        // 声明为可空钩子（`:64`）、在 `global()`（`:128`）里读取，
+        // 但**全项目从未赋值** ⇒ 6 个系统手势**全部静默失败**：
+        //   BACK / HOME / RECENTS / NOTIFICATIONS / SCREENSHOT / 分屏
+        // 用户按了三指左滑（返回）等手势没有任何反应、也没有提示。
+        //
+        // 【为什么不静默】`global()` 的 `?: false` 会让调用方拿到 false，
+        // 但调用链上层没有据此播报失败 —— 属于「静默失败」，
+        // 也是本项目已记录的禁忌（见 docs 静默失效审计）。
+        gestureActions.performGlobalAction = { action ->
+            val ok = try {
+                performGlobalAction(action)
+            } catch (e: Throwable) {
+                log("系统手势失败: action=$action, ${e.message}")
+                false
+            }
+            if (!ok) {
+                // 明确告知用户「这个动作没成功」，而不是毫无反应
+                log("系统手势未执行: action=$action")
+                haptic.boundary()
+            }
+            ok
+        }
 
         // ★ 把连续朗读状态接进事件分发器（A4）
         //   规则 4 依赖它：全屏朗读中忽略 HOVER_ENTER，

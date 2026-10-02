@@ -88,6 +88,12 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
         /** 窗口根上溯深度上限（防畸形树死循环） */
         private const val MAX_WINDOW_ROOT_DEPTH = 64
 
+        /** `ACTION_NEXT_HTML_ELEMENT` —— 可读版 AccessibilityNodeInfoUtils:657 标注 */
+        private const val ACTION_NEXT_HTML_ELEMENT = 1024
+
+        /** `ACTION_PREVIOUS_HTML_ELEMENT` —— 同上 :659 */
+        private const val ACTION_PREVIOUS_HTML_ELEMENT = 2048
+
         private const val TAG = "TatansTraversal"
 
         /** 索引缓存（天坦 f23911m/f23912n/f23913o） */
@@ -602,7 +608,21 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
                 }
                 cacheChildIndex = i
                 cacheChildCount = count
-                Companion.cacheGeneration = generation
+                // ★★ 本轮修正（P1）：**删除** `Companion.cacheGeneration = generation`
+                //
+                // 【为什么必须删】`generation` 是本实例创建时抓取的快照
+                // （`:145 private val generation: Int = cacheGeneration`）。
+                // 把它写回静态字段的后果：
+                //   · `invalidateIndexCache()` 递增 `cacheGeneration` 之后，
+                //     只要再调一次本函数，就把静态字段**还原成旧值**；
+                //   · 于是 `:562` 的 `Companion.cacheGeneration == generation`
+                //     变成**永远成立** —— 代数校验彻底失效，
+                //     `invalidateIndexCache()`（窗口/内容变化时调用）形同虚设。
+                //   · 结果：索引缓存读到过期结果 → 焦点跳错位置。
+                //
+                // 【正确的语义】静态 `cacheGeneration` 是**单向递增的版本号**，
+                // 只应由 `invalidateIndexCache()` 修改；
+                // 实例只**读**它做比较，绝不写回。
                 return i
             }
         }
@@ -759,21 +779,71 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
     }
 
     /**
-     * 天坦 A0.f(node) —— WebView 相关
+     * WebView 相关节点 —— 对应天坦 `NodeNavigator.isInRecyclerView`（`:106~124`）
+     *
+     * ★★ 本轮修正（P1）：原来只查了一个 actionList，漏了两条路径
+     *
+     * 【天坦原文】
+     * ```java
+     * // w7/NodeNavigator.java:106~114
+     * public static boolean isInRecyclerView(NodeInfo nodeInfo) {
+     *     if (nodeInfo == null) return false;
+     *     return isInWebView(nodeInfo) || isInListView(nodeInfo);
+     * }
+     * // :105  isInWebView  → isInScrollView
+     * // :128  isInScrollView(nodeInfo)
+     * //         = AccessibilityNodeInfoUtils.hasActionMask2(nodeInfo, 1024, 2048)
+     * // :110  isInListView → pkg.startsWith("org.mozilla.")
+     * ```
+     * 而 `hasActionMask2`（`NodeUtils.matchActionMask2`，`:285~289`）是
+     * **位掩码 OR actionList 双路**：
+     * ```java
+     * (actions & 1024) == 1024 || (actions & 2048) == 2048
+     *  || hasAction(1024) || hasAction(2048)
+     * ```
+     *
+     * 【我原来漏了三条】
+     *   ① 只查 2048，**漏了 1024**（ACTION_NEXT_HTML_ELEMENT）
+     *   ② 只扫 actionList，**漏了 `(actions & id) == id` 位掩码路径**
+     *   ③ 完全没有 mozilla 之外的分支 —— 这点我原来有（pkg 判断），保留
+     *
+     * 【真机影响】网页里可聚焦节点识别不全 → 触摸探索/焦点判定漏节点。
+     *
+     * 【注意】天坦这里有个**同名陷阱**：
+     *   · `AccessibilityNodeInfoUtils.hasActionMask2`（:1091）= 只有位掩码
+     *   · `NodeUtils.matchActionMask2`（:285）        = 位掩码 OR actionList
+     *   天坦 `isInScrollView` 实际调用的是后者。白茶按后者实现。
      */
     private fun isWebViewRelated(node: AccessibilityNodeInfo): Boolean {
+        // isInListView
         val pkg = node.packageName?.toString().orEmpty()
         if (pkg.startsWith("org.mozilla.")) return true
+        // isInWebView → isInScrollView → matchActionMask2(1024, 2048)
         return hasHtmlElementAction(node)
     }
 
     /**
-     * 天坦 A0.d() → AbstractC3693m.p0(node, 2048)
+     * `NodeUtils.matchActionMask2(node, 1024, 2048)` —— 双路判定
+     *
+     * 位掩码路径 `(actions & id) == id` **或** actionList 扫描。
      */
-    private fun hasHtmlElementAction(node: AccessibilityNodeInfo): Boolean = try {
-        node.actionList.any { it.id == 2048 }
-    } catch (e: Throwable) {
-        false
+    private fun hasHtmlElementAction(node: AccessibilityNodeInfo): Boolean {
+        val actions = try {
+            node.actions
+        } catch (e: Throwable) {
+            0
+        }
+        // ① 位掩码路径
+        if ((actions and ACTION_NEXT_HTML_ELEMENT) == ACTION_NEXT_HTML_ELEMENT) return true
+        if ((actions and ACTION_PREVIOUS_HTML_ELEMENT) == ACTION_PREVIOUS_HTML_ELEMENT) return true
+        // ② actionList 路径
+        return try {
+            node.actionList.any {
+                it.id == ACTION_NEXT_HTML_ELEMENT || it.id == ACTION_PREVIOUS_HTML_ELEMENT
+            }
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     /** 天坦 AbstractC3693m.b0(node) = o0.w.v0(node) —— 取节点副本 */
