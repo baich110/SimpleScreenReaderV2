@@ -115,6 +115,52 @@ object WindowTraversal {
     fun notActive(): WindowFilter =
         WindowFilter { w -> w != null && !w.isActive }
 
+    /**
+     * 排除系统栏（状态栏 / 导航栏）—— 对应天坦 `M6/h` 的窗口过滤器 `f6018r`
+     *
+     * 【为什么要把系统栏排除在焦点序列外】
+     *   用户按「下一个窗口」遍历应用内容时，不该突然滑到
+     *   顶部状态栏（时间/电量）或底部导航栏（三个按钮）上 ——
+     *   那里没有用户要找的内容，却会打断整个浏览流程。
+     *
+     * 【为什么不用系统类型判断】
+     *   Android 把状态栏、导航栏、悬浮球都归为 TYPE_SYSTEM(3)，
+     *   直接按类型过滤会把「悬浮球」这种真实可交互的内容一起滤掉。
+     *   [WindowClassifier] 用几何位置细分出真正的系统栏，
+     *   保留其他系统窗口 —— 这与天坦 `E0.parseWindowType()` 思路一致。
+     *
+     * 【与 FOCUSABLE 的关系】
+     *   两者可叠加：先排除系统栏，再要求有可聚焦内容。
+     */
+    fun notSystemBar(service: AccessibilityService): WindowFilter =
+        WindowFilter { w -> w != null && !WindowClassifier.isSystemBar(service, w) }
+
+    /** 只要系统栏 —— 用于「跳转系统栏」等特定场景 */
+    fun onlySystemBar(service: AccessibilityService): WindowFilter =
+        WindowFilter { w -> w != null && WindowClassifier.isSystemBar(service, w) }
+
+    /**
+     * 默认的「应用内容导航」过滤器。
+     *
+     * 对应天坦 `M6/h.f6018r`（默认窗口过滤器）：
+     *   有可聚焦内容 + 不是系统栏 + 不是输入法
+     *
+     * 【为什么要排除输入法】
+     *   输入法是独立上下文，用户按「下一个窗口」通常是想在
+     *   应用窗口间跳转；滑进输入法面板会让人困惑。
+     *   需要输入法时用户会直接点输入框，焦点自然过去。
+     */
+    fun applicationWindows(service: AccessibilityService): WindowFilter {
+        val focusable = FOCUSABLE
+        val notBar = notSystemBar(service)
+        return WindowFilter { w ->
+            w != null &&
+                !WindowClassifier.isInputMethod(service, w) &&
+                notBar.accept(w) &&
+                focusable.accept(w)
+        }
+    }
+
     // ==================== 核心：跨窗口导航 ====================
 
     /**

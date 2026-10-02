@@ -773,7 +773,10 @@ class ReaderAccessibilityService : AccessibilityService() {
         if (navigation.current == NavigationMode.WINDOWS_NAVIGATION) {
             val cross = WindowTraversal.navigateToNextWindow(
                 service = this,
-                forward = forward
+                forward = forward,
+                // ★ 用「应用窗口」过滤器：排除状态栏/导航栏/输入法
+                //   否则用户会滑到状态栏的时间电量上，打断浏览
+                filter = WindowTraversal.applicationWindows(this)
             )
             if (cross != null) {
                 if (focus.applyFocus(cross)) {
