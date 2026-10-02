@@ -91,9 +91,66 @@ object FocusSearch {
     }
 
     /**
-     * 找树里的第一个焦点 —— 对应 TalkBack `findFirstFocusInNodeTree()`
+     * 找树里的第一个焦点 —— 1:1 对应 TalkBack `findFirstFocusInNodeTree()`
      *
-     * @param direction FORWARD 返回遍历序第一个；BACKWARD 返回最后一个
+     * ══════════════════════════════════════════════════════════
+     * 【依据源码】TalkBack `TraversalStrategyUtils.java` 第 396~410 行
+     * ══════════════════════════════════════════════════════════
+     *
+     * ```
+     *   public static @Nullable AccessibilityNodeInfoCompat findFirstFocusInNodeTree(
+     *       TraversalStrategy traversalStrategy,
+     *       AccessibilityNodeInfoCompat root,
+     *       @TraversalStrategy.SearchDirection int direction,
+     *       Filter<AccessibilityNodeInfoCompat> nodeFilter) {
+     *     if (root == null) {
+     *       return null;
+     *     }
+     *     AccessibilityNodeInfoCompat firstNode = traversalStrategy.focusFirst(root, direction);
+     *
+     *     if (nodeFilter.accept(firstNode)) {
+     *       return firstNode;
+     *     }
+     *     return TraversalStrategyUtils.searchFocus(traversalStrategy, firstNode, direction, nodeFilter);
+     *   }
+     * ```
+     *
+     * 【关键】起点**永远**来自 `traversalStrategy.focusFirst(root, direction)`
+     * （白茶对应 `TraversalStrategy.start()`），**从不**直接用传入的 `root`。
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【本轮修复的缺陷】root 快路径绕过了策略起点
+     * ══════════════════════════════════════════════════════════
+     *
+     * 原实现在方向分支之前有一行：
+     * ```
+     *   if (direction == TraversalDirection.FORWARD && accept(root)) return root
+     * ```
+     * 它有两处错误（均由 `FocusSearchSemanticsTest` 实证）：
+     *
+     * ① **即使 root 可聚焦也必须先问策略「你的起点是谁」**。
+     *    策略起点常常 **≠** root：
+     *      · `ListTraversalStrategy.start()` 返回列表容器的**第一个子项**；
+     *      · `SpatialTraversalStrategy.start()` 返回空间序第一个；
+     *      · 各种策略的 root 往往是**容器/窗口**。
+     *    原实现直接返回 root，于是 focus 停在容器上 ——
+     *    真机表现：从某些界面进入时读屏念出的是**容器本身**
+     *    （用户听到「列表」而不是列表里的第一个按钮）。
+     *
+     * ② 该行导致 FORWARD 路径**完全不调用 `start()`**
+     *    （实证：`startCalls.size == 0`）。这是「接线缺失」型缺陷，
+     *    形状测试永远发现不了。
+     *
+     * 【修复方式】删掉快路径，严格照抄 TalkBack：
+     *     firstNode = start(root, direction)
+     *     if (accept(firstNode)) return firstNode
+     *     return searchFocus(firstNode, direction)
+     *
+     * 【为什么这样 FROWARD/BACKWARD 都自然正确】
+     * FORWARD  时 start() 给遍历序第一个，BACKWARD 时给最后一个 ——
+     * 这正是两个方向各自的「开始找的位置」，无需方向分支。
+     *
+     * @param direction FORWARD 从遍历序第一个开始找；BACKWARD 从最后一个开始找
      */
     fun findFirstFocus(
         traversal: TraversalStrategy,
@@ -106,38 +163,12 @@ object FocusSearch {
         val accept: (AccessibilityNodeInfo) -> Boolean =
             filter ?: { ShouldFocusNode.shouldFocus(it) }
 
-        // ★★ 本轮修正（P1）：快路径**必须只用于 FORWARD**
-        //
-        // 【原来的 bug】这行在方向分支**之前**，于是 BACKWARD 时
-        // 「root 自身可聚焦」就直接返回 root —— 而 BACKWARD 的语义是
-        // 「找**最后**一个可聚焦节点」。结果：反向查找永远拿到根节点
-        // （或根可聚焦时的错误结果），而不是页面末尾那个。
-        //
-        // 【真机表现】「跳到最后一个/反向遍历」类操作定位错误。
-        //
-        // 【为什么 FORWARD 可以用快路径】FORWARD 的语义是「找第一个」，
-        // 而根是遍历序的起点 —— 根自身可聚焦时它就是第一个，正确。
-        if (direction == TraversalDirection.FORWARD && accept(root)) return root
+        // ★ 起点必须由策略给出（= TalkBack 的 focusFirst(root, direction)）
+        val first = traversal.start(root, direction) ?: return null
 
-        // 【修正】原实现无论方向如何都走 `searchFocus(root, direction)`，
-        // 而 `searchFocus` 内部调用 `traversal.next(root, BACKWARD)` ——
-        // root 没有"前一个节点"，所以 **BACKWARD 永远返回 null**。
-        //
-        // 天坦的做法（C1427v.c）是先调 `traversal.c(root, direction)`
-        // 让**策略自己定位起点**，再从起点向后搜索。
-        // 这里对齐：BACKWARD 时用策略的 start() 拿最后一个。
-        return if (direction == TraversalDirection.BACKWARD) {
-            // 反向：让策略给出"最后一个"作为起点
-            val last = traversal.start(root, TraversalDirection.BACKWARD)
-            if (last == null) return null
-            if (accept(last)) last
-            else searchFocus(traversal, last, TraversalDirection.BACKWARD, accept)
-        } else {
-            val first = traversal.start(root, TraversalDirection.FORWARD)
-            if (first == null) return null
-            if (accept(first)) first
-            else searchFocus(traversal, first, TraversalDirection.FORWARD, accept)
-        }
+        if (accept(first)) return first
+
+        return searchFocus(traversal, first, direction, accept)
     }
 
     /**

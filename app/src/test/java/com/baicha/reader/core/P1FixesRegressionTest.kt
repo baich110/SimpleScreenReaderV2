@@ -82,23 +82,52 @@ class P1FixesRegressionTest {
         )
     }
 
-    // ==================== P1-3 BACKWARD 快路径 ====================
+    // ==================== P1-3 BACKWARD 快路径（已升级为行为测试） ====================
 
     /**
-     * ★★ `findFirstFocus` 的快路径必须限定 FORWARD
+     * ★★ `findFirstFocus` **不得**存在任何「root 即返回」的快路径
      *
-     * 原来 `if (accept(root)) return root` 在方向分支之前 ——
-     * BACKWARD 时直接返回根节点，而语义是「找**最后**一个」。
+     * ══════════════════════════════════════════════════════════
+     * 【这条测试的演变史 —— 一个「测试固化 bug」的真实案例】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 本测试原本断言源码里**必须**包含这一行：
+     * ```
+     *   if (direction == TraversalDirection.FORWARD && accept(root)) return root
+     * ```
+     * 于是它把「root 快路径」这个错误**固化成了契约** ——
+     * 后来照抄 TalkBack 修复时，反而是这条测试拦住了正确的修复。
+     *
+     * **教训：文字 grep 式断言会把错误固化成契约。**
+     * 能写行为断言就绝不写 grep 断言。
+     *
+     * 【为什么那行本身是错的】依据 TalkBack
+     * `TraversalStrategyUtils.java:396~410`：
+     * ```
+     *   AccessibilityNodeInfoCompat firstNode = traversalStrategy.focusFirst(root, direction);
+     *   if (nodeFilter.accept(firstNode)) { return firstNode; }
+     * ```
+     * 起点**永远**来自策略的 `focusFirst`，**从不**直接用 `root`。
+     * 策略起点常常 ≠ root（`ListTraversalStrategy.start()` 给列表第一个子项、
+     * `SpatialTraversalStrategy.start()` 给空间序第一个，而 root 往往是容器）。
+     *
+     * 【修复后由 `FocusSearchSemanticsTest` 做真实行为断言】
+     * 实测（修复前）：root 可聚焦时返回 root 而非策略起点，且 `start()` 调用 0 次。
+     * 本测试保留为「不得回退」的守卫。
      */
     @Test
-    fun first_focus_fast_path_is_forward_only() {
-        assertTrue(
-            "快路径必须限定 FORWARD",
-            focusSearchCode.contains("if (direction == TraversalDirection.FORWARD && accept(root)) return root")
+    fun first_focus_has_no_root_fast_path() {
+        assertFalse(
+            "不得存在 FORWARD 限定的 root 快路径（会绕过策略起点）",
+            focusSearchCode.contains("&& accept(root)) return root")
         )
         assertFalse(
-            "不能无条件用快路径（BACKWARD 会返回根节点）",
-            focusSearchCode.contains("\n        if (accept(root)) return root")
+            "不得存在无条件 root 快路径（BACKWARD 会返回根节点）",
+            focusSearchCode.contains("if (accept(root)) return root")
+        )
+        assertTrue(
+            "起点必须来自策略 start()：依据 TraversalStrategyUtils.java:403",
+            focusSearchCode.contains("traversal.start(root, direction)")
         )
     }
 
