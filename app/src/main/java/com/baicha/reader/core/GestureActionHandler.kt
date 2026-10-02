@@ -99,8 +99,10 @@ class GestureActionHandler(
             GestureAction.VOLUME_DOWN -> { adjustVolume(false); true }
 
             // ---- 媒体 ----
+            // ★ 传**动作**而非 gestureId —— 见 handleMediaGesture 的说明：
+            //   按 gestureId 分派会与映射表产生第二份真相，且分支不可达。
             GestureAction.MEDIA_PREVIOUS, GestureAction.MEDIA_NEXT, GestureAction.MEDIA_PLAY_PAUSE ->
-                handleMediaGesture(gestureId)
+                handleMediaGesture(GestureMap.actionOf(gestureId))
 
             // ---- 粒度（保留旧的 4 粒度切换）----
             GestureAction.GRANULARITY_CHARACTER -> setGranularity(GranularityNavigator.Level.CHARACTER)
@@ -174,11 +176,61 @@ class GestureActionHandler(
 
     // ==================== 媒体 ====================
 
-    private fun handleMediaGesture(gestureId: Int): Boolean {
-        val keyCode = when (gestureId) {
-            Gestures.GESTURE_2_FINGER_SWIPE_LEFT -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
-            Gestures.GESTURE_2_FINGER_SWIPE_RIGHT -> KeyEvent.KEYCODE_MEDIA_NEXT
-            Gestures.GESTURE_2_FINGER_SINGLE_TAP -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+    /**
+     * 媒体手势 —— 按**映射表给出的动作**发对应的媒体键
+     *
+     * ══════════════════════════════════════════════════════════
+     * 【★ 本轮修复：原来的三条分支全部与映射表不符，且全部不可达】
+     * ══════════════════════════════════════════════════════════
+     *
+     * 原实现按**手势 ID** 判断：
+     * ```kotlin
+     *   val keyCode = when (gestureId) {
+     *       Gestures.GESTURE_2_FINGER_SWIPE_LEFT  -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+     *       Gestures.GESTURE_2_FINGER_SWIPE_RIGHT -> KeyEvent.KEYCODE_MEDIA_NEXT
+     *       Gestures.GESTURE_2_FINGER_SINGLE_TAP  -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+     *       else -> return false
+     *   }
+     * ```
+     *
+     * 【矛盾一：与映射表不符】`GestureMap.actionOf()` 的实际映射是：
+     * | 手势 | 映射表给的动作 | 原实现以为的媒体键 |
+     * |---|---|---|
+     * | 27 双指左滑 | `SCROLL_FORWARD` | MEDIA_PREVIOUS ✗ |
+     * | 28 双指右滑 | `SCROLL_BACKWARD` | MEDIA_NEXT ✗ |
+     * | 19 双指单击 | `STOP_SPEAK` | MEDIA_PLAY_PAUSE ✗ |
+     * | 20 双指双击 | `MEDIA_PLAY_PAUSE` | （未列出）✗ |
+     * | 35 四指左滑 | `MEDIA_PREVIOUS` | （未列出）✗ |
+     * | 36 四指右滑 | `MEDIA_NEXT` | （未列出）✗ |
+     *
+     * 【矛盾二：三条分支全都不可达】本方法**只**由
+     * `handleMappedGesture()` 的媒体分支调用：
+     * ```kotlin
+     *   GestureAction.MEDIA_PREVIOUS, GestureAction.MEDIA_NEXT,
+     *   GestureAction.MEDIA_PLAY_PAUSE -> handleMediaGesture(gestureId)
+     * ```
+     * 也就是说，能走到这里的 `gestureId` **必然**满足
+     * `actionOf(gestureId) ∈ {MEDIA_*}` ——
+     * 而 19/27/28 分别映射到 STOP_SPEAK / SCROLL_FORWARD / SCROLL_BACKWARD，
+     * **永远不会**进入这个分支；反之真正会进来的 20/35/36
+     * 又不在 `when` 里，落到 `else -> return false`。
+     *
+     * ⇒ 净效果：**媒体按键按下去永远返回 false（什么都不做）**，
+     *    即「上一首/下一首/播放暂停」三个功能**完全不可用**，
+     *    且因为返回 false，链会继续往下走，可能被别的 Actor 当成
+     *    普通手势处理 —— 用户按四指左滑想切歌，结果焦点动了。
+     *
+     * 【修复】改为按**动作**分派（与映射表同源），不再重复编码手势 ID：
+     * 这样「映射表改了什么，这里就跟着变什么」，不会再出现两份真相。
+     *
+     * 【为什么不再从 gestureId 反查】那种做法要求本方法自己维护一份
+     * 「手势 → 媒体键」的副本 —— 正是产生本次矛盾的根源。
+     */
+    private fun handleMediaGesture(action: GestureAction): Boolean {
+        val keyCode = when (action) {
+            GestureAction.MEDIA_PREVIOUS -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            GestureAction.MEDIA_NEXT -> KeyEvent.KEYCODE_MEDIA_NEXT
+            GestureAction.MEDIA_PLAY_PAUSE -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
             else -> return false
         }
         return sendMediaKey(keyCode)
