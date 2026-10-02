@@ -127,8 +127,19 @@ object NodeRoleHelper {
         // ② SeekBar
         if (classNameEquals(cls, SeekBar::class.java.name)) return ROLE_SEEK_CONTROL
 
-        // ③ 有 setProgress 动作
-        if (isActionable(node) && hasAction(node, android.R.id.accessibilityActionSetProgress)) {
+        // ③ 有 setProgress 动作 —— ★ 修正：天坦用 hasRangeInfo 而非 isActionable
+        //
+        // 【天坦原文】`w7/EventUtils.java:122~124`（可读版）：
+        //   ```java
+        //   if (AccessibilityNodeInfoUtils.hasRangeInfo(nodeInfo)
+        //       && AccessibilityNodeInfoUtils.hasActionById(nodeInfo, R.id.accessibilityActionSetProgress)) {
+        //       return 10;   // ROLE_SEEK_CONTROL
+        //   }
+        //   ```
+        // 我原来用的是 `isActionable(node)` —— 那是**另一个函数**
+        // （语义「可点击或可长按」），与 hasRangeInfo（「有有效区间信息」）
+        // 完全不同。滑块**必须**有 rangeInfo 才有意义。
+        if (hasRangeInfo(node) && hasAction(node, android.R.id.accessibilityActionSetProgress)) {
             return ROLE_SEEK_CONTROL
         }
 
@@ -138,9 +149,20 @@ object NodeRoleHelper {
         // ⑤ CompoundButton 子类
         if (classNameExtends(cls, CompoundButton::class.java.name)) return ROLE_CHECK_BOX
 
-        // ⑥ ImageView
+        // ⑥ ImageView —— ★ 修正：天坦用 isActionableForAccessibility
+        //
+        // 【天坦原文】`w7/EventUtils.java:136~138`：
+        //   ```java
+        //   if (AbstractC3697z.a(className, ImageView.class)) {
+        //       return AccessibilityNodeInfoUtils.isActionableForAccessibility(nodeInfo) ? 7 : 6;
+        //   }
+        //   ```
+        // `isActionableForAccessibility` = `isClickable || hasActionMask(16)`
+        //（`AccessibilityNodeInfoUtils.java:414~419`）——
+        // 比单纯 `isClickable` 宽：**没有 isClickable 但声明了 click action 的图片**
+        // 也算可点击图片。
         if (classNameExtends(cls, ImageView::class.java.name)) {
-            return if (isClickable(node)) ROLE_IMAGE_BUTTON else ROLE_IMAGE
+            return if (isActionableForAccessibility(node)) ROLE_IMAGE_BUTTON else ROLE_IMAGE
         }
 
         // ⑦ HorizontalScrollView（无 collectionInfo）
@@ -151,8 +173,17 @@ object NodeRoleHelper {
         // ⑧ ProgressBar
         if (classNameExtends(cls, ProgressBar::class.java.name)) return ROLE_PROGRESS_BAR
 
-        // ⑨ 可操作但无 setProgress
-        if (isActionable(node) && !hasAction(node, android.R.id.accessibilityActionSetProgress)) {
+        // ⑨ 有区间信息但无 setProgress —— ★ 修正：天坦用 hasRangeInfo
+        //
+        // 【天坦原文】`w7/EventUtils.java:129~131`：
+        //   ```java
+        //   if (AccessibilityNodeInfoUtils.hasRangeInfo(nodeInfo)
+        //       && !AccessibilityNodeInfoUtils.hasActionById(nodeInfo, R.id.accessibilityActionSetProgress)) {
+        //       return 18;   // ROLE_PROGRESS_BAR
+        //   }
+        //   ```
+        // 同样把 isActionable 误用成了 hasRangeInfo。
+        if (hasRangeInfo(node) && !hasAction(node, android.R.id.accessibilityActionSetProgress)) {
             return ROLE_PROGRESS_BAR
         }
 
@@ -163,8 +194,29 @@ object NodeRoleHelper {
         if (classNameExtends(cls, GridView::class.java.name)) return ROLE_GRID
         if (classNameExtends(cls, AbsListView::class.java.name)) return ROLE_LIST
 
-        // ⑫ Pager 相关动作
-        if (hasScrollAction(node)) return ROLE_PAGER
+        // ⑫ Pager 专用动作 —— ★ 修正：天坦判的是 4 个 PAGE action
+        //
+        // 【天坦原文】`w7/EventUtils.java:148~151`：
+        //   ```java
+        //   if (AccessibilityNodeInfoUtils.hasActionById(nodeInfo, NodeInfo.a.f34762G.b())   // ACTION_PAGE_UP
+        //    || AccessibilityNodeInfoUtils.hasActionById(nodeInfo, NodeInfo.a.f34763H.b())   // ACTION_PAGE_DOWN
+        //    || AccessibilityNodeInfoUtils.hasActionById(nodeInfo, NodeInfo.a.f34764I.b())   // ACTION_PAGE_LEFT
+        //    || AccessibilityNodeInfoUtils.hasActionById(nodeInfo, NodeInfo.a.f34765J.b())) { // ACTION_PAGE_RIGHT
+        //       return 16;   // ROLE_PAGER
+        //   }
+        //   ```
+        // 四个常量已核实（`o0/NodeInfo.java:188~191`）：
+        //   f34762G = ACTION_PAGE_UP / f34763H = ACTION_PAGE_DOWN
+        //   f34764I = ACTION_PAGE_LEFT / f34765J = ACTION_PAGE_RIGHT
+        //
+        // 【我原来的实现】判的是「有滚动 action」→ 会把**所有可滚动容器**
+        //   都当成 Pager。而天坦只认真正的翻页控件。
+        //   后果：列表被误判为 Pager，影响朗读角色词与焦点判定分支。
+        if (hasAction(node, ACTION_PAGE_UP, ACTION_PAGE_DOWN) ||
+            hasAction(node, ACTION_PAGE_LEFT, ACTION_PAGE_RIGHT)
+        ) {
+            return ROLE_PAGER
+        }
 
         // ⑬ collectionInfo
         val collection = node.collectionInfo
@@ -304,6 +356,51 @@ object NodeRoleHelper {
         return node.isClickable
     }
 
+    /**
+     * `AccessibilityNodeInfoUtils.isActionableForAccessibility(node)`
+     *
+     * 依据可读版 `w7/AccessibilityNodeInfoUtils.java:414~419`：
+     * ```java
+     * return nodeInfo.isClickable() || hasActionMask(nodeInfo, 16);
+     * ```
+     * 注意 `hasActionMask` = **`(actions & id) == id` 位掩码**
+     * 或 actionList 扫描（`NodeUtils.matchActionMask`，`:277~283`）——
+     * 不是单纯扫 actionList。
+     *
+     * 与 [isActionable] 的区别：这个只认「可点击」，不认 longClick/focusable。
+     * `EventUtils.getNodeType()` 的 ImageView 分支用它（`:143`）。
+     */
+    private fun isActionableForAccessibility(node: AccessibilityNodeInfo): Boolean =
+        node.isClickable || hasActionMask(node, 16) || hasAction(node, 16)
+
+    /**
+     * **有有效的区间信息**（进度条/滑块的必备条件）
+     *
+     * 依据可读版 `w7/AccessibilityNodeInfoUtils.java:348~357`：
+     * ```java
+     * float max = i.max(), min = i.min(), cur = i.current();
+     * return max - min > 0 && cur >= min && cur <= max;
+     * ```
+     * `EventUtils.getNodeType()` 用它判 SeekBar（`:122`）与 ProgressBar（`:129`）。
+     */
+    private fun hasRangeInfo(node: AccessibilityNodeInfo): Boolean {
+        val range = try {
+            node.rangeInfo
+        } catch (e: Throwable) {
+            null
+        } ?: return false
+        return (range.max - range.min) > 0f &&
+            range.current >= range.min &&
+            range.current <= range.max
+    }
+
+    /** action 位掩码判定 —— `(node.actions and id) == id`（`o0/NodeInfo.h()`） */
+    private fun hasActionMask(node: AccessibilityNodeInfo, actionId: Int): Boolean = try {
+        (node.actions and actionId) == actionId
+    } catch (e: Throwable) {
+        false
+    }
+
     private fun hasAction(node: AccessibilityNodeInfo, actionId: Int): Boolean {
         return try {
             node.actionList.any { it.id == actionId }
@@ -311,6 +408,16 @@ object NodeRoleHelper {
             false
         }
     }
+
+    /**
+     * 多 action 判定 —— 任一命中即可
+     *
+     * 【为什么要这个重载】`EventUtils.getNodeType()` 的 Pager 分支
+     * 要判 4 个 PAGE action（可读版 `:148~151`），
+     * 单 id 版本得写四次 ||。
+     */
+    private fun hasAction(node: AccessibilityNodeInfo, vararg actionIds: Int): Boolean =
+        actionIds.any { hasAction(node, it) || hasActionMask(node, it) }
 
     /** 天坦 AbstractC3693m.n0(node, actionId) 的语义 */
     private fun hasScrollAction(node: AccessibilityNodeInfo): Boolean {
@@ -333,4 +440,14 @@ object NodeRoleHelper {
         val cls = node.className?.toString() ?: return false
         return cls.contains("Keyboard\$Key") && node.text != null
     }
+
+    // ==================== PAGE action 常量 ====================
+    //
+    // 天坦用 `R.id.accessibilityActionPageUp` 等兼容 id
+    // （`o0/NodeInfo.java:188~191`），API 29+ 映射到：
+    private const val ACTION_PAGE_UP = 16908360
+    private const val ACTION_PAGE_DOWN = 16908361
+    private const val ACTION_PAGE_LEFT = 16908362
+    private const val ACTION_PAGE_RIGHT = 16908363
+
 }
