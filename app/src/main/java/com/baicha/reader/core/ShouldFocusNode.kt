@@ -48,7 +48,8 @@ import android.view.accessibility.AccessibilityNodeInfo
  *       a0 = isClickable()
  *       l0 = isLongClickable()
  *   k(node) = (isFocusable || hasAction(16)) || (isSelected || hasAction(32))
- *   i(node) = isClickable || isLongClickable
+ *   i(node) = C(node) || B(node)   ← 有文本 或 有状态/进度
+ *              （**不是** isClickable —— 我原先抄错了，见 i() 的注释）
  *   p(node) = hasText(node) && hasChildContent(node)
  *   W(node) = 父节点是 列表(8)/网格(5)/滚动视图(30)/横向滚动(31)
  */
@@ -108,6 +109,19 @@ object ShouldFocusNode {
         tempRect2.setEmpty()
         baselineBounds.setEmpty()
         baselineInitialized = false
+        // ★ 清 p() 的缓存
+        //
+        // 【为什么必须清】这是 IdentityHashMap<AccessibilityNodeInfo, _> ——
+        // 强引用节点。不清会：
+        //   ① 内存持续增长（每个判定过的节点都留在 map 里）
+        //   ② 拖住已回收的节点对象不被 GC
+        //
+        // 天坦的对应缓存 `f39013h` 也在 `C3678d.d()` 里清空。
+        //
+        // 【为什么在这里清而不是只靠容量】本类是「一次操作」作用域的，
+        //   清空成本 O(1)（clear 而非逐个删），且语义清晰：
+        //   每次导航开始 → 上一轮的判定缓存不再有意义。
+        pCache.clear()
     }
 
     /**
@@ -208,7 +222,31 @@ object ShouldFocusNode {
 
             if (z11) {
                 if (node.childCount == 0 || p(node)) return true
-                return k(node) && !k(node)
+                // ★★ 修复真机 P0：这里原是 `k(node) && !k(node)` ——
+                //   **恒为 false**（一个条件与自己取反做与运算），
+                //   导致该分支永不返回 true。
+                //
+                // 【天坦原文】`w7/C3678d.java:379`：
+                //   ```java
+                //   return AbstractC3688i.k(wVar) && !k(wVar);
+                //   ```
+                //   注意：这是**两个不同的函数**，只是都叫 `k` ——
+                //     · `AbstractC3688i.k(node)`  = 静态，`H(node) || N(node)`
+                //       → 本项目对应 `k()`
+                //     · `C3678d.k(node)`          = 实例方法，判断「子节点结构」
+                //       → 本项目对应 `hasChildContent()`
+                //
+                //   我抄写时把两者合并成了同一个 `k()`，于是变成
+                //   `k && !k` —— 语法上合法、测试能过、编译不报错，
+                //   但**逻辑上永远为假**。
+                //
+                // 【影响】所有走到这个分支的节点都被判定为「不可聚焦」，
+                //   导航找不到任何焦点 → 每次滑动都返回 null →
+                //   服务侧触发 `haptic.boundary()`「到达边界」震动。
+                //   这正对应用户的实测描述：
+                //   「左右滑动从来都没有正常获取到焦点过，
+                //     一到边界或者是没有焦点的那种震动反馈」。
+                return k(node) && !hasChildContent(node)
             }
 
             if (i(node) && !isSystemBar(node)) return true
@@ -245,18 +283,260 @@ object ShouldFocusNode {
     }
 
     /**
-     * i(node) = isClickable || isLongClickable —— 天坦 AbstractC3688i.i()
+     * `AbstractC3688i.i(node)` —— **不是** isClickable/isLongClickable
+     *
+     * 【我把这个函数抄错了，本轮修正】
+     * 天坦 `w7/AbstractC3688i.java:120~123`：
+     *   ```java
+     *   public static final boolean i(o0.w wVar) {
+     *       return AbstractC3693m.C(wVar) || AbstractC3693m.B(wVar);
+     *   }
+     *   ```
+     * 即 `C(node) || B(node)`：
+     *   · `C(node)`（`AbstractC3693m.java:337`）= 有文本（text/desc/hint）
+     *       **且不是滚动容器**（`node.s() == null`，即无 collectionInfo）
+     *   · `B(node)`（`:330`）= `J() 非空 || Y() || D()`
+     *       —— 「有可朗读内容」的更宽判定（含进度类）
+     *
+     * 【我原来的实现】写成了 `isClickable || isLongClickable` ——
+     *   这**恰好是**天坦另一个函数（`AbstractC3693m.i()`）的语义，
+     *   两者字母相同但不是同一个东西。
+     *
+     * 【影响】该函数用在 `:238` 的「接受该节点为焦点」分支：
+     *   `if (i(node) && !isSystemBar(node)) return true`
+     *   用错语义会让**纯文本节点被判为不可聚焦** ——
+     *   而聊天/网页里大量焦点目标正是纯文本节点。
+     *   用户表现为「滑不到焦点」。
+     *
+     * 【本项目的映射】
+     *   `C(node)` → [hasText]（已有，语义一致）
+     *   `B(node)` → [hasSpeakableContent]（新增）
      */
-    private fun i(node: AccessibilityNodeInfo): Boolean {
-        return node.isClickable || node.isLongClickable
+    private fun i(node: AccessibilityNodeInfo): Boolean =
+        hasText(node) || hasSpeakableContent(node)
+
+    /**
+     * `AbstractC3693m.B(node)` —— 「有可朗读内容」
+     *
+     * 天坦 `w7/AbstractC3693m.java:330~334`：
+     * ```java
+     * public static boolean B(o0.w wVar) {
+     *     if (wVar != null) {
+     *         return !TextUtils.isEmpty(wVar.J()) || wVar.Y() || D(wVar);
+     *     }
+     *     return false;
+     * }
+     * ```
+     *   · `J()`  = 状态描述（`stateDescription`）
+     *   · `Y()`  = 已勾选/已选中之类的状态
+     *   · `D()`  = 有进度信息（`rangeInfo`）
+     *
+     * 这三者都是「用户能听到内容」的来源 ——
+     * 即使节点没有 text/desc，只要有状态或进度，也应可聚焦。
+     */
+    private fun hasSpeakableContent(node: AccessibilityNodeInfo): Boolean {
+        // J() —— 状态描述
+        val stateDesc = try {
+            node.stateDescription
+        } catch (e: Throwable) {
+            null
+        }
+        if (!stateDesc.isNullOrEmpty()) return true
+
+        // Y() —— 勾选/选中状态
+        if (node.isCheckable || node.isChecked || node.isSelected) return true
+
+        // D() —— 有进度信息（对应 AbstractC3693m.D()：rangeInfo 的区间有效）
+        val range = try {
+            node.rangeInfo
+        } catch (e: Throwable) {
+            null
+        }
+        if (range != null && range.max - range.min > 0f) return true
+
+        return false
     }
 
     /**
      * p(node) —— 天坦 C3678d.p()
      */
     private fun p(node: AccessibilityNodeInfo): Boolean {
-        return hasText(node) && hasChildContent(node)
+        // 【本轮修正】原来是 `hasText(node) && hasChildContent(node)` ——
+        // **与天坦语义完全不符**（那是我自己拼的组合，不是天坦的 p）。
+        //
+        // 天坦 `w7/C3678d.java:301~313`：
+        // ```java
+        // public final boolean p(o0.w wVar) {
+        //     HashMap map = f39013h;                      // ← 有缓存
+        //     Boolean bool = (Boolean) map.get(wVar);
+        //     if (bool != null) return bool.booleanValue();
+        //     boolean z9 = true;
+        //     if (!AbstractC3688i.i(wVar) && !m(wVar)) z9 = false;
+        //     map.put(wVar, Boolean.valueOf(z9));
+        //     return z9;
+        // }
+        // ```
+        // 即 `i(node) || m(node)`：**「自己可朗读」或「有可操作的子节点」**。
+        //
+        // 注意 `i()` 也在本轮被我修正过（原写成 isClickable，
+        // 应为 `C || B` = 有文本 或 有状态/进度）。
+        // 两个错误叠加会让判定结果完全偏离。
+        val cached = pCache[node]
+        if (cached != null) return cached
+
+        val result = i(node) || m(node)
+        // 容量保护：单次操作内节点极多时避免无界增长
+        // （正常导航一轮远小于此，触发即说明树结构异常）
+        if (pCache.size >= P_CACHE_CAPACITY) pCache.clear()
+        pCache[node] = result
+        return result
     }
+
+    /**
+     * `C3678d.m(node)` —— 是否有「可操作的子节点」
+     *
+     * 天坦 `w7/C3678d.java:279~294`：
+     * ```java
+     * public final boolean m(o0.w wVar) {
+     *     int iP = wVar.p();                    // childCount
+     *     for (int i9 = 0; i9 < iP; i9++) {
+     *         o0.w wVarO = wVar.o(i9);          // getChild(i)
+     *         if (wVarO != null) {
+     *             if (!f39012g.add(wVarO)) { wVarO.x0(); return false; }  // 重复 → false
+     *             if (wVarO.s0()                                    // 子节点可见
+     *                 && !o(this, wVarO, false, 2, null)            // 且不是「被过滤的」
+     *                 && ((!p(wVarO) || !AbstractC3693m.W(wVarO)
+     *                      || (AbstractC3693m.H(wVar) && AbstractC3693m.N(wVar)))
+     *                     && p(wVarO))) {                          // 且子节点本身可朗读
+     *                 return true;
+     *             }
+     *         }
+     *     }
+     *     return l(wVar, iP);       // 见下
+     * }
+     * ```
+     *
+     * 【与 p() 构成互递归】`m()` 里调 `p(wVarO)`，`p()` 里又调 `m()`。
+     *   天坦用 `f39013h`（p 的缓存）与 `f39012g`（去重集合）保证收敛。
+     *   本实现用 [pCache] 做同样的事 ——
+     *   **缓存不只是优化，它是终止递归的必要条件**。
+     */
+    private fun m(node: AccessibilityNodeInfo): Boolean {
+        val count = node.childCount
+        val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(4)
+        for (idx in 0 until count) {
+            val child = node.getChild(idx) ?: continue
+            // 重复节点 → 天坦直接 return false
+            if (seen.containsKey(child)) return false
+            seen[child] = true
+
+            if (!child.isVisibleToUser) continue
+
+            val childHasContent = p(child)
+            if (!childHasContent) continue
+
+            // W(child)：父节点是列表/网格/滚动容器
+            val w = W(child)
+            // (H(node) && N(node))：父节点既可点击又可选中
+            val bothClickableAndSelectable = k(node) && nn(node)
+
+            if (!w || bothClickableAndSelectable) {
+                return true
+            }
+        }
+        // 兜底：`l(wVar, iP)` —— 见 l() 的注释
+        return l(node, count)
+    }
+
+    /**
+     * `AbstractC3688i.N(node)` —— 是否「可选中/已选中」
+     *
+     * 天坦 `w7/AbstractC3688i.java`：`N` 与 `k` 是一对 ——
+     *   `k(node)` = `H(node) || N(node)`
+     *   `H(node)` = `isFocusable || hasAction(16)`（可点击）
+     *   `N(node)` = `isSelected || hasAction(32)`（可选中）
+     *
+     * `m()` 里的 `H(wVar) && N(wVar)` 即「父节点**既**可点击**又**可选中」——
+     * 这种父节点通常是「可选中的列表项容器」。
+     */
+    private fun nn(node: AccessibilityNodeInfo): Boolean =
+        node.isSelected || hasAction(node, 32)
+
+    /**
+     * `C3678d.l(node, count)` —— 「存在不可见但含文本的非可操作子节点」
+     *
+     * 天坦 `w7/C3678d.java:265~277`：
+     * ```java
+     * public final boolean l(o0.w wVar, int i9) {
+     *     if (AbstractC3693m.f39046f.accept(wVar)) return false;
+     *     for (int i10 = 0; i10 < i9; i10++) {
+     *         o0.w wVarO = wVar.o(i10);
+     *         if (wVarO != null && !wVarO.s0()          // 不可见
+     *             && AbstractC3693m.C(wVarO)            // 有文本
+     *             && !wVarO.n0()                        // 不可聚焦
+     *             && !AbstractC3688i.j(wVarO)) {        // 且不是「可操作」的
+     *             // "Non-actionable invisible node with text found"
+     *             return true;
+     *         }
+     *     }
+     *     return false;
+     * }
+     * ```
+     *
+     * 【这个判定的用途】某些 App 把可读内容放在**不可见的子节点**里
+     * （无障碍 bug，但真实存在）。此时父容器本身应可聚焦，
+     * 否则用户完全读不到那块内容。
+     *
+     * 【本轮修正】我原来写的是 `count > 3`（凭空猜的阈值）——
+     * 与天坦语义无关。天坦的 `i9` 参数只是循环上界（childCount），
+     * **不是阈值**。
+     */
+    private fun l(node: AccessibilityNodeInfo, count: Int): Boolean {
+        for (idx in 0 until count) {
+            val child = node.getChild(idx) ?: continue
+            val invisible = !child.isVisibleToUser
+            val hasText = hasText(child)
+            val notFocusable = !isFocusableLike(child)
+            val notActionable = !isActionableLike(child)
+            if (invisible && hasText && notFocusable && notActionable) {
+                ReaderLog.d(TAG, "发现「不可见含文本的非可操作子节点」→ 父节点应可聚焦")
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * `o0.w.n0()` —— 「可聚焦」
+     *
+     * 天坦 `AbstractC3688i` 体系里 `n0()` 对应
+     * `isScreenReaderFocusable || isFocusable`。
+     */
+    private fun isFocusableLike(node: AccessibilityNodeInfo): Boolean =
+        isScreenReaderFocusable(node) || node.isFocusable
+
+    /**
+     * `AbstractC3688i.j(node)` —— 「可操作」
+     *
+     * 天坦 `w7/AbstractC3688i.java:125~128`：
+     * ```java
+     * return wVar.g0() || wVar.a0() || wVar.l0()
+     *     || z(wVar, 1, 16, 32)              // isClickable/LongClickable/有 action
+     *     || y(wVar, VAD_z, 2048);           // 有「滚动」类 action
+     * ```
+     */
+    private fun isActionableLike(node: AccessibilityNodeInfo): Boolean =
+        node.isClickable || node.isLongClickable ||
+            hasAction(node, 1, 16, 32, 2048) ||
+            node.isScrollable
+
+    /** p() 的缓存 —— 天坦 `f39013h`；也是互递归终止的必要条件 */
+    private val pCache = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(64)
+
+    /** p() 缓存容量上限 */
+    private const val P_CACHE_CAPACITY = 512
+
+    private const val TAG = "ShouldFocusNode"
 
     /**
      * W(node) —— 天坦 AbstractC3693m.W()
