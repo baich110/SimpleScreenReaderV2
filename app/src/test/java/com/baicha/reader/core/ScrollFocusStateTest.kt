@@ -83,25 +83,6 @@ class ScrollFocusStateTest {
         assertEquals(500L, state(ScrollFocusState.TYPE_SLOW).retryDelay())
     }
 
-    // ==================== 聚焦动作码 ====================
-
-    /**
-     * 动作码映射 —— 对应天坦
-     * `targetType != 0 ? (targetType != 1 ? 10 : 8) : 6`
-     */
-    @Test
-    fun action_code_mapping() {
-        assertEquals(6, state(ScrollFocusState.TYPE_NORMAL).focusActionCode())
-        assertEquals(8, state(ScrollFocusState.TYPE_FAST).focusActionCode())
-        assertEquals(10, state(ScrollFocusState.TYPE_SLOW).focusActionCode())
-    }
-
-    @Test
-    fun unknown_type_falls_back_to_special() {
-        // 任何非 0/1 的值都走「特殊聚焦」
-        assertEquals(10, state(99).focusActionCode())
-    }
-
     // ==================== 常量对齐天坦 ====================
 
     @Test
@@ -109,17 +90,6 @@ class ScrollFocusStateTest {
         assertEquals("重试上限应为 100（天坦 i9 > 100）", 100, ScrollFocusState.MAX_ATTEMPT)
         assertEquals("重试间隔应为 25ms", 25L, ScrollFocusState.RETRY_DELAY_MS)
         assertEquals("慢速延迟应为 500ms", 500L, ScrollFocusState.SLOW_RETRY_DELAY_MS)
-    }
-
-    /**
-     * 聚焦动作码 —— 对应天坦 b0() 里的
-     * `targetType != 0 ? (targetType != 1 ? 10 : 8) : 6`
-     */
-    @Test
-    fun focus_action_codes_match_tantang() {
-        assertEquals(6, ScrollFocusState.ACTION_FOCUS_NORMAL)
-        assertEquals(8, ScrollFocusState.ACTION_FOCUS_FAST)
-        assertEquals(10, ScrollFocusState.ACTION_FOCUS_SPECIAL)
     }
 
     @Test

@@ -1083,6 +1083,14 @@ class ReaderAccessibilityService : AccessibilityService() {
      *   同时替换结果被 `NodeCache` 缓存着，必须清掉。
      */
     fun reloadReplacementRules() {
+        // ⚠️ **当前无调用方** —— 因为还没有朗读替换规则的编辑界面
+        //    （`ui/` 只有 MainActivity 与 TtsSettingsActivity）。
+        //
+        // 规则目前在服务启动时由 `ReadReplacementStore.loadWithBuiltin()`
+        // 加载一次；用户改规则后没有重载路径。
+        //
+        // 【待做】做规则编辑界面时，保存后调用本方法即可生效。
+        // 本方法实现是完整的，不是占位。
         try {
             val n = ReadReplacementStore.loadWithBuiltin(this, replacement)
             CacheRegistry.invalidate(CacheRegistry.Level.CONTENT)
@@ -1128,6 +1136,28 @@ class ReaderAccessibilityService : AccessibilityService() {
      * 【本轮变更】原 `activateNodeByTexts` 只能走节点点击，
      * 且没有调用方。现改走 [ImeAdapter] 的三级降级链：
      * 输入连接 → 节点点击 → 明确失败。
+     *
+     * ⚠️ **当前无调用方 —— 不是遗漏，是缺外部入口**
+     *
+     * 无障碍服务由系统绑定（`BIND_ACCESSIBILITY_SERVICE`），
+     * 第三方 App **无法**通过 `bindService` 拿到它的 Binder，
+     * 所以本方法在应用内没有任何可达路径。
+     *
+     * 天坦的做法（`net/tatans/soundback/TatansImeService.java`，457 行）：
+     *   另起一个普通 `Service`，通过 AIDL
+     *   （`ITatansImeConnection`，十几个方法）暴露给自家输入法，
+     *   输入法 bindService 后调用它完成上屏/播报。
+     *
+     * 【待做】新增 `ImeConnectionService` + AIDL 接口 + Manifest 声明：
+     *   <service android:name=".core.ImeConnectionService"
+     *            android:exported="true"
+     *            android:permission="com.baicha.reader.permission.IME_CONNECTION">
+     *     <intent-filter>
+     *       <action android:name="com.baicha.reader.IME_CONNECTION" />
+     *     </intent-filter>
+     *   </service>
+     *
+     * 见 `docs/框架层审查报告-2026-10-02.md` 的 BUG-2。
      */
     fun commitImeCandidate(text: String): Boolean {
         val method = imeAdapter.commitCandidate(text)
@@ -1151,7 +1181,12 @@ class ReaderAccessibilityService : AccessibilityService() {
     /** 删除光标前字符（输入法退格） */
     fun deleteBackward(count: Int = 1): Boolean = imeAdapter.deleteBackward(count)
 
-    /** 当前是否可接收输入法文字 */
+    /**
+     * 当前是否可接收输入法文字
+     *
+     * ⚠️ **当前无调用方** —— 与 [commitImeCandidate] 同一原因
+     * （缺 AIDL 入口），见上方说明。
+     */
     fun canCommitImeText(): Boolean = imeAdapter.canCommit()
 
     private fun findNodeByTexts(

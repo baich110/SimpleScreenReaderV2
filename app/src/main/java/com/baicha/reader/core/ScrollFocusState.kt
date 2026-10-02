@@ -78,15 +78,6 @@ class ScrollFocusState(
         /** 慢速重试延迟 —— 天坦 targetType==2 时用 500ms */
         const val SLOW_RETRY_DELAY_MS = 500L
 
-        /** 普通聚焦 —— 天坦 6 */
-        const val ACTION_FOCUS_NORMAL = 6
-
-        /** 快速聚焦 —— 天坦 8 */
-        const val ACTION_FOCUS_FAST = 8
-
-        /** 特殊聚焦 —— 天坦 10 */
-        const val ACTION_FOCUS_SPECIAL = 10
-
         /** 目标类型 */
         const val TYPE_NORMAL = 0
         const val TYPE_FAST = 1
@@ -118,15 +109,23 @@ class ScrollFocusState(
         cancelled = true
     }
 
-    /**
-     * 聚焦动作码 —— 对应天坦 `b0()` 里的
-     * `targetType != 0 ? (targetType != 1 ? 10 : 8) : 6`
-     */
-    fun focusActionCode(): Int = when (targetType) {
-        0 -> ACTION_FOCUS_NORMAL
-        1 -> ACTION_FOCUS_FAST
-        else -> ACTION_FOCUS_SPECIAL
-    }
+    // 【已删除】原 focusActionCode() —— 对应天坦
+    //   `targetType != 0 ? (targetType != 1 ? 10 : 8) : 6`
+    //
+    // 删除理由（本轮审查）：
+    //   天坦的 6/8/10 是它**内部** W(node, action) 方法的入参，
+    //   三个值在它那套 self-defined 聚焦流程里有不同路径。
+    //   白茶没有对应的 W() —— 聚焦统一走
+    //   `node.performAction(ACTION_ACCESSIBILITY_FOCUS)`，
+    //   不存在「三种聚焦方式」。
+    //
+    //   所以这个函数**永远不会有语义正确的调用方** ——
+    //   不是「还没接线」，是「本来就不适用」。
+    //   留着只会让人误以为白茶有差异化聚焦能力。
+    //
+    // 注意：`targetType` 本身**仍在用**（决定重试延迟
+    //   TYPE_SLOW → 500ms，见 retryDelay()），那部分是对的。
+    //   被删的只是「用 targetType 算聚焦动作码」这一处。
 
     override fun toString(): String =
         "ScrollFocusState(dir=$direction type=$targetType attempt=$attempt)"
