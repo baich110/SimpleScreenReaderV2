@@ -16,13 +16,44 @@ enum class DiffOp {
 
 /**
  * 差分片段 —— 对应天坦 w7/F 的内部类 b
+ *
+ * ══════════════════════════════════════════════════════════
+ * 【★ 本轮修复：从普通 class 改为 data class（原本没有值语义）】
+ * ══════════════════════════════════════════════════════════
+ *
+ * 它有两个 `val` 字段、没有任何身份语义 —— 是一个**值类型**。
+ * 但原来写成普通 `class`，于是 equals/hashCode 继承自 `Any`（引用相等）：
+ * ```kotlin
+ *   engine.diff("你好", "你好世界") == engine.diff("你好", "你好世界")   // false ❗
+ * ```
+ * 两边内容一模一样，却是**不同实例**，比较结果永远为 false。
+ *
+ * 【为什么算缺陷（而不是「用不到就不算」）】
+ * ① 它是**公开 API 的返回值类型**（`TextDiffEngine.diff()` 返回它）。
+ *    任何使用者写 `if (diff(x,y) == expected)` 都会**静默拿到错误结果**
+ *    —— 永远 false、不报错、不崩溃。这正是目标里点名的模式⑨「静默失败」。
+ * ② **测试无法断言**。本轮实测就撞上了：
+ *    ```
+ *    expected: [EQUAL('你好'), INSERT('世界')]
+ *     but was: [EQUAL('你好'), INSERT('世界')]
+ *    ```
+ *    两边打印**完全相同**，报错信息完全看不出原因 ——
+ *    这种失败极难排查，且容易被误判为「测试不稳定」而放过。
+ * ③ Kotlin 项目惯例就是 `data class`，这里用普通 class 属遗漏。
+ *
+ * 【为什么用 `data class` 而不是手写 equals】
+ * 一次拿全 equals/hashCode/toString/copy，且**不会漏字段** ——
+ * 将来若加字段（如位置偏移），手写 equals 很容易忘记同步。
+ * `@JvmField` 与 `data class` 可共存；原来手写的 `toString()`
+ * 已删除（data class 自动生成，格式与原来一致：`EQUAL('你好')`）。
+ *
+ * 【兼容性】主构造器签名与 `@JvmField val op/text` 均不变，
+ * 生产代码零改动。
  */
-class DiffSegment(
+data class DiffSegment(
     @JvmField val op: DiffOp,
     @JvmField val text: String
-) {
-    override fun toString(): String = "$op('$text')"
-}
+)
 
 /**
  * 文本差分引擎 —— 对应天坦 w7/F（833 行）
