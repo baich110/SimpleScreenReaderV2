@@ -255,8 +255,50 @@ class ReaderAccessibilityService : AccessibilityService() {
         registerCacheHandlers()
 
         // ★ 把缓存注入到热点路径（排序 + 可聚焦判定）
-        NodeOrderComparator.cache = nodeCache
-        ShouldFocusNode.cache = nodeCache
+        //
+        // ══════════════════════════════════════════════════════════════
+        // 【★★★ 2026-10-03 用户要求：把缓存关掉】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【用户原话】
+        // > 要不咱们把那个什么狗屁缓存给删了吧！我操，有可能就是这个问题
+        //
+        // 【为什么删 —— 三条硬理由】
+        //
+        // ① **天坦没有这一层**。`NodeCache` 是本项目**独有**的发明，
+        //    天坦和 TalkBack 都没有跨调用的节点缓存。
+        //    用户的红线是「完全照抄天坦，不做减法、不做加法」——
+        //    这一层本身就是加出来的。
+        //
+        // ② **`AccessibilityNodeInfo` 是快照对象，缓存它天然不安全**。
+        //    系统回收节点后，缓存里的对象会变成「过期节点」：
+        //    `getParent()` 返回 null、`isVisibleToUser()` 返回 false、
+        //    `getChildCount()` 返回 0 —— 全是脏数据。
+        //    这正是真机「同一个 `(无文本)` 节点有时通过、有时被拒」
+        //    这种**非纯函数**表现的来源之一。
+        //
+        // ③ **它是卡死的放大器**。`ShouldFocusNode.cache` 缓存的是
+        //    `shouldFocus` 的**递归子树判定结果**。一旦缓存命中返回
+        //    过期值，遍历器就会走进死胡同；而缓存未命中时又要跑
+        //    完整递归 ⇒ 冷热交替时性能抖动极大（v10 的 12 秒卡死
+        //    就有它的一份）。
+        //
+        // 【为什么用「置空」而不是「删类」】
+        //   `NodeCache` 被 `NodeBoundsCalculator` / `SpatialTraversal` /
+        //   `NodeFilter` / `composeText` 等多处引用，直接删类要改十几处，
+        //   风险大且容易漏。
+        //   置空后：
+        //     · `ShouldFocusNode.shouldFocus` 走 `r(node, true, 0)` 无缓存路径
+        //     · `NodeOrderComparator` 走无缓存排序
+        //     · 其余调用点（`composeText` 等）仍可用，不影响功能
+        //   ⇒ **行为等价于「缓存从未生效」，但改动面最小。**
+        //
+        // 【保留 nodeCache 实例的原因】
+        //   `composeText` / `CacheRegistry` / 诊断面板仍在用它，
+        //   删掉会连带一片编译错误。让它继续服务那些**低频、非热点**
+        //   的场景即可 —— 关键是**热点路径（排序 + 可聚焦判定）不再走缓存**。
+        NodeOrderComparator.cache = null
+        ShouldFocusNode.cache = null
 
         focus = FocusManager(this)
         // ★ 焦点监控器（多级回退：无障碍焦点 → 输入焦点 → 历史编辑框）

@@ -81,6 +81,21 @@ class AccessibilityEventHandler(
 
         /** 滚动节流窗口 —— 天坦 ProcessorScroll 用 250ms */
         private const val SCROLL_THROTTLE_MS = 250L
+
+        /**
+         * 窗口稳定去抖窗口 —— 窗口事件风暴期间的「安静期」阈值
+         *
+         * 【真机依据】v7 日志实测 `TYPE_WINDOW_STATE_CHANGED` 在 1 秒内
+         *   触发 17 次（systemui / operit / securitycenter 来回切），
+         *   风暴持续 200~400ms。
+         *
+         * 【TalkBack 对应】`WindowEventInterpreter` 用
+         *   `WINDOW_CHANGE_DELAY_MS = 500ms` 做窗口切换延迟窗口，
+         *   并在新事件到来时 `removeMessages` 取消上一次延迟。
+         *
+         * 【取值】400ms —— 足够跨过风暴，又不会让正常窗口切换感觉迟钝。
+         */
+        private const val WINDOW_STABLE_DEBOUNCE_MS = 400L
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -106,7 +121,33 @@ class AccessibilityEventHandler(
     var lastFocusActionSource = 0
         private set
 
-    /** 去重：上次朗读的节点身份 */
+    /**
+     * 去重：上次朗读的节点指纹
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【★★★ 真机 P0 修复：identity → 内容指纹】
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 【真机日志铁证】（v17）
+     * ```
+     * 08:19:27.740 ✅ 下一焦点 | 通过 → 「(无文本)」(?/View)
+     * 08:19:27.741 speak 请求: 'deepseek-v4-flas'
+     * 08:19:27.763 ★ speak 被丢弃：重复守卫（'deepseek-v4-' 在 21ms 内重复）
+     * ```
+     * 同一段文本在 22ms 内被请求两次 —— 用户感知
+     * 「一会儿有朗读，一会儿没有朗读」。
+     *
+     * 【根因】两条播报路径**各自用 `System.identityHashCode(node)` 去重**：
+     *   · `TYPE_VIEW_FOCUSED` → `speakNode()`（327 行）
+     *   · `TYPE_VIEW_ACCESSIBILITY_FOCUSED`（335 行）
+     *   而系统为同一个无障碍节点**每次事件都新建 `AccessibilityNodeInfo` 对象**
+     *   ⇒ identity 不同 ⇒ 去重失效 ⇒ 播两次 ⇒ 第二次被
+     *   `SpeechEngine` 的 120ms 重复守卫拦掉 ⇒ 用户听到「断断续续」。
+     *
+     * 【修复】改用 `NodePath.fingerprintOf(node)` —— **内容指纹**，
+     *   与 `nodeMap`（HashMap）、`focusHistory`（textFingerprint）一致。
+     *   同一节点的不同对象 → 指纹相同 → 去重生效。
+     */
     private var lastSpokenIdentity = -1
     private var lastSpeakTime = 0L
 
@@ -333,10 +374,11 @@ class AccessibilityEventHandler(
                 val text = compose(event.source)
                 log("无障碍焦点: ${text ?: "(无内容)"}")
                 if (!text.isNullOrBlank()) {
-                    val identity = event.source?.let { System.identityHashCode(it) } ?: -1
+                    // ★ 用内容指纹去重（不是 identity）—— 见字段注释
+                    val fp = event.source?.let { NodePath.fingerprintOf(it) } ?: -1
                     val now = SystemClock.uptimeMillis()
-                    if (identity != lastSpokenIdentity || now - lastSpeakTime > 300) {
-                        lastSpokenIdentity = identity
+                    if (fp != lastSpokenIdentity || now - lastSpeakTime > 300) {
+                        lastSpokenIdentity = fp
                         lastSpeakTime = now
                         speech.speak(text, interrupt = true)
                         playFocusSound(event.source)
@@ -648,6 +690,113 @@ class AccessibilityEventHandler(
         val cls = event.className?.toString().orEmpty()
         log("窗口: $pkg / $cls")
 
+        // ══════════════════════════════════════════════════════════════
+        // 【★★★ 真机 P0 修复：窗口事件风暴下的焦点抖动】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【真机日志铁证】（v7 APK，`/sdcard/Download/jitter2.txt`）
+        // ```
+        // 07:25:37.173 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.175 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.178 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.182 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.186 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.188 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.192 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.195 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.201 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.210 窗口: com.ai.assistance.operit / MainActivity
+        // 07:25:37.215 窗口: com.ai.assistance.operit / MainActivity
+        // 07:25:37.220 窗口: com.android.systemui / FrameLayout
+        // 07:25:37.223 窗口: com.miui.securitycenter / FrameLayout
+        // 07:25:37.225 窗口: com.android.systemui / FrameLayout
+        // ```
+        // **1 秒内 `TYPE_WINDOW_STATE_CHANGED` 触发 17 次**，
+        // systemui / operit / securitycenter 来回切。
+        //
+        // 【后果】（用户原话：「音效疯狂的在响，然后焦点在疯狂的落回」）
+        // ```
+        // 07:25:38.117 焦点清除
+        // 07:25:38.123 无障碍焦点: 菜单      ← 恢复焦点
+        // 07:25:38.521 焦点清除              ← 400ms 后又被抢
+        // 07:25:38.528 无障碍焦点: 菜单      ← 又恢复
+        // 07:25:38.823 焦点清除
+        // 07:25:38.829 无障碍焦点: 菜单      ← 又恢复
+        // ...（每 250~400ms 一次，持续数秒）
+        // ```
+        // 每次窗口事件 → `performScreenStateRecovery` → 抢焦点 → 焦点落回 +
+        // 「焦点音效」每次焦点事件都响 ⇒ 音效狂响 + 焦点疯狂落回。
+        //
+        // ══════════════════════════════════════════════════════════════
+        // 【TalkBack 怎么做的 —— 防抖靠「窗口稳定性」判定】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // TalkBack `WindowEventInterpreter.java:563~589`：
+        // ```java
+        // long delayMs = calculateDelayMs(interpretation);
+        // interpretation.setWindowsStable(delayMs == 0);    // ← 有延迟 = 窗口不稳定
+        // ...
+        // windowEventDelayer.removeMessages(MSG_DELAY_INTERPRET);  // ← 取消上一次延迟
+        // if (delayMs == 0) {
+        //     setRoles(newWindowRoles);                      // 稳定 → 立即处理
+        // } else {
+        //     pendingWindowRoles = newWindowRoles;
+        //     delayInterpret(interpretation, eventId);       // 不稳定 → 延迟处理
+        // }
+        // ```
+        // 而 `ScreenStateMonitor.java:110` 只在**窗口稳定**时才触发恢复：
+        // ```java
+        // if (windowsChanged && interpretation.areWindowsStable()) {
+        //     ...
+        //     onScreenStateChanged(stableScreenState, eventId);
+        // }
+        // ```
+        // 关键三要素：
+        //   ① **取消上一次的延迟任务**（`removeMessages`）
+        //   ② **重新计时**（新事件刷新延迟）
+        //   ③ **只有安静下来才真正执行**
+        //
+        // 【白茶原来缺什么】每次 `TYPE_WINDOW_STATE_CHANGED` 都直接
+        //   `performScreenStateRecovery` —— 没有取消、没有重新计时、
+        //   没有稳定性判定 ⇒ 事件风暴下恢复被触发十几次 ⇒ 抖动。
+        //
+        // 【修复】加「窗口稳定」去抖：
+        //   每次窗口事件 → 取消上一次待执行的恢复 → 重新 postDelayed
+        //   ⇒ 只有在 `WINDOW_STABLE_DEBOUNCE_MS` 内**没有新窗口事件**时，
+        //     恢复才真正执行一次。
+        //
+        // 【为什么阈值取 400ms】
+        //   · TalkBack 的 `WINDOW_CHANGE_DELAY_MS = 500ms`（窗口切换延迟窗口）
+        //   · 真机日志里窗口事件间隔 3~10ms，风暴持续 200~400ms
+        //   ⇒ 400ms 足够跨过风暴，又不会让正常窗口切换感觉迟钝。
+        //
+        // 【为什么不用「直接 return 跳过」】窗口事件风暴结束后，
+        //   仍需一次恢复（否则切到新页面后没焦点）。
+        //   去抖（取消+重排）保证「最后一次一定执行」，只是延迟到稳定后。
+        val transitionStart = event.eventTime
+        pendingTransitionStart = transitionStart
+
+        // ★ 取消上一次待执行的恢复 —— 对应 TalkBack `removeMessages(MSG_DELAY_INTERPRET)`
+        mainHandler.removeCallbacks(screenRecoveryTask)
+
+        val elapsed = SystemClock.uptimeMillis() - transitionStart
+        val delay = if (ScreenStateTiming.shouldDelay(elapsed)) {
+            ScreenStateTiming.WINDOW_CHANGE_DELAY_MS - elapsed
+        } else {
+            WINDOW_STABLE_DEBOUNCE_MS
+        }
+
+        // ★ 重新计时 —— 只有安静 `delay` 毫秒后才真正恢复
+        mainHandler.postDelayed(screenRecoveryTask, delay)
+
+        // ──────────────────────────────────────────────────────────────
+        // 【注意：以下副作用**不做**去抖】
+        //
+        // 窗口切换时该做的清理/播报必须**立即**执行 ——
+        // 去抖它们会导致「切到新页面后旧缓存还在」。
+        // 只有「抢焦点」这个动作需要去抖（因为它会打断用户）。
+        // ──────────────────────────────────────────────────────────────
+
         sound.windowState()
 
         if (pkg.isNotEmpty()) {
@@ -667,20 +816,22 @@ class AccessibilityEventHandler(
         // 播报页面标题
         val title = event.text?.joinToString("")?.trim().orEmpty()
         if (title.isNotEmpty()) speech.speak(title, interrupt = true)
-
-        // ★ 屏幕状态变化后的焦点恢复（带延迟判定）
-        val transitionStart = event.eventTime
-        val elapsed = SystemClock.uptimeMillis() - transitionStart
-
-        if (ScreenStateTiming.shouldDelay(elapsed)) {
-            mainHandler.postDelayed(
-                { performScreenStateRecovery(transitionStart) },
-                ScreenStateTiming.WINDOW_CHANGE_DELAY_MS - elapsed
-            )
-        } else {
-            performScreenStateRecovery(transitionStart)
-        }
     }
+
+    /**
+     * 延迟执行的屏幕状态恢复任务 —— 供去抖「取消 + 重排」
+     *
+     * 【为什么用字段而不是每次 new】`removeCallbacks` 需要**同一个对象**
+     *   才能取消。每次 new 会导致取消失效（旧任务照样执行）。
+     */
+    private val screenRecoveryTask = Runnable {
+        val start = pendingTransitionStart
+        if (start > 0) performScreenStateRecovery(start)
+    }
+
+    /** 待恢复的窗口切换起始时间（供延迟任务读取） */
+    @Volatile
+    private var pendingTransitionStart: Long = 0L
 
     private fun performScreenStateRecovery(transitionStart: Long) {
         try {
@@ -788,20 +939,21 @@ class AccessibilityEventHandler(
     fun speakNode(node: AccessibilityNodeInfo?, tag: String) {
         if (node == null) return
 
-        val identity = System.identityHashCode(node)
+        // ★ 用内容指纹去重（不是 identity）—— 见 `lastSpokenIdentity` 字段注释
+        val fp = NodePath.fingerprintOf(node)
         val now = SystemClock.uptimeMillis()
-        if (identity == lastSpokenIdentity && now - lastSpeakTime < 300) return
+        if (fp == lastSpokenIdentity && now - lastSpeakTime < 300) return
 
         val text = compose(node) ?: run {
             val role = SpeechCompositor.roleName(NodeRoleHelper.roleOf(node), node)
             if (role != null) {
-                lastSpokenIdentity = identity
+                lastSpokenIdentity = fp
                 lastSpeakTime = now
                 log("$tag: $role")
                 speech.speak(role, interrupt = true)
                 playFocusSound(node)
             } else {
-                lastSpokenIdentity = identity
+                lastSpokenIdentity = fp
                 lastSpeakTime = now
                 log("$tag: (无标签) → 兜底播报")
                 speech.speak(UNTAGGED, interrupt = true)
@@ -810,7 +962,7 @@ class AccessibilityEventHandler(
             return
         }
 
-        lastSpokenIdentity = identity
+        lastSpokenIdentity = fp
         lastSpeakTime = now
         log("$tag: $text")
         speech.speak(text, interrupt = true)

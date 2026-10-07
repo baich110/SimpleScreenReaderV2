@@ -180,6 +180,39 @@ object ShouldFocusNode {
     var cache: NodeCache? = null
 
     fun shouldFocus(node: AccessibilityNodeInfo?): Boolean {
+        // ══════════════════════════════════════════════════════════════
+        // 【★★★ 2026-10-03 用户指令：完全对齐 TalkBack】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【用户原话】
+        // > 你把这些规则，那些你把这些算法，像 TalkBack 看齐行不行？一次性补全行不行
+        //
+        // 【为什么换掉天坦实现】
+        //   下面这 2000 行抄的是天坦 `shouldFocusNodeInternal`，
+        //   带大量天坦私有补丁（isInRecyclerView / isSamsungAdapterView /
+        //   isType15 / isSystemBar / NodeCache 缓存层）。
+        //
+        //   真机表现：建树 107 个节点，可聚焦的只有 2 个 ——
+        //   焦点在 EditText ↔ View 之间无限横跳，走不到对话内容。
+        //
+        // 【新实现】`TalkBackShouldFocus` —— 1:1 移植 TalkBack
+        //   `AccessibilityNodeInfoUtils.shouldFocusNode()` 的 7 步判定链。
+        //   干净、可解释、无私有补丁。
+        //
+        // 【保留天坦实现的原因】下面的 `r()` 等函数仍被
+        //   `isActionableLike()` 等辅助 API 使用，暂不删除。
+        //   等真机验证 TalkBack 版稳定后再清理。
+        // ══════════════════════════════════════════════════════════════
+        return TalkBackShouldFocus.shouldFocus(node)
+    }
+
+    /**
+     * 天坦原实现 —— **已停用**，保留供对比/回滚
+     *
+     * 【停用原因】见 [shouldFocus] 上方注释。
+     * 【回滚方法】把 [shouldFocus] 改成 `return legacyShouldFocus(node)`。
+     */
+    private fun legacyShouldFocus(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
 
         // ★★ 本轮修正（真机 P0）：清空「本轮已访问子节点」集合

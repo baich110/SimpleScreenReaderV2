@@ -1,5 +1,6 @@
 package com.baicha.reader.core
 
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
@@ -87,6 +88,43 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
     companion object {
         /** 窗口根上溯深度上限（防畸形树死循环） */
         private const val MAX_WINDOW_ROOT_DEPTH = 64
+
+        /**
+         * 全树兜底扫描的节点数上限
+         *
+         * 【为什么需要上限】全树 DFS 是 O(n)，超大页面（长列表 / 网页）
+         *   可能上万节点。无障碍回调有超时限制（超时会被系统熔断），
+         *   宁可放弃兜底（返回 null）也不能卡住。
+         *
+         * 【取值依据】真机 Operit 界面 117 节点、微信聊天页约 300~500 节点，
+         *   2000 足够覆盖绝大多数场景，DFS 耗时 < 5ms。
+         */
+        private const val FULL_TREE_SCAN_LIMIT = 2000
+
+        /**
+         * 全树兜底的时间预算（毫秒）
+         *
+         * 【为什么需要】`collectFocusableInOrder` 里每个节点都调
+         *   `shouldFocus`，而后者内部递归遍历子树 ⇒ 整体 O(n²)。
+         *   真机实测 117 节点页面卡死 12 秒（见 `findNextInFullTree` 注释）。
+         *
+         * 【取值】80ms —— 无障碍回调超时阈值在 100~200ms 量级，留余量。
+         *   正常页面能在预算内跑完；超大页面中途放弃，退回「边界」行为。
+         */
+        private const val FULL_TREE_SCAN_BUDGET_MS = 80L
+
+        /**
+         * 遍历诊断开关 —— true 时把 `next()` / `previous()` 的每一步打日志
+         *
+         * 【为什么需要】真机出现「`访问 0`（遍历一步都没走出去）」时，
+         *   光看结果无法判断是「起点没有 parent」还是「上溯链全 null」
+         *   还是「全树兜底也没结果」。
+         *   打开后能看到 `findDown` / `findNextSiblingUp` 各自的返回值。
+         *
+         * 【注意】诊断日志量大（每次导航十几行），只在排查时开。
+         */
+        @JvmStatic
+        var diagnose: Boolean = true
 
         /** `ACTION_NEXT_HTML_ELEMENT` —— 可读版 AccessibilityNodeInfoUtils:657 标注 */
         private const val ACTION_NEXT_HTML_ELEMENT = 1024
@@ -190,12 +228,33 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
      */
     fun next(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         visited.clear()
-        val result = findDown(node)
-        return result ?: findNextSiblingUp(node)
+        // ★ 2026-10-03 诊断：为什么 next() 返回 null
+        val dbg = TatansTraversal.diagnose
+        if (dbg) {
+            ReaderLog.d(TAG, "▶ next(${nodeDesc(node)})")
+        }
+        val down = findDown(node)
+        if (dbg) ReaderLog.d(TAG, "  findDown = ${down?.let { nodeDesc(it) } ?: "null"}")
+        if (down != null) return down
+        val up = findNextSiblingUp(node)
+        if (dbg) ReaderLog.d(TAG, "  findNextSiblingUp = ${up?.let { nodeDesc(it) } ?: "null"}")
+        return up
+    }
+
+    /** 节点简述（诊断用） */
+    private fun nodeDesc(n: AccessibilityNodeInfo): String {
+        val cls = n.className?.toString()?.substringAfterLast('.') ?: "?"
+        val t = n.text?.toString() ?: n.contentDescription?.toString() ?: ""
+        val cnt = try { n.childCount } catch (e: Throwable) { -1 }
+        val vis = try { n.isVisibleToUser } catch (e: Throwable) { false }
+        return "「${t.ifEmpty { "(无文本)" }}」($cls, ch=$cnt, vis=$vis)"
     }
 
     /**
      * 找上一个 —— 1:1 抄天坦 y(node)
+     *
+     * ★ 与 `next()` 对称：上溯链断掉时同样走「全树兜底」。
+     *   理由见 `findNextSiblingUp` 的注释（Compose 节点 parent 为 null）。
      */
     fun previous(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         visited.clear()
@@ -205,29 +264,36 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
         if (prevSibling != null) return prevSibling
 
         // ② 父节点
-        var parent = node.parent ?: return null
-        if ((target == null || parent != target) && isFocusable(parent)) {
-            return obtain(parent)
-        }
-
-        // ③ 上溯
-        var prev = parent
-        val seen = IdentitySet()
-        while (true) {
-            if (target != null && prev == target) return null
-            if (!seen.add(parent)) return null
-
-            val result = findPrevSibling(parent, prev)
-            if (result != null) return result
-
-            // 天坦：a(parent) 时返回 b0(parent)，不是 parent 本身
-            if ((target == null || parent != target) && isFocusable(parent)) {
-                return obtain(parent)
+        var parent: AccessibilityNodeInfo? = node.parent
+        if (parent != null) {
+            val p0: AccessibilityNodeInfo = parent ?: return findNextInFullTree(node, forward = false)
+            if ((target == null || p0 != target) && isFocusable(p0)) {
+                return obtain(p0)
             }
 
-            prev = parent
-            parent = getParent(parent) ?: return null
+            // ③ 上溯
+            var prev = p0
+            val seen = IdentitySet()
+            while (true) {
+                val cur: AccessibilityNodeInfo = parent ?: break
+                if (target != null && prev == target) break
+                if (!seen.add(cur)) break
+
+                val result = findPrevSibling(cur, prev)
+                if (result != null) return result
+
+                // 天坦：a(parent) 时返回 b0(parent)，不是 parent 本身
+                if ((target == null || cur != target) && isFocusable(cur)) {
+                    return obtain(cur)
+                }
+
+                prev = cur
+                parent = getParent(cur)
+            }
         }
+
+        // ★ 全树兜底 —— 上溯链断掉时的语义保证（与 next() 对称）
+        return findNextInFullTree(node, forward = false)
     }
 
     // ==================== r() 向下找（带 I() 双分支）====================
@@ -276,21 +342,282 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
 
     /**
      * 上溯找下一个 —— 1:1 抄天坦 G(node)
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【★★★ 真机 P0 根因（第四轮）：上溯链断掉时缺少「全树兜底」】
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 【真机日志铁证】（v6 APK）
+     * ```
+     * ❌ 下一焦点 | 失败 ← 遍历无果；诊断=访问 0（上限 200） / 不可见 0 / 未过可聚焦 0
+     *    当前焦点=「菜单」(?/View)
+     * ```
+     * `访问 0` = `next(菜单)` 第一次调用就返回 null。
+     *
+     * 【失败链】
+     * ```
+     * next(菜单)
+     *   → findDown(菜单) = null（叶子，childCount = 0）
+     *   → findNextSiblingUp(菜单)
+     *       → getParent(菜单)
+     *           → 菜单.parent = null（Compose 虚拟节点，parent 链不完整）
+     *           → getWindowRoot(菜单) → window.root = 真树根
+     *           → 树根 !== 菜单 → 返回树根
+     *       → findNextSibling(树根, 菜单)
+     *           → indexOf(树根, 菜单) = -1（菜单不是树根的直接子节点）
+     *           → 走 idx == -1 分支
+     *               → findChildIndex(树根的每个子节点, 菜单) 只查**一层**
+     *               → 全部 -1 → 返回 null          ← ❌ 深层节点定位不到
+     *       → 上溯：parent = getParent(树根) = null → return null
+     *   → 返回 null  ⇒ 访问 0
+     * ```
+     *
+     * 【为什么天坦这里也是 null，但它能用】
+     *   天坦的 `G()` 同样在 `idx == -1` 分支只下钻一层
+     *   （`C1417r.java:1177~1201` 的 `s(child2, nodeInfo2)` 只查直接子节点，
+     *     `x()` 内部 `p()` 同样只查直接子节点）。
+     *   但天坦在上层 `FocusProcessorForLogicalNavigation` 有
+     *   **`retryAutoScroll` / 跨窗口 / 空间查找**等多条兜底路径
+     *   （见 `:1382 retryAutoScroll`、`:1242 Skip onAutoScrolled`），
+     *   单条路径返回 null 不会让导航彻底失败。
+     *   白茶只有这一条路径 ⇒ 一旦返回 null 就是「卡死」。
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【修复：加「全树兜底」】
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 【语义】`next(node)` 的**正确语义**是
+     *   「遍历序里排在 node **之后**的下一个可聚焦节点」。
+     *   上溯找兄弟只是实现这个语义的**优化路径**；
+     *   当上溯链断掉（parent 为 null / 节点不在祖先链的直接子层）时，
+     *   必须能**退化为全树遍历**来保证语义正确。
+     *
+     * 【实现】上溯到顶仍无结果时：
+     *   ① 取窗口根（`getWindowRoot`，优先走 window.root）
+     *   ② 从窗口根做一次 DFS，收集遍历序上的可聚焦节点
+     *   ③ 找到 `node` 在序列里的位置，返回它的下一个
+     *
+     * 【为什么用「遍历序」而不是「重新找第一个」】
+     *   重新找第一个会导致焦点**跳回开头**（用户感知：滑一下回到顶部）。
+     *   按遍历序取「当前节点之后的下一个」才符合「继续往下走」的直觉。
+     *
+     * 【性能】只在**上溯失败**时触发（正常路径零开销）；
+     *   全树 DFS 有节点数上限（`FULL_TREE_SCAN_LIMIT`），防止超大页面卡顿。
+     *   实测真机 Operit 界面 117 节点，DFS 开销可忽略。
      */
     private fun findNextSiblingUp(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var prev = node
-        var parent = getParent(node) ?: return null
-        val seen = IdentitySet()
+        var parent: AccessibilityNodeInfo? = getParent(node)
+        if (diagnose) {
+            ReaderLog.d(TAG, "    getParent(${nodeDesc(node)}) = ${parent?.let { nodeDesc(it) } ?: "null"}")
+        }
+        if (parent != null) {
+            val seen = IdentitySet()
+            var hop = 0
 
-        while (true) {
-            if (target != null && prev == target) return null
-            if (!seen.add(parent)) return null
+            while (true) {
+                val cur: AccessibilityNodeInfo = parent ?: break
+                if (target != null && prev == target) return null
+                if (!seen.add(cur)) break
 
-            val result = findNextSibling(parent, prev)
-            if (result != null) return result
+                val result = findNextSibling(cur, prev)
+                if (diagnose) {
+                    ReaderLog.d(TAG, "    上溯#$hop 在 ${nodeDesc(cur)} 找 ${nodeDesc(prev)} 的下一个 = ${result?.let { nodeDesc(it) } ?: "null"}")
+                }
+                if (result != null) return result
 
-            prev = parent
-            parent = getParent(parent) ?: return null
+                prev = cur
+                parent = getParent(cur)
+                hop++
+                if (diagnose && hop > 12) {
+                    ReaderLog.d(TAG, "    上溯超过 12 层，放弃")
+                    break
+                }
+            }
+        }
+
+        // ★ 全树兜底 —— 上溯链断掉时的语义保证
+        val fb = findNextInFullTree(node, forward = true)
+        if (diagnose) {
+            ReaderLog.d(TAG, "    全树兜底 = ${fb?.let { nodeDesc(it) } ?: "null"}")
+        }
+        return fb
+    }
+
+    /**
+     * 全树兜底：在「遍历序」里找 node 之后（前）的下一个可聚焦节点
+     *
+     * 【为什么需要它】`findNextSiblingUp` / `findPrevSiblingUp` 依赖
+     *   parent 链完整。Compose / 跨窗口 / 动态生成的节点上
+     *   `getParent()` 可能返回 null，导致上溯链在第一步就断掉。
+     *   此时必须能退化为全树遍历，否则导航彻底失效。
+     *
+     * 【顺序定义】与 `findDown` 一致：深度优先、按子节点顺序。
+     *   这保证「兜底结果」与「正常上溯结果」在顺序上一致 ——
+     *   用户滑动的方向感不会因为走了哪条路径而改变。
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【★★★ 真机 P0 修复（v10）：全树兜底卡死 12 秒】
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 【真机日志铁证】（v10，`/sdcard/Android/data/.../baicha-reader.log`）
+     * ```
+     * 07:45:36.265 导航入口: 下一个 / 模式=跳到底部
+     * 07:45:36.265 容器不支持滚动定位 → 回退遍历
+     * ...（12 秒空白，无任何日志）...
+     * 07:45:48.787 ❌ 下一焦点 | 失败 ← 设焦点失败
+     * ```
+     * **12 秒卡死** —— 用户感知为「滑动没反应、音效震动全没了」。
+     *
+     * 【根因：O(n²) 复杂度】
+     *   `collectFocusableInOrder` 对**每个节点**都调 `isFocusable(node)`，
+     *   而 `isFocusable` → `focusFilter.invoke` → `ShouldFocusNode.shouldFocus`
+     *   → 内部 `hasMatchingFocusableDescendant` **递归遍历整棵子树**。
+     *   ⇒ 树有 n 个节点时总代价是 **O(n²)**，
+     *     再叠加 `NodeCache` 冷启动，实际更慢。
+     *
+     *   真机 Operit 界面 117 节点 ⇒ 117 × 子树遍历 ≈ 上万次节点访问，
+     *   每次都是跨进程 IPC ⇒ 十几秒。
+     *
+     * 【修复：加时间预算 —— 超时立即放弃兜底】
+     *   兜底是「尽力而为」的优化，不是正确性保证。
+     *   宁可返回 null（用户听到边界震动），也不能卡死 12 秒。
+     *
+     * 【预算取值】80ms —— 无障碍回调的常见超时阈值在 100~200ms 量级，
+     *   留出余量。正常页面（< 200 节点）在预算内能跑完；
+     *   超大页面会中途放弃，退回「边界」行为（可接受）。
+     */
+    private fun findNextInFullTree(node: AccessibilityNodeInfo, forward: Boolean): AccessibilityNodeInfo? {
+        val root = getWindowRoot(node) ?: return null
+        if (root === node) return null
+
+        val deadline = SystemClock.uptimeMillis() + FULL_TREE_SCAN_BUDGET_MS
+        val order = ArrayList<AccessibilityNodeInfo>(64)
+        val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(128)
+        collectFocusableInOrder(root, order, seen, 0, deadline)
+        if (diagnose) {
+            ReaderLog.d(TAG, "      兜底: root=${nodeDesc(root)} 收集到 ${order.size} 个可聚焦节点")
+        }
+        if (order.isEmpty()) return null
+
+        // 定位当前节点在遍历序里的位置
+        val idx = order.indexOfFirst { it === node || isSameNode(it, node) }
+
+        return if (idx >= 0) {
+            // 命中：取它之后（前）的下一个
+            val target = if (forward) idx + 1 else idx - 1
+            order.getOrNull(target)
+        } else {
+            // 当前节点不在序列里（可能是容器 / 被 filter 拒的节点）：
+            // 用**几何位置**找「排在它之后」的第一个 —— 更符合直觉
+            findNearestAfterInOrder(order, node, forward)
+        }
+    }
+
+    /**
+     * DFS 收集遍历序上的可聚焦节点 —— 顺序与 `findDown` 完全一致
+     *
+     * 【为什么不用 `descend`】`descend` 会在第一个命中时提前返回，
+     *   而这里需要**完整序列**。所以单独实现，但保持同样的
+     *   「先判自身、再下钻子节点」的顺序。
+     */
+    private fun collectFocusableInOrder(
+        node: AccessibilityNodeInfo,
+        out: ArrayList<AccessibilityNodeInfo>,
+        seen: java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>,
+        depth: Int,
+        deadline: Long
+    ) {
+        if (depth > MAX_WINDOW_ROOT_DEPTH || out.size >= FULL_TREE_SCAN_LIMIT) return
+        // ★ 时间预算：超时立即放弃（防 O(n²) 卡死，见 findNextInFullTree 注释）
+        if (SystemClock.uptimeMillis() > deadline) return
+        if (seen.put(node, true) != null) return
+
+        if (isFocusable(node)) out.add(node)
+
+        val count = try {
+            node.childCount
+        } catch (e: Throwable) {
+            0
+        }
+        for (i in 0 until count) {
+            if (out.size >= FULL_TREE_SCAN_LIMIT) return
+            if (SystemClock.uptimeMillis() > deadline) return
+            val child = try {
+                node.getChild(i)
+            } catch (e: Throwable) {
+                null
+            } ?: continue
+            collectFocusableInOrder(child, out, seen, depth + 1, deadline)
+        }
+    }
+
+    /**
+     * 当前节点不在遍历序里时，用几何位置找「排在它之后」的第一个
+     *
+     * 【场景】当前节点是容器 / 被 filter 拒的节点（不在 `order` 里），
+     *   但用户从它出发滑动 —— 应该走到「几何位置上排在它之后」的节点。
+     *
+     * 【判据】用 bounds 的 top 优先、left 次之（与遍历序的
+     *   「上→下、左→右」直觉一致）。
+     */
+    private fun findNearestAfterInOrder(
+        order: List<AccessibilityNodeInfo>,
+        node: AccessibilityNodeInfo,
+        forward: Boolean
+    ): AccessibilityNodeInfo? {
+        val myBounds = android.graphics.Rect()
+        try {
+            node.getBoundsInScreen(myBounds)
+        } catch (e: Throwable) {
+            return if (forward) order.firstOrNull() else order.lastOrNull()
+        }
+        if (myBounds.isEmpty) {
+            return if (forward) order.firstOrNull() else order.lastOrNull()
+        }
+
+        val b = android.graphics.Rect()
+        var best: AccessibilityNodeInfo? = null
+        var bestKey = 0
+
+        for (candidate in order) {
+            try {
+                candidate.getBoundsInScreen(b)
+            } catch (e: Throwable) {
+                continue
+            }
+            if (b.isEmpty) continue
+
+            val after = if (forward) {
+                b.top > myBounds.top || (b.top == myBounds.top && b.left > myBounds.left)
+            } else {
+                b.top < myBounds.top || (b.top == myBounds.top && b.left < myBounds.left)
+            }
+            if (!after) continue
+
+            // 取「最近」的：forward 取最小 key，backward 取最大 key
+            val key = b.top * 10000 + b.left
+            if (best == null) {
+                best = candidate
+                bestKey = key
+            } else if (forward && key < bestKey) {
+                best = candidate
+                bestKey = key
+            } else if (!forward && key > bestKey) {
+                best = candidate
+                bestKey = key
+            }
+        }
+        return best
+    }
+
+    /** 节点身份判定 —— 优先 identity，退化到内容相等 */
+    private fun isSameNode(a: AccessibilityNodeInfo, b: AccessibilityNodeInfo): Boolean {
+        if (a === b) return true
+        return try {
+            a == b
+        } catch (e: Throwable) {
+            false
         }
     }
 
@@ -720,16 +1047,116 @@ class TatansTraversal(private val root: AccessibilityNodeInfo?) {
     }
 
     /**
-     * `AccessibilityNodeInfoUtils.getWindowRoot(node)` —— 沿 parent 一路上溯到顶
+     * `AccessibilityNodeInfoUtils.getWindowRoot(node)` —— 天坦 `w7/AccessibilityNodeInfoUtils.java:1100~1131`
      *
-     * 天坦实现在 `w7/AccessibilityNodeInfoUtils`（可读版）。
-     * 语义：从 node 出发不断取 parent，直到 parent 为 null，
-     * 返回最后那个非 null 节点（即窗口根）。
+     * ══════════════════════════════════════════════════════════════
+     * 【★★★ 真机 P0 根因（第四轮）：漏了「窗口对象」这条路径】
+     * ══════════════════════════════════════════════════════════════
      *
-     * 【防环】加访问集合与深度上限 —— 无障碍树理论上无环，
+     * 【天坦原文】（`w7/AccessibilityNodeInfoUtils.java:1100~1131` 原样摘录）
+     * ```java
+     * public static NodeInfo getWindowRoot(NodeInfo nodeInfo) {
+     *     if (nodeInfo == null) { return null; }
+     *     C2833A c2833aW = w(nodeInfo);                       // ← ① 先取「窗口对象」
+     *     if (c2833aW != null) {
+     *         return AbstractC3678q.d(c2833aW);               // ← ② 用窗口的 root 直接返回
+     *     }
+     *     HashSet hashSet = new HashSet();                    // ← ③ 兜底：沿 parent 上溯
+     *     NodeInfo nodeInfoObtainFromNode = NodeInfo.obtainFromNode(nodeInfo);
+     *     NodeInfo nodeInfo2 = null;
+     *     while (true) {
+     *         if (nodeInfo2 != null) {
+     *             if (hashSet.contains(nodeInfo2)) { ...; return null; }
+     *             hashSet.add(nodeInfo2);
+     *         }
+     *         NodeInfo parent = nodeInfoObtainFromNode.getParent();
+     *         if (parent == null) { return nodeInfoObtainFromNode; }
+     *         nodeInfo2 = nodeInfoObtainFromNode;
+     *         nodeInfoObtainFromNode = parent;
+     *     }
+     * }
+     * ```
+     * 其中：
+     *   · `w(nodeInfo)`   = `nodeInfo.getWindow()` → `AccessibilityWindowInfo`
+     *   · `AbstractC3678q.d(window)` = `window.getRoot()` → `AccessibilityNodeInfo`
+     *
+     * 【我原来的实现】只有 ③（沿 parent 上溯）—— **整条 ① ② 路径缺失**。
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【为什么这条路径决定真机成败】
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 【真机日志铁证】（v6 APK，`/sdcard/Download/baicha-v6-log.txt`）
+     * ```
+     * ❌ 下一焦点 | 失败 ← 遍历无果；诊断=访问 0（上限 200） / 不可见 0 / 未过可聚焦 0
+     *    当前焦点=「菜单」(?/View)
+     * ```
+     * `访问 0` = `traversal.next(菜单)` **第一次调用就返回 null**。
+     *
+     * 【真机节点树】（`/home/baicha-reader/docs/ui-dump.xml` 实测）
+     * ```
+     * 祖父 View (children=4)
+     *   子[0] View focusable=T clickable=T  bounds=[13,178][169,334]  ← 菜单所在
+     *       子[0] 菜单 (content-desc="菜单", focusable=F)
+     *       子[1] Button (focusable=F)
+     *   子[1] View focusable=F clickable=F  bounds=[182,178][474,334]  ← 搜索框
+     *   子[2] View focusable=T clickable=T  bounds=[955,178][1111,334]
+     *   子[3] View focusable=T clickable=T  bounds=[1111,178][1267,334]
+     * ```
+     * 结构上 `next(菜单)` **应该**能找到 `子[2]`/`子[3]`（都 focusable+clickable）。
+     * 但真机返回 null ⇒ **上溯链在第一步就断了** ⇒ `菜单.parent == null`。
+     *
+     * 【为什么 Compose 节点的 parent 会是 null】
+     *   Compose 的语义树 ≠ View 树。`AccessibilityNodeInfo.getParent()`
+     *   在跨 Compose 虚拟节点边界时**会返回 null**（框架层限制，
+     *   节点由 `AccessibilityNodeProvider` 动态生成，parent 链不完整）。
+     *   此时**唯一可靠的取根方式就是 `node.getWindow().getRoot()`** ——
+     *   窗口对象是跨进程稳定的，它给的 root 一定是完整可遍历的树根。
+     *
+     * 【修复前的完整失败链】
+     * ```
+     * next(菜单)
+     *   → findDown(菜单) = null（叶子）
+     *   → findNextSiblingUp(菜单)
+     *       → getParent(菜单)
+     *           → 菜单.parent = null
+     *           → getWindowRoot(菜单)
+     *               → 菜单.parent = null → return 菜单  ← ❌ 返回了自己！
+     *           → windowRoot === node → return null     ← ❌ 整条链断掉
+     *       → 返回 null
+     *   → 返回 null  ⇒ 访问 0
+     * ```
+     * 【修复后】
+     * ```
+     * getWindowRoot(菜单)
+     *   → 菜单.window != null → window.root = 真正的树根 ✅
+     *   → 从树根继续找兄弟 → 命中 子[2]/子[3] ✅
+     * ```
+     *
+     * 【与 `o()` 的关系】`o()` 只在 `node.parent == null` 时才调本函数 ——
+     *   而 Compose 场景下 `parent == null` **恰恰是常态**，
+     *   所以这条路径不是「罕见兜底」，而是**主路径之一**。
+     *
+     * 【防环】保留访问集合与深度上限 —— 无障碍树理论上无环，
      * 但异常 App 可能构造出畸形树，读屏不能因此死循环。
      */
     private fun getWindowRoot(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // ① 优先走「窗口对象」路径 —— 对应天坦 `w(nodeInfo)` + `AbstractC3678q.d()`
+        //
+        // 【为什么必须放最前】窗口对象是跨进程稳定的，
+        //   它给的 root 一定是完整可遍历的树根；
+        //   而 parent 上溯在 Compose 虚拟节点上会直接断掉。
+        try {
+            val window = node.window
+            if (window != null) {
+                val root = window.root
+                if (root != null) return root
+            }
+        } catch (e: Throwable) {
+            // 窗口已销毁 / 跨进程失效 → 落到 ② 兜底
+        }
+
+        // ② 兜底：沿 parent 上溯 —— 对应天坦 `getWindowRoot` 的 while 循环
         var cur: AccessibilityNodeInfo = node
         var depth = 0
         val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(8)

@@ -233,27 +233,86 @@ object ReaderLog {
 
     /**
      * 初始化日志系统
-     * 优先写 /sdcard/Download/baicha-reader.log（我能直接读）
-     * 失败则写 App 私有目录
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【★★★ 2026-10-03 修复：日志写不出去 / 死掉了就丢】
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 【用户要求】（原话）
+     * > 声明所有文件访问权限。然后以后的日志存文件行不行？
+     * > 死掉了都不会丢的那种
+     *
+     * 【原来的问题】
+     *   ① 首选 `/sdcard/Download/baicha-reader.log` —— 但
+     *      `Environment.getExternalStoragePublicDirectory` 在 Android 11+
+     *      需要 `MANAGE_EXTERNAL_STORAGE` **用户手动授权**
+     *      （manifest 声明不够，且 MIUI 上 `appops set` 也常被拦）。
+     *      真机实测：`appops get com.baicha.reader MANAGE_EXTERNAL_STORAGE`
+     *      → `default`（未授权）⇒ 外部写入**静默失败**。
+     *   ② 兜底写 `context.filesDir/logs`（`/data/data/.../files/logs`）——
+     *      能写，但**只有 app 自己能读**，排查时要 `run-as`，
+     *      而且 app 被杀后文件虽然还在，但取日志很麻烦。
+     *
+     * 【真机证据】v9 启动后日志文件停在 `07:11`（v6 的时间），
+     *   而 logcat 里 `BaiChaReader` 一直在输出 ——
+     *   说明**文件写入路径整体失效**，只有 logcat 在工作。
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【修复：改用「应用专属外部目录」—— 零权限 + 可直接读】
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 路径：`/sdcard/Android/data/com.baicha.reader/files/logs/baicha-reader.log`
+     *
+     * 【为什么这个路径最优】
+     *   · **不需要任何权限**（Android 10+ 的 scoped storage 下，
+     *     app 对自己的 `Android/data/<pkg>/` 有完全读写权）
+     *   · **shell / 文件管理器可直接读**（不需要 `run-as`）
+     *   · **app 卸载前一直在**（不是内存缓冲，是真实文件）
+     *   · **进程被杀 / 崩溃也不丢**（每次写入后 flush）
+     *
+     * 【三级降级链】
+     *   ① 应用专属外部目录（首选，零权限 + 可读）
+     *   ② `/sdcard/Download/`（若 MANAGE_EXTERNAL_STORAGE 已授权）
+     *   ③ `context.filesDir/logs`（最终兜底，永远可写）
+     *
+     * 【写入策略 —— 「死掉了都不会丢」】
+     *   · 每条日志**立即 flush**（不是 buffer 满了才写）
+     *   · 用 `synchronized` 保证多线程写入不交错
+     *   · 单文件超限时**轮转**（`.log` → `.log.1`），不丢历史
      */
     fun init(context: Context) {
         if (!initialized.compareAndSet(false, true)) return
 
-        // ① 尝试外部存储
+        // ① 首选：应用专属外部目录（零权限，shell 可直接读）
         try {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            if (dir != null) {
+            val extDir = context.getExternalFilesDir(null)
+            if (extDir != null) {
+                val dir = File(extDir, "logs")
                 if (!dir.exists()) dir.mkdirs()
                 val f = File(dir, LOG_FILE_NAME)
-                // 测试可写
-                FileWriter(f, true).use { it.write("") }
+                FileWriter(f, true).use { it.write("") }   // 可写性测试
                 logFile = f
             }
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "external storage not writable: ${e.message}")
+            android.util.Log.w(TAG, "app-external dir not writable: ${e.message}")
         }
 
-        // ② 兜底：App 私有目录
+        // ② 次选：公共 Download（需要 MANAGE_EXTERNAL_STORAGE）
+        if (logFile == null) {
+            try {
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (dir != null) {
+                    if (!dir.exists()) dir.mkdirs()
+                    val f = File(dir, LOG_FILE_NAME)
+                    FileWriter(f, true).use { it.write("") }
+                    logFile = f
+                }
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "public Download not writable: ${e.message}")
+            }
+        }
+
+        // ③ 兜底：App 私有目录（永远可写）
         try {
             val dir = File(context.filesDir, "logs")
             if (!dir.exists()) dir.mkdirs()
@@ -262,7 +321,7 @@ object ReaderLog {
             android.util.Log.e(TAG, "fallback dir failed", e)
         }
 
-        // ③ 写启动分隔线
+        // ④ 写启动分隔线
         val startLine = "\n" + "=".repeat(70) + "\n" +
                 "白茶读屏启动 ${timeFormat.get()!!.format(Date())}\n" +
                 "=".repeat(70)

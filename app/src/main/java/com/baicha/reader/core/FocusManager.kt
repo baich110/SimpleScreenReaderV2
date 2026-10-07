@@ -92,6 +92,19 @@ class FocusManager(
 
         /** 触摸目标有效期 */
         private const val TOUCH_TARGET_TTL_MS = 3000L
+
+        /**
+         * searchFocus 的最大步数 —— 防环兜底
+         *
+         * 【TalkBack 对应】TalkBack 用 `seenNodes` 集合防环（无步数上限）。
+         *   本实现额外加步数上限：即使防环失效（节点内容 hash 碰撞等），
+         *   也不会在无障碍线程里死循环。
+         */
+        private const val MAX_SEARCH_STEPS = 500
+
+        /** searchFocus 诊断开关 */
+        @JvmStatic
+        var diagnoseSearch: Boolean = true
     }
 
     // ==================== 焦点记录（展开字段，非对象）====================
@@ -527,12 +540,105 @@ class FocusManager(
         lastDirection = direction
         navCount++
 
+        // ══════════════════════════════════════════════════════════════
+        // 【★ 2026-10-03 性能打点：定位「导航入口后卡死」】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【真机现象】日志停在 `导航入口: 下一个 / 模式=默认` 之后
+        //   47 秒无任何输出（07:54:18.011 → 07:55:05）。
+        //   `moveFocus` 内部在出结果前**没有任何日志** ⇒ 无法定位。
+        //
+        // 【本打点】在关键阶段记录「距进入 moveFocus 的毫秒数」，
+        //   卡在哪一步一眼可见。正常路径开销可忽略（几个 uptimeMillis）。
+        val t0 = SystemClock.uptimeMillis()
+        fun mark(stage: String) {
+            ReaderLog.d(TAG, "⏱ moveFocus[$stage] +${SystemClock.uptimeMillis() - t0}ms")
+        }
+        mark("进入")
+
         val root = service.rootInActiveWindow ?: run {
             ReaderLog.w(TAG, "moveFocus: 无活动窗口")
             return null
         }
+        mark("取root")
 
-        val current = getFocused()
+        // ══════════════════════════════════════════════════════════════
+        // 【★★★ 真机 P0 修复：触摸探索与逻辑导航的起点打通】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 【用户原话】（2026-10-03）
+        // > 你滑动本来就抓不到焦点，那我触摸带你去抓焦点嘛，对吧？
+        // > 那你执行的时候，你还是执行的是你抓不到的那个焦点，
+        // > 就是你滑动抓不到的那个焦点，不会说按照我的意思……
+        // > 我都带你找到新的焦点了，你还是不落回这个焦点，
+        // > 你还是停留在你滑动浏览时的那个旧焦点。
+        //
+        // 【真机日志铁证】（`/sdcard/Download/jitter2.txt`）
+        // ```
+        // 07:25:36.937 触摸: 编辑框                    ← 用户触摸摸到「编辑框」
+        // 07:25:37.111 触摸: 正在执行工具: super_admin:shell...
+        // 07:25:37.163 触摸: Response，白茶不语...
+        // 07:25:37.169 触摸: 白茶已开。现在你滑几下...
+        // 07:25:37.230 无障碍焦点: 菜单                ← ❌ 系统焦点还是「菜单」！
+        // 07:25:37.234 无障碍焦点: 菜单
+        // 07:25:38.123 无障碍焦点: 菜单
+        // ```
+        // 用户触摸了一串节点，但**无障碍焦点始终停在「菜单」**，
+        // 于是滑动导航从「菜单」出发 —— 完全无视用户的触摸意图。
+        //
+        // ══════════════════════════════════════════════════════════════
+        // 【为什么触摸设不上焦点】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 触摸摸到的多是**纯展示文本节点**（`TextView` / Compose 的
+        // `View`），它们 `focusable=false`、`clickable=false`。
+        // 对这类节点调 `ACTION_ACCESSIBILITY_FOCUS`，
+        // **系统会拒绝**（`performAction` 返回 false）——
+        // 无障碍焦点只能落在「可聚焦」节点上。
+        //
+        // 真机验证：`/home/baicha-reader/docs/ui-dump.xml` 里
+        // 38 个有文本节点中只有 3 个 `focusable=true`。
+        // ⇒ 触摸摸到的 35/38 个节点**根本无法设上系统焦点**。
+        //
+        // ══════════════════════════════════════════════════════════════
+        // 【天坦怎么做的 —— 触摸不设焦点，滑动优先用触摸点】
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 天坦 `M6/TouchFocusProcessor.java` 全文**没有**
+        // `performAction(ACTION_ACCESSIBILITY_FOCUS)` ——
+        // 触摸只做「播报 + 记录触摸节点」，**不设系统焦点**。
+        //
+        // 而滑动导航（`FocusProcessorForLogicalNavigation`）的起点
+        // 优先取**触摸记录的那个节点**，而不是系统焦点。
+        // ⇒ 用户「触摸到哪，就从哪继续滑」的直觉得以成立。
+        //
+        // ══════════════════════════════════════════════════════════════
+        // 【修复】起点选择：触摸节点（3 秒内）优先于系统焦点
+        // ══════════════════════════════════════════════════════════════
+        //
+        // 复用已有的 `touchNode` / `touchTime`（`focusForTouch` 里赋值），
+        // 时间窗用 `TOUCH_NODE_TTL_MS`（3 秒）——
+        // 与 `getOperationTarget()` 的既有语义一致（那里注释写「3 秒内」）。
+        //
+        // 【为什么要时间窗】触摸后过了很久再滑动，用户意图已经变了，
+        // 不该再被旧的触摸点绑架。
+        //
+        // 【为什么不用「触摸节点是否可聚焦」做门槛】
+        // 触摸节点常常不可聚焦（如上所述），但它仍是**用户意图的锚点** ——
+        // 遍历器会从它出发找「下一个可聚焦节点」，这正是我们想要的。
+        val touch = touchNode
+        val touchFresh = touch != null &&
+                (SystemClock.uptimeMillis() - touchTime) <= TOUCH_TARGET_TTL_MS &&
+                isValid(touch)
+        mark("触摸检查")
+
+        val current = if (touchFresh) {
+            trace.step("起点", passed = true, detail = "触摸节点优先 ${FocusTrace.describe(touch!!)}")
+            touch
+        } else {
+            getFocused()
+        }
+        mark("取起点")
 
         // 无焦点 → 取第一个
         if (current == null) {
@@ -577,14 +683,18 @@ class FocusManager(
         }
 
         // ★ ④ 搜索（走策略）
+        mark("搜索前")
         var target = searchFocus(current, forward, strategyType, root, filter)
+        mark("搜索后 target=${target != null}")
 
         // ★ ④ 搜索失败 → 递归重试（天坦 C1423r.s() 机制）
         if (target == null) {
             retryCount++
             trace.step("搜索", passed = false, detail = "首次无果，用默认策略重试")
             // 重试时强制用默认策略（避免策略本身导致的死路）
+            mark("重试前")
             target = searchFocus(current, forward, TraversalStrategyFactory.TYPE_DEFAULT, root, filter)
+            mark("重试后 target=${target != null}")
             if (target == null) {
                 // ══════════════════════════════════════════════════════════
                 // 【★ 本轮补：把「遍历无果」拆成**逐层原因**】
@@ -607,6 +717,7 @@ class FocusManager(
                 // 统计「访问了几个节点、各种拒绝原因各多少」，
                 // 并给出前几个被拒节点的**具体身份**（文本+角色）。
                 // 这是纯诊断，直接在无果时跑一次，正常路径零开销。
+                mark("诊断前")
                 val diagnosis = diagnoseTraversalFailure(
                     current = current,
                     forward = forward,
@@ -614,6 +725,7 @@ class FocusManager(
                     root = root,
                     filter = filter
                 )
+                mark("诊断后")
                 trace.reject(
                     "遍历无果",
                     "策略重试后仍未找到可聚焦节点（过滤=${filterDescription(filter)}）" +
@@ -686,7 +798,58 @@ class FocusManager(
     }
 
     /**
-     * 搜索下一个可聚焦节点 —— 对应天坦 C1427v.o()
+     * 搜索下一个可聚焦节点 —— **完全按 TalkBack `TraversalStrategyUtils.searchFocus()`**
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 【★★★ 真机 P0 修复：缺「循环直到满足 filter」】
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 【真机日志铁证】（v15）
+     * ```
+     * 08:07:43.155   next(「(无文本)」(EditText, ch=4)) → 「(无文本)」(View, ch=0)
+     * 08:07:43.162 ❌ 下一焦点 | 失败 ← 设焦点失败（performAction 返回 false）
+     *              搜索=「(无文本)」(?/View) 可达性=退到父节点
+     * ```
+     * 遍历器**走通了**（返回了 `View(ch=0)`），但那个节点**不可聚焦** ——
+     * `performAction(ACTION_ACCESSIBILITY_FOCUS)` 返回 false。
+     *
+     * 【根因】遍历器返回的是**未过滤**的节点（这是 TalkBack 的设计：
+     *   `OrderedTraversalController.findNext()` 只走链表，不管过滤）。
+     *   过滤必须由本函数**循环**完成：
+     *   「走一步 → 检查 filter → 不满足就继续走 → 直到满足或走到头」。
+     *
+     * 【TalkBack 原文】`TraversalStrategyUtils.java:456` 附近：
+     * ```java
+     * public static @Nullable AccessibilityNodeInfoCompat searchFocus(
+     *     TraversalStrategy traversalStrategy,
+     *     AccessibilityNodeInfoCompat currentFocus,
+     *     @TraversalStrategy.SearchDirection int direction,
+     *     Filter<AccessibilityNodeInfoCompat> nodeFilter) {
+     *   if (currentFocus == null) return null;
+     *
+     *   Set<AccessibilityNodeInfoCompat> seenNodes = new HashSet<>();
+     *   AccessibilityNodeInfoCompat targetNode = currentFocus;
+     *   do {
+     *     seenNodes.add(targetNode);
+     *     targetNode = traversalStrategy.findFocus(targetNode, direction);
+     *     if (seenNodes.contains(targetNode)) {
+     *       LogUtils.e(TAG, "Found duplicate during traversal: %s", targetNode);
+     *       return null;                        // ★ 防环
+     *     }
+     *   } while (targetNode != null && !nodeFilter.accept(targetNode));
+     *   return targetNode;
+     * }
+     * ```
+     *
+     * 【我原来的实现】
+     * ```kotlin
+     * return strategy.next(start, direction)   // ← 只走一步，不循环！
+     * ```
+     * 后果：第一步返回的节点如果不可聚焦，**直接失败** ——
+     * 而正确行为是「继续往后走，直到找到可聚焦的」。
+     * 这正是「明明树里有内容，却总是设焦点失败」的原因。
+     *
+     * 【修复】严格照抄 TalkBack 的 do-while 循环 + 防环。
      */
     private fun searchFocus(
         start: AccessibilityNodeInfo,
@@ -695,15 +858,38 @@ class FocusManager(
         root: AccessibilityNodeInfo,
         customFilter: ((AccessibilityNodeInfo) -> Boolean)? = null
     ): AccessibilityNodeInfo? {
-        val strategy = TraversalStrategyFactory.create(strategyType, root) { node ->
+        val accept: (AccessibilityNodeInfo) -> Boolean = { node ->
             if (customFilter != null) customFilter(node) else ShouldFocusNode.shouldFocus(node)
         }
+
+        val strategy = TraversalStrategyFactory.create(strategyType, root, accept)
         return try {
-            strategy.next(
-                start,
-                if (forward) TraversalStrategy.DIRECTION_NEXT
-                else TraversalStrategy.DIRECTION_PREVIOUS
-            )
+            val direction = if (forward) TraversalStrategy.DIRECTION_NEXT
+            else TraversalStrategy.DIRECTION_PREVIOUS
+
+            // ★ TalkBack 的 do-while：走一步 → 检查 filter → 不满足继续
+            var target: AccessibilityNodeInfo? = start
+            val seen = java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(32)
+            var steps = 0
+
+            do {
+                if (target == null) break
+                if (seen.put(target, true) != null) {
+                    ReaderLog.d(TAG, "searchFocus: 遍历中发现重复节点（环），退出")
+                    return null
+                }
+                target = strategy.next(target, direction)
+                steps++
+                if (steps > MAX_SEARCH_STEPS) {
+                    ReaderLog.w(TAG, "searchFocus: 超过 $MAX_SEARCH_STEPS 步，放弃")
+                    return null
+                }
+            } while (target != null && !accept(target))
+
+            if (diagnoseSearch) {
+                ReaderLog.d(TAG, "searchFocus: 走了 $steps 步 → ${target?.let { desc(it) } ?: "null"}")
+            }
+            target
         } finally {
             strategy.release()
         }

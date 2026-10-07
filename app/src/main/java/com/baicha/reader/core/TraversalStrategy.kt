@@ -60,22 +60,50 @@ interface TraversalStrategy {
 }
 
 /**
- * 默认遍历策略 —— 对应天坦 d7/C1424s
+ * 默认遍历策略 —— **完全按 TalkBack 实现**
  *
- * 【天坦原版内部用的是 C1410e 迭代器，它和 C1423r 共用同一套：
- *   排序（C1423r.a.q）、可聚焦判定（a()）】
+ * ══════════════════════════════════════════════════════════════════
+ * 【★★★ 2026-10-03 重写：从天坦模型换成 TalkBack 模型】
+ * ══════════════════════════════════════════════════════════════════
  *
- * 本实现直接走 TatansTraversal（C1423r 的移植），
- * 因为 TatansTraversal 已经是完整的迭代实现。
+ * 【用户原话】
+ * > 完全按照 TalkBack 重写遍历器
+ *
+ * 【旧实现（天坦 C1424s）的致命问题】
+ *   底层是 `TatansTraversal`，每次 `next()` 都重新上溯，
+ *   **依赖 `AccessibilityNodeInfo.getParent()`**。
+ *   Compose 界面上 `getParent()` 返回 null ⇒ 上溯链断 ⇒ `访问 0`
+ *   ⇒ 用户感知「完全拿不到焦点」。
+ *
+ * 【新实现（TalkBack OrderedTraversalStrategy）】
+ *   底层是 [TalkBackTraversal]，**一次性建树**，
+ *   遍历时纯链表操作，**完全不碰 `getParent()`**。
+ *
+ * 【与 TalkBack 的对应】
+ *   · `OrderedTraversalStrategy` → 本类
+ *   · `OrderedTraversalController` → [TalkBackTraversal]
+ *   · `WorkingTree` → [TalkBackTraversal.WorkingTree]
+ *
+ * 【start() 的语义修正】
+ *   TalkBack 的 `focusFirst(root, direction)`：
+ *   ```java
+ *   if (direction == SEARCH_FOCUS_FORWARD) {
+ *     return controller.findFirst(root);     // 返回 root 对应的 WorkingTree 节点
+ *   } else if (direction == SEARCH_FOCUS_BACKWARD) {
+ *     return controller.findLast(root);      // 返回 root 的最后一个后代
+ *   }
+ *   ```
+ *   **FORWARD 返回 root 本身**，BACKWARD 返回 root 的最后一个后代。
+ *   这与旧实现（`root` / `traversal.previous(root)`）语义一致，
+ *   但新实现不依赖 `previous()` 的上溯。
  */
 class DefaultTraversalStrategy(
     private val root: AccessibilityNodeInfo?,
     private val filter: (AccessibilityNodeInfo) -> Boolean
 ) : TraversalStrategy {
 
-    private val traversal = TatansTraversal(root).apply {
-        setFilter(filter)
-    }
+    /** TalkBack 遍历引擎（懒建树） */
+    private val traversal = TalkBackTraversal(root)
 
     override fun next(node: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
         return if (direction == TraversalStrategy.DIRECTION_NEXT) {
@@ -85,17 +113,31 @@ class DefaultTraversalStrategy(
         }
     }
 
+    /**
+     * 定位起始 —— 对应 TalkBack `focusFirst(root, direction)`
+     *
+     * ```java
+     * public @Nullable AccessibilityNodeInfoCompat focusFirst(
+     *     AccessibilityNodeInfoCompat root, @SearchDirection int direction) {
+     *   if (direction == SEARCH_FOCUS_FORWARD) {
+     *     return controller.findFirst(root);      // = tree.getNode()  ← root 自己
+     *   } else if (direction == SEARCH_FOCUS_BACKWARD) {
+     *     return controller.findLast(root);       // = tree.getLastNode().getNode()
+     *   }
+     *   return null;
+     * }
+     * ```
+     */
     override fun start(root: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
-        // 天坦 C1424s.c()：direction == 1 时返回节点副本本身
         return if (direction == TraversalStrategy.DIRECTION_NEXT) {
-            root
+            traversal.first() ?: root
         } else {
-            traversal.previous(root)
+            traversal.last() ?: root
         }
     }
 
     override fun release() {
-        // TatansTraversal 无显式释放（天坦的 x0() 也是空实现）
+        traversal.release()
     }
 }
 
